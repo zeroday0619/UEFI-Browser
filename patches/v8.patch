@@ -1,0 +1,64 @@
+--- a/.gn
++++ b/.gn
+@@ -10,9 +10,9 @@
+ # The hermetic Python interpreter to use by default. Platforms without a
+ # hermetic CPython CIPD package fallback to the system python3 on $PATH.
+ if (host_cpu == "s390x" || host_cpu == "ppc64" || host_os == "zos") {
+-  script_executable = "python3"
++  script_executable = "/usr/bin/python3"
+ } else {
+-  script_executable = "//third_party/cpython3/host/bin/python3"
++  script_executable = "/usr/bin/python3"
+ }
+ 
+ # These are the targets to check headers for by default. The files in targets
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -7867,6 +7867,9 @@
+   data_deps = []
+ 
+   defines = []
++  if (use_uefi_runtime) {
++    defines += [ "V8_UEFI_RUNTIME" ]
++  }
+ 
+   if (is_component_build) {
+     defines = [ "BUILDING_V8_BASE_SHARED" ]
+--- a/src/base/numbers/bignum.cc
++++ b/src/base/numbers/bignum.cc
+@@ -3,6 +3,7 @@
+ // found in the LICENSE file.
+ 
+ #include "src/base/numbers/bignum.h"
++#include <algorithm>
+ 
+ #include <string_view>
+ 
+--- a/src/base/platform/platform-posix.cc
++++ b/src/base/platform/platform-posix.cc
+@@ -704,7 +704,13 @@
+ }
+ 
+ // static
+-bool OS::CanReserveAddressSpace() { return true; }
++bool OS::CanReserveAddressSpace() {
++#if defined(V8_UEFI_RUNTIME)
++  return false;
++#else
++  return true;
++#endif
++}
+ 
+ // static
+ std::optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
+@@ -772,7 +778,9 @@
+ #if !V8_OS_ZOS
+ // static
+ bool OS::HasLazyCommits() {
+-#if V8_OS_AIX || V8_OS_LINUX || V8_OS_DARWIN
++#if defined(V8_UEFI_RUNTIME)
++  return false;
++#elif V8_OS_AIX || V8_OS_LINUX || V8_OS_DARWIN
+   return true;
+ #else
+   // TODO(bbudge) Return true for all POSIX platforms.

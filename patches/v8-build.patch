@@ -1,0 +1,61 @@
+diff --git a/config/BUILDCONFIG.gn b/config/BUILDCONFIG.gn
+index a8dcb4d..7904c5c 100644
+--- a/config/BUILDCONFIG.gn
++++ b/config/BUILDCONFIG.gn
+@@ -123,6 +123,10 @@ if (current_os == "") {
+ #   even if the value is overridden, which is wasteful. See first bullet.
+ 
+ declare_args() {
++  # The firmware payload uses an eager, single-threaded platform runtime.
++  use_uefi_runtime = false
++  uefi_musl_include_directories = []
++
+   # Set to enable the official build level of optimization. This has nothing
+   # to do with branding, but enables an additional level of optimization above
+   # release (!is_debug). This might be better expressed as a tri-state
+diff --git a/config/clang/BUILD.gn b/config/clang/BUILD.gn
+index 5488e4c..cbae94d 100644
+--- a/config/clang/BUILD.gn
++++ b/config/clang/BUILD.gn
+@@ -209,7 +209,8 @@ template("clang_lib") {
+         _dir = "darwin"
+       } else if (is_linux || is_chromeos) {
+         if (current_cpu == "x64") {
+-          _dir = "x86_64-unknown-linux-gnu"
++          _dir = "linux"
++          _suffix = "-x86_64"
+         } else if (current_cpu == "x86") {
+           _dir = "i386-unknown-linux-gnu"
+         } else if (current_cpu == "arm") {
+diff --git a/config/compiler/BUILD.gn b/config/compiler/BUILD.gn
+index d0b1e80..0e81508 100644
+--- a/config/compiler/BUILD.gn
++++ b/config/compiler/BUILD.gn
+@@ -343,6 +343,15 @@ config("compiler") {
+   defines = []
+   configs = []
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain &&
++      uefi_musl_include_directories != []) {
++    cflags += [ "-nostdinc" ]
++    foreach(directory, uefi_musl_include_directories) {
++      cflags += [ "-idirafter", directory ]
++    }
++    defines += [ "ANDROID_HOST_MUSL" ]
++  }
++
+   # System-specific flags. If your compiler flags apply to one of the
+   # categories here, add it to the associated file to keep this shared config
+   # smaller.
+@@ -444,7 +453,10 @@ config("compiler") {
+     # problems. Therefore, we only enable one or the other. Clang advertises SCS
+     # as a stronger alternative to StackProtector, so we give SCS precedence
+     # over SP.
+-    if (enable_shadow_call_stack) {
++    if (use_uefi_runtime) {
++      assert(current_cpu == "x64")
++      cflags += [ "-fno-stack-protector", "-mno-red-zone" ]
++    } else if (enable_shadow_call_stack) {
+       # On Aarch64, SCS requires the x18 register to be unused because it will
+       # hold a pointer to the shadow stack. For Android we know that Clang
+       # doesn't use x18 by default. On other OSs adding "-ffixed-x18" might be

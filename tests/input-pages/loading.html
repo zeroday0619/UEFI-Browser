@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>Firmware input integration</title>
+<style>body{font:24px sans-serif;margin:40px}input,button,a{font:24px sans-serif}input{position:absolute;left:40px;top:100px;width:300px;height:50px}button{position:absolute;left:400px;top:100px;width:250px;height:56px}a{position:absolute;left:40px;top:210px}#new{top:270px}#status{position:absolute;top:330px}#cancel{position:absolute;top:420px;background:#ddd;width:450px;height:100px}#bottom{margin-top:1800px}#nested{position:absolute;left:800px;top:100px;width:350px;height:250px;overflow:auto;background:#def}#nested div{height:1200px}</style>
+<h1>UEFI input integration fixture</h1>
+<input id="text" aria-label="Text input" autocomplete="off"><button id="button">Activate</button>
+<a href="second.html">Navigate to second page</a><a id="new" target="_blank" href="third.html">Open requested window</a>
+<p id="status">Waiting for input</p><div id="cancel">Wheel cancellation target</div><p id="bottom">Bottom anchor</p>
+<section id="nested"><div>Nested scroll target</div></section>
+<a href="#bottom" style="top:380px">Bottom fragment</a>
+<script>
+console.log("INPUT_TEST first document loaded");
+const field=document.getElementById('text');
+field.addEventListener('input',()=>console.log('INPUT_TEST text='+field.value));
+field.addEventListener('keydown',e=>console.log('INPUT_TEST key='+e.key));
+document.getElementById('button').onclick=()=>{document.getElementById('status').textContent='Button activated';console.log('INPUT_TEST button activated')};
+document.getElementById('cancel').addEventListener('wheel',e=>{e.preventDefault();console.log('INPUT_TEST wheel cancelled')},{passive:false});
+document.getElementById('nested').addEventListener('scroll',e=>console.log('INPUT_TEST nested scroll='+e.target.scrollTop));
+window.addEventListener('scroll',()=>console.log('INPUT_TEST document scroll='+window.scrollY));
+</script>
+<button id="start" style="left:400px;top:220px">Start delayed load</button>
+<script>
+document.getElementById('start').onclick=()=>{console.log('LOADING started');fetch('/held-data').then(r=>r.text()).then(text=>console.log('LOADING '+text)).catch(error=>console.log('LOADING failed '+error));};
+</script>

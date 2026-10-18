@@ -1,0 +1,51 @@
+# C/C++ objects use the existing UEFI musl ABI. Host generators remain Linux
+# executables. Rust and final library linkage still require porting.
+use_uefi_runtime = true
+custom_toolchain = "//build/toolchain/uefi:x64"
+host_toolchain = "//build/toolchain/linux:clang_x64"
+v8_snapshot_toolchain = "//build/toolchain/linux:clang_x64"
+v8_enable_sandbox = false
+v8_enable_pointer_compression = false
+v8_enable_webassembly = false
+v8_enable_maglev = false
+v8_enable_turbofan = false
+v8_enable_sparkplug = true
+v8_jitless = false
+v8_use_external_startup_data = false
+v8_use_metagen = false
+v8_enable_temporal_support = false
+cppgc_enable_caged_heap = false
+cppgc_enable_young_generation = false
+cppgc_enable_pointer_compression = false
+uefi_musl_include_directories = [
+  "@WORKSPACE@/outputs/chromium-uefi/build/musl/uapi",
+  "@CLANG_RESOURCE@/include",
+  "@WORKSPACE@/outputs/chromium-uefi/build/musl/libc/obj/include",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/include",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/x86_64",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/generic",
+]
+
+# The payload already owns malloc through the UEFI pool allocator. Chromium
+# must not interpose glibc allocation symbols over the musl runtime.
+use_allocator_shim = false
+use_partition_alloc_as_malloc = false
+enable_backup_ref_ptr_support = false
+enable_dangling_raw_ptr_checks = false
+
+# The UEFI payload cannot open an external ICU data file.
+icu_use_data_file = false
+
+# Firmware transport does not use desktop proxy settings or Kerberos.
+use_gio = false
+use_kerberos = false
+use_nss_client_certs = false
+use_nss_server_certs = false
+
+# CPU raster presentation does not require a Vulkan software driver.
+enable_swiftshader = false
+
+# Firmware input does not use the Linux xkbcommon library.
+use_xkbcommon = false
+# GOP supplies the framebuffer without Linux PCI enumeration.
+use_libpci = false

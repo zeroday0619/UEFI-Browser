@@ -1,0 +1,141 @@
+diff --git a/OvmfPkg/VirtioInputDxe/VirtioMouse.c b/OvmfPkg/VirtioInputDxe/VirtioMouse.c
+--- a/OvmfPkg/VirtioInputDxe/VirtioMouse.c
++++ b/OvmfPkg/VirtioInputDxe/VirtioMouse.c
+@@ -50,6 +50,20 @@
+   )
+ {
+   switch (Event->Type) {
++    case EV_SYN:
++      if ((Event->Code == 0) && Dev->PointerPending) {
++        ASSERT (Dev->PointerCount < ARRAY_SIZE (Dev->PointerReports));
++        CopyMem (&Dev->PointerReports[(Dev->PointerHead + Dev->PointerCount) % ARRAY_SIZE (Dev->PointerReports)],
++                 &Dev->PointerState, sizeof (Dev->PointerState));
++        Dev->PointerCount++;
++        Dev->PointerState.RelativeMovementX = 0;
++        Dev->PointerState.RelativeMovementY = 0;
++        Dev->PointerState.RelativeMovementZ = 0;
++        Dev->PointerPending = FALSE;
++        Dev->PointerReady = TRUE;
++      }
++      break;
++
+     case EV_KEY:
+       switch (Event->Code) {
+         case BTN_LEFT:
+@@ -64,7 +78,7 @@
+           break;
+       }
+ 
+-      Dev->PointerReady = TRUE;
++      Dev->PointerPending = TRUE;
+       break;
+ 
+     case EV_REL:
+@@ -89,7 +103,7 @@
+           break;
+       }
+ 
+-      Dev->PointerReady = TRUE;
++      Dev->PointerPending = TRUE;
+       break;
+ 
+     default:
+@@ -115,6 +129,9 @@
+   OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
+   ZeroMem (&Dev->PointerState, sizeof (Dev->PointerState));
+   Dev->PointerReady = FALSE;
++  Dev->PointerPending = FALSE;
++  Dev->PointerHead = 0;
++  Dev->PointerCount = 0;
+   gBS->RestoreTPL (OldTpl);
+ 
+   return EFI_SUCCESS;
+@@ -139,21 +156,18 @@
+ 
+   Dev = VIRTIO_INPUT_FROM_POINTER_THIS (This);
+ 
+-  if (!Dev->PointerReady) {
++  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
++  if (Dev->PointerCount == 0) {
++    gBS->RestoreTPL (OldTpl);
+     return EFI_NOT_READY;
+   }
+ 
+-  OldTpl = gBS->RaiseTPL (TPL_NOTIFY);
+-
+-  CopyMem (State, &Dev->PointerState, sizeof (*State));
+-
+-  //
+-  // Clear mouse state
+-  //
+-  Dev->PointerState.RelativeMovementX = 0;
+-  Dev->PointerState.RelativeMovementY = 0;
+-  Dev->PointerState.RelativeMovementZ = 0;
+-  Dev->PointerReady                   = FALSE;
++  // Report boundaries preserve button transitions even when several reports
++  // arrive before the consumer runs.
++  CopyMem (State, &Dev->PointerReports[Dev->PointerHead], sizeof (*State));
++  Dev->PointerHead = (Dev->PointerHead + 1) % ARRAY_SIZE (Dev->PointerReports);
++  Dev->PointerCount--;
++  Dev->PointerReady = Dev->PointerCount != 0;
+ 
+   gBS->RestoreTPL (OldTpl);
+ 
+@@ -221,6 +235,9 @@
+ 
+   ZeroMem (&Dev->PointerState, sizeof (Dev->PointerState));
+   Dev->PointerReady = FALSE;
++  Dev->PointerPending = FALSE;
++  Dev->PointerHead = 0;
++  Dev->PointerCount = 0;
+ 
+   //
+   // Setup the WaitForInput event
+diff --git a/OvmfPkg/VirtioInputDxe/VirtioInput.c b/OvmfPkg/VirtioInputDxe/VirtioInput.c
+--- a/OvmfPkg/VirtioInputDxe/VirtioInput.c
++++ b/OvmfPkg/VirtioInputDxe/VirtioInput.c
+@@ -391,6 +391,10 @@
+   EFI_TPL             OldTpl;
+ 
+   for ( ; ; ) {
++    // Backpressure retains unread device reports instead of dropping edges.
++    if (Dev->HasMouse && (Dev->PointerCount == ARRAY_SIZE (Dev->PointerReports))) {
++      return;
++    }
+     HasData = VirtioInputRingGetBuffer (Dev, 0, Data, &DataSize);
+ 
+     // Exit if no new data
+@@ -408,7 +412,9 @@
+ 
+     switch (Event.Type) {
+       case EV_SYN:
+-        // Sync event received
++        if (Dev->HasMouse) {
++          VirtioMouseHandleEvent (Dev, &Event);
++        }
+         break;
+ 
+       case EV_KEY:
+diff --git a/OvmfPkg/VirtioInputDxe/VirtioInput.h b/OvmfPkg/VirtioInputDxe/VirtioInput.h
+--- a/OvmfPkg/VirtioInputDxe/VirtioInput.h
++++ b/OvmfPkg/VirtioInputDxe/VirtioInput.h
+@@ -27,7 +27,7 @@
+ #define RX_BUFSIZE  64
+ 
+ // Fetch new input from VirtIO every 50ms
+-#define PROBE_TIME_MS  50
++#define PROBE_TIME_MS  5
+ 
+ // Max range of recognized keyboard codes
+ #define MAX_KEYBOARD_CODE  (BTN_MISC - 1)
+@@ -92,6 +92,10 @@
+   EFI_SIMPLE_POINTER_MODE              PointerMode;
+   EFI_SIMPLE_POINTER_STATE             PointerState;
+   BOOLEAN                              PointerReady;
++  BOOLEAN                              PointerPending;
++  UINTN                                PointerHead;
++  UINTN                                PointerCount;
++  EFI_SIMPLE_POINTER_STATE             PointerReports[256];
+ 
+   // Tablet implementation
+   BOOLEAN                              HasTablet;

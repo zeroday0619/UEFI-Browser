@@ -1,0 +1,41 @@
+# This configuration checks the embedding API on the build host. It is not
+# the firmware target and must not be linked into the UEFI payload.
+is_debug = false
+is_component_build = false
+use_sysroot = false
+clang_base_path = "/usr"
+clang_use_chrome_plugins = false
+use_custom_libcxx = true
+use_siso = false
+use_remoteexec = false
+symbol_level = 0
+treat_warnings_as_errors = false
+use_glib = false
+use_dbus = false
+use_udev = false
+use_alsa = false
+use_pulseaudio = false
+use_cups = false
+ozone_platform_wayland = false
+ozone_platform_x11 = false
+ozone_platform_headless = true
+use_crash_key_stubs = true
+clang_version = "23"
+
+# The integration path paints through Skia raster surfaces.
+skia_use_dawn = false
+angle_enable_vulkan = false
+angle_enable_gl = false
+use_mold = false
+use_lld = true
+use_llvm_libatomic = false
+use_clang_modules = false
+
+uefi_host_clang_runtime_directory = "linux"
+uefi_host_clang_runtime_suffix = "-x86_64"
+
+# Firmware presentation uses CPU rasterization and GOP.
+dawn_enable_desktop_gl = false
+dawn_enable_opengles = false
+dawn_enable_vulkan = false
+dawn_use_swiftshader = false

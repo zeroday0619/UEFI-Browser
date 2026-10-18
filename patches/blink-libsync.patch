@@ -1,0 +1,77 @@
+diff --git a/include/android/sync.h b/include/android/sync.h
+index 32bb878..59a8f9f 100644
+--- a/include/android/sync.h
++++ b/include/android/sync.h
+@@ -39,11 +39,15 @@
+ 
+ #include "../ndk/sync.h"
+ 
+-__BEGIN_DECLS
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ /* timeout in msecs */
+ int sync_wait(int fd, int timeout);
+ 
+-__END_DECLS
++#ifdef __cplusplus
++}
++#endif
+ 
+ #endif /* __SYS_CORE_SYNC_H */
+diff --git a/include/ndk/sync.h b/include/ndk/sync.h
+index 38ccb68..04c8e07 100644
+--- a/include/ndk/sync.h
++++ b/include/ndk/sync.h
+@@ -27,11 +27,12 @@
+ #define ANDROID_SYNC_H
+ 
+ #include <stdint.h>
+-#include <sys/cdefs.h>
+ 
+ #include <linux/sync_file.h>
+ 
+-__BEGIN_DECLS
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ /* Fences indicate the status of an asynchronous task. They are initially
+  * in unsignaled state (0), and make a one-time transition to either signaled
+@@ -99,7 +100,9 @@ static inline struct sync_fence_info* sync_get_fence_info(const struct sync_file
+  */
+ void sync_file_info_free(struct sync_file_info* info) __INTRODUCED_IN(26);
+ 
+-__END_DECLS
++#ifdef __cplusplus
++}
++#endif
+ 
+ #endif /* ANDROID_SYNC_H */
+ 
+diff --git a/sw_sync.h b/sw_sync.h
+index fda1c4c..395c380 100644
+--- a/sw_sync.h
++++ b/sw_sync.h
+@@ -19,7 +19,9 @@
+ #ifndef __SYS_CORE_SW_SYNC_H
+ #define __SYS_CORE_SW_SYNC_H
+ 
+-__BEGIN_DECLS
++#ifdef __cplusplus
++extern "C" {
++#endif
+ 
+ /*
+  * sw_sync is mainly intended for testing and should not be compiled into
+@@ -30,6 +32,8 @@ int sw_sync_timeline_create(void);
+ int sw_sync_timeline_inc(int fd, unsigned count);
+ int sw_sync_fence_create(int fd, const char *name, unsigned value);
+ 
+-__END_DECLS
++#ifdef __cplusplus
++}
++#endif
+ 
+ #endif /* __SYS_CORE_SW_SYNC_H */

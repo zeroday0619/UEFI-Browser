@@ -1,0 +1,175 @@
+diff --git a/NetworkPkg/HttpDxe/HttpDns.c b/NetworkPkg/HttpDxe/HttpDns.c
+index 13cbde0..6c08b27 100644
+--- a/NetworkPkg/HttpDxe/HttpDns.c
++++ b/NetworkPkg/HttpDxe/HttpDns.c
+@@ -151,6 +151,7 @@ HttpDns4 (
+   }
+ 
+   while (!IsDone) {
++    BrowserYield ();
+     Dns4->Poll (Dns4);
+   }
+ 
+@@ -353,6 +354,7 @@ HttpDns6 (
+   }
+ 
+   while (!IsDone) {
++    BrowserYield ();
+     Dns6->Poll (Dns6);
+   }
+ 
+diff --git a/NetworkPkg/HttpDxe/HttpDriver.c b/NetworkPkg/HttpDxe/HttpDriver.c
+index f6d1263..69e6aaa 100644
+--- a/NetworkPkg/HttpDxe/HttpDriver.c
++++ b/NetworkPkg/HttpDxe/HttpDriver.c
+@@ -358,7 +358,7 @@ HttpDxeStart (
+   //
+   Status = gBS->OpenProtocol (
+                   ControllerHandle,
+-                  &gEfiHttpServiceBindingProtocolGuid,
++                  &mBrowserHttpBinding,
+                   (VOID **)&ServiceBinding,
+                   This->DriverBindingHandle,
+                   ControllerHandle,
+@@ -380,7 +380,7 @@ HttpDxeStart (
+     //
+     Status = gBS->InstallMultipleProtocolInterfaces (
+                     &ControllerHandle,
+-                    &gEfiHttpServiceBindingProtocolGuid,
++                    &mBrowserHttpBinding,
+                     &HttpService->ServiceBinding,
+                     NULL
+                     );
+@@ -467,7 +467,7 @@ ON_ERROR:
+     HttpCleanService (HttpService, UsingIpv6);
+     Status = gBS->UninstallMultipleProtocolInterfaces (
+                     &ControllerHandle,
+-                    &gEfiHttpServiceBindingProtocolGuid,
++                    &mBrowserHttpBinding,
+                     &HttpService->ServiceBinding,
+                     NULL
+                     );
+@@ -534,7 +534,7 @@ HttpDxeStop (
+ 
+   Status = gBS->OpenProtocol (
+                   NicHandle,
+-                  &gEfiHttpServiceBindingProtocolGuid,
++                  &mBrowserHttpBinding,
+                   (VOID **)&ServiceBinding,
+                   This->DriverBindingHandle,
+                   NicHandle,
+@@ -564,7 +564,7 @@ HttpDxeStop (
+       if ((HttpService->Tcp4ChildHandle == NULL) && (HttpService->Tcp6ChildHandle == NULL)) {
+         gBS->UninstallProtocolInterface (
+                NicHandle,
+-               &gEfiHttpServiceBindingProtocolGuid,
++               &mBrowserHttpBinding,
+                ServiceBinding
+                );
+         FreePool (HttpService);
+diff --git a/NetworkPkg/HttpDxe/HttpDriver.h b/NetworkPkg/HttpDxe/HttpDriver.h
+index 21d0f33..af34464 100644
+--- a/NetworkPkg/HttpDxe/HttpDriver.h
++++ b/NetworkPkg/HttpDxe/HttpDriver.h
+@@ -399,3 +399,18 @@ HttpServiceBindingDestroyChild (
+   IN EFI_SERVICE_BINDING_PROTOCOL  *This,
+   IN EFI_HANDLE                    ChildHandle
+   );
++
++#ifndef UEFI_BROWSER_COOPERATIVE_H
++#define UEFI_BROWSER_COOPERATIVE_H
++STATIC EFI_GUID __attribute__((unused)) mBrowserHttpBinding = {0xc1493c30,0x94c5,0x49b3,{0x94,0xe4,0xac,0xb5,0x02,0x39,0x11,0x81}};
++STATIC inline VOID BrowserYield (VOID) {
++  EFI_GUID Identifier = {0x38bed393,0x2ced,0x41da,{0x8d,0x01,0x78,0x72,0xbc,0x62,0xde,0x24}};
++  typedef struct { VOID (EFIAPI *Yield)(VOID); } YIELD_PROTOCOL;
++  YIELD_PROTOCOL *Protocol;
++  EFI_TPL Previous = gBS->RaiseTPL (TPL_HIGH_LEVEL);
++  gBS->RestoreTPL (Previous);
++  // Suspending firmware at elevated TPL would prevent the renderer from making progress.
++  if (Previous != TPL_APPLICATION) return;
++  if (!EFI_ERROR (gBS->LocateProtocol (&Identifier, NULL, (VOID **)&Protocol))) Protocol->Yield ();
++}
++#endif
+diff --git a/NetworkPkg/HttpDxe/HttpProto.c b/NetworkPkg/HttpDxe/HttpProto.c
+index 9fac19a..0306855 100644
+--- a/NetworkPkg/HttpDxe/HttpProto.c
++++ b/NetworkPkg/HttpDxe/HttpProto.c
+@@ -974,6 +974,7 @@ HttpCreateConnection (
+     }
+ 
+     while (!HttpInstance->IsTcp4ConnDone) {
++      BrowserYield ();
+       HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
+     }
+ 
+@@ -989,6 +990,7 @@ HttpCreateConnection (
+     }
+ 
+     while (!HttpInstance->IsTcp6ConnDone) {
++      BrowserYield ();
+       HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
+     }
+ 
+@@ -1028,6 +1030,7 @@ HttpCloseConnection (
+       }
+ 
+       while (!HttpInstance->IsTcp6CloseDone) {
++        BrowserYield ();
+         HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
+       }
+     } else {
+@@ -1039,6 +1042,7 @@ HttpCloseConnection (
+       }
+ 
+       while (!HttpInstance->IsTcp4CloseDone) {
++        BrowserYield ();
+         HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
+       }
+     }
+@@ -1907,6 +1911,7 @@ HttpTcpReceiveHeader (
+         }
+ 
+         while (!HttpInstance->IsRxDone && ((Timeout == NULL) || EFI_ERROR (gBS->CheckEvent (Timeout)))) {
++          BrowserYield ();
+           Tcp4->Poll (Tcp4);
+         }
+ 
+@@ -2007,6 +2012,7 @@ HttpTcpReceiveHeader (
+         }
+ 
+         while (!HttpInstance->IsRxDone && ((Timeout == NULL) || EFI_ERROR (gBS->CheckEvent (Timeout)))) {
++          BrowserYield ();
+           Tcp6->Poll (Tcp6);
+         }
+ 
+diff --git a/NetworkPkg/HttpDxe/HttpsSupport.c b/NetworkPkg/HttpDxe/HttpsSupport.c
+index 4527cc6..504985b 100644
+--- a/NetworkPkg/HttpDxe/HttpsSupport.c
++++ b/NetworkPkg/HttpDxe/HttpsSupport.c
+@@ -827,6 +827,7 @@ TlsCommonTransmit (
+     }
+ 
+     while (!HttpInstance->TlsIsTxDone) {
++      BrowserYield ();
+       HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
+     }
+ 
+@@ -859,6 +860,7 @@ TlsCommonTransmit (
+     }
+ 
+     while (!HttpInstance->TlsIsTxDone) {
++      BrowserYield ();
+       HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
+     }
+ 
+@@ -961,8 +963,10 @@ TlsCommonReceive (
+       // Poll until some data is received or an error occurs.
+       //
+       if (!HttpInstance->LocalAddressIsIPv6) {
++        BrowserYield ();
+         HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
+       } else {
++        BrowserYield ();
+         HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
+       }
+     }

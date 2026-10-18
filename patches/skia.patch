@@ -1,0 +1,118 @@
+--- a/src/core/SkSemaphore.cpp
++++ b/src/core/SkSemaphore.cpp
+@@ -9,7 +9,18 @@
+ 
+ #include "include/private/SkFeatures.h" // IWYU pragma: keep
+ 
+-#if defined(SK_BUILD_FOR_MAC) || defined(SK_BUILD_FOR_IOS)
++#if defined(SK_BUILD_FOR_UEFI)
++    #include <cstdlib>
++    struct SkSemaphore::OSSemaphore {
++        int count = 0;
++        void signal(int number) { count += number; }
++        void wait() {
++            // Blocking on the sole execution thread cannot make progress.
++            if (count == 0) { std::abort(); }
++            --count;
++        }
++    };
++#elif defined(SK_BUILD_FOR_MAC) || defined(SK_BUILD_FOR_IOS)
+     #include <dispatch/dispatch.h>
+ 
+     struct SkSemaphore::OSSemaphore {
+--- a/src/sksl/SkSLPool.cpp
++++ b/src/sksl/SkSLPool.cpp
+@@ -13,7 +13,12 @@
+ 
+ namespace SkSL {
+ 
++#if defined(SK_BUILD_FOR_UEFI)
++// The firmware embedder runs Skia on one execution thread.
++static MemoryPool* sMemPool = nullptr;
++#else
+ static thread_local MemoryPool* sMemPool = nullptr;
++#endif
+ 
+ static MemoryPool* get_thread_local_memory_pool() {
+     return sMemPool;
+--- a/src/sksl/SkSLString.cpp
++++ b/src/sksl/SkSLString.cpp
+@@ -15,29 +15,17 @@
+ #include <cstdlib>
+ #include <locale>
+ #include <memory>
+-#include <sstream>
++#include <charconv>
+ #include <string>
+ #include <string_view>
+ 
+ template <typename RoundtripType, int kFullPrecision>
+ static std::string to_string_impl(RoundtripType value) {
+-    std::stringstream buffer;
+-    buffer.imbue(std::locale::classic());
+-    buffer.precision(7);
+-    buffer << value;
+-    std::string text = buffer.str();
+-
+-    double roundtripped;
+-    buffer >> roundtripped;
+-    if (value != (RoundtripType)roundtripped && std::isfinite(value)) {
+-        buffer.str({});
+-        buffer.clear();
+-        buffer.precision(kFullPrecision);
+-        buffer << value;
+-        text = buffer.str();
+-        SkASSERTF((buffer >> roundtripped, value == (RoundtripType)roundtripped),
+-                  "%.17g -> %s -> %.17g", value, text.c_str(), roundtripped);
+-    }
++    char buffer[128];
++    auto result = std::to_chars(buffer, buffer + sizeof(buffer), value,
++                                std::chars_format::general, kFullPrecision);
++    if (result.ec != std::errc()) { std::abort(); }
++    std::string text(buffer, result.ptr);
+ 
+     // We need to emit a decimal point to distinguish floats from ints.
+     if (!skstd::contains(text, '.') && !skstd::contains(text, 'e')) {
+@@ -56,11 +44,9 @@
+ }
+ 
+ bool SkSL::stod(std::string_view s, SKSL_FLOAT* value) {
+-    std::string str(s.data(), s.size());
+-    std::stringstream buffer(str);
+-    buffer.imbue(std::locale::classic());
+-    buffer >> *value;
+-    return !buffer.fail() && std::isfinite(*value);
++    auto result = std::from_chars(s.data(), s.data() + s.size(), *value);
++    return result.ec == std::errc() && result.ptr == s.data() + s.size() &&
++           std::isfinite(*value);
+ }
+ 
+ bool SkSL::stoi(std::string_view s, SKSL_INT* value) {
+--- a/src/sksl/tracing/SkSLDebugTracePriv.cpp
++++ b/src/sksl/tracing/SkSLDebugTracePriv.cpp
+@@ -12,7 +12,7 @@
+ 
+ #include <cstdio>
+ #include <cstring>
+-#include <sstream>
++
+ #include <string>
+ 
+ namespace SkSL {
+@@ -84,10 +84,12 @@
+ 
+ void DebugTracePriv::setSource(const std::string& source) {
+     fSource.clear();
+-    std::stringstream stream{source};
+-    while (stream.good()) {
+-        fSource.push_back({});
+-        std::getline(stream, fSource.back(), '\n');
++    size_t start = 0;
++    for (;;) {
++        size_t end = source.find('\n', start);
++        fSource.push_back(source.substr(start, end == std::string::npos ? end : end - start));
++        if (end == std::string::npos) { break; }
++        start = end + 1;
+     }
+ }
+ 

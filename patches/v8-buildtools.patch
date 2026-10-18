@@ -1,0 +1,39 @@
+diff --git a/third_party/libc++/BUILD.gn b/third_party/libc++/BUILD.gn
+index e459bcb..b58429f 100644
+--- a/third_party/libc++/BUILD.gn
++++ b/third_party/libc++/BUILD.gn
+@@ -552,6 +552,12 @@ target(libcxx_target_type, "libc++") {
+     "//build/config/compiler:rtti",
+   ]
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain &&
++      uefi_musl_include_directories != []) {
++    configs -= [ "//build/config/compiler:exceptions" ]
++    configs += [ "//build/config/compiler:no_exceptions" ]
++  }
++
+   deps = [ "//third_party/llvm-libc:llvm-libc-shared" ]
+ 
+   if (use_clang_modules) {
+diff --git a/third_party/libc++abi/BUILD.gn b/third_party/libc++abi/BUILD.gn
+index e04e7af..ef58a11 100644
+--- a/third_party/libc++abi/BUILD.gn
++++ b/third_party/libc++abi/BUILD.gn
+@@ -86,6 +86,17 @@ target(libcxxabi_target_type, "libc++abi") {
+     "//buildtools/third_party/libc++:config",
+   ]
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain &&
++      uefi_musl_include_directories != []) {
++    configs -= [ "//build/config/compiler:exceptions" ]
++    configs += [ "//build/config/compiler:no_exceptions" ]
++    sources -= [
++      "//third_party/libc++abi/src/src/cxa_exception.cpp",
++      "//third_party/libc++abi/src/src/cxa_personality.cpp",
++    ]
++    sources += [ "//third_party/libc++abi/src/src/cxa_noexception.cpp" ]
++  }
++
+   # private_typeinfo.cpp implements __dynamic_cast(), which is the runtime
+   # bit that implements dynamic_cast<>(). But ubsan's vptr check inserts
+   # dynamic_cast<>()s, which leads to infinite recursion. So make sure we don't

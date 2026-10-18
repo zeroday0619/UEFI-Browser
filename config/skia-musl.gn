@@ -1,0 +1,36 @@
+target_os = "uefi"
+target_cpu = "x64"
+is_official_build = true
+is_debug = false
+cc = "clang"
+cxx = "clang++"
+ar = "llvm-ar"
+skia_enable_ganesh = false
+skia_enable_graphite = false
+skia_enable_pdf = false
+skia_enable_skottie = false
+skia_enable_svg = false
+skia_enable_tools = false
+skia_enable_fontmgr_empty = true
+skia_use_freetype = false
+skia_use_fontconfig = false
+skia_use_harfbuzz = false
+skia_use_icu = false
+skia_use_expat = false
+skia_use_gl = false
+skia_use_libjpeg_turbo_decode = false
+skia_use_libjpeg_turbo_encode = false
+skia_use_libpng_decode = false
+skia_use_libpng_encode = false
+skia_use_libwebp_decode = false
+skia_use_libwebp_encode = false
+skia_use_wuffs = false
+skia_use_piex = false
+skia_use_zlib = false
+skia_use_partition_alloc = false
+skia_use_perfetto = false
+extra_cflags = [ "-fno-builtin", "-fno-stack-protector", "-mno-red-zone", "-ffunction-sections", "-fdata-sections", "-fno-pie", "-fno-pic", "-DSK_BUILD_FOR_UEFI", "-DSK_DISABLE_EFFECT_DESERIALIZATION" ]
+extra_cflags_cc = [ "-fno-threadsafe-statics" ]
+
+extra_cflags += ["-nostdinc", "-DANDROID_HOST_MUSL", "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_EXTENSIVE", "-idirafter", "@CLANG_RESOURCE@/include", "-idirafter", "@WORKSPACE@/outputs/chromium-uefi/build/musl/libc/obj/include", "-idirafter", "@WORKSPACE@/work/chromium-build/musl-1.2.5/include", "-idirafter", "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/x86_64", "-idirafter", "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/generic"]
+extra_cflags_cc += ["-nostdinc++", "-I@WORKSPACE@/work/chromium-build/v8/buildtools/third_party/libc++", "-isystem", "@WORKSPACE@/work/chromium-build/v8/third_party/libc++/src/include", "-isystem", "@WORKSPACE@/work/chromium-build/v8/third_party/libc++abi/src/include"]

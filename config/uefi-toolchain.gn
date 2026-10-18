@@ -1,0 +1,7 @@
+import("//build/toolchain/gcc_toolchain.gni")
+clang_toolchain("x64") {
+  toolchain_args = {
+    current_cpu = "x64"
+    current_os = "linux"
+  }
+}

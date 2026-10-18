@@ -1,0 +1,16 @@
+<!doctype html><meta charset="utf-8"><title>CPU input regression</title>
+<style>
+body{font:20px sans-serif;margin:0}.controls{position:fixed;z-index:2;inset:0 0 auto;background:white;padding:20px;height:80px}input,button{font:24px sans-serif;width:260px;height:50px}.cards{margin-top:130px;display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.card{height:120px;padding:10px;box-shadow:0 3px 10px #888;background:linear-gradient(135deg,#eff,#abe);border-radius:12px}#status{display:inline}
+</style>
+<div class="controls"><input id="field" aria-label="Input"><button id="button">Activate</button><span id="status">Waiting</span></div><main class="cards" id="cards"></main>
+<script>
+const field=document.getElementById('field'), cards=document.getElementById('cards');
+field.oninput=()=>console.log('HEAVY text='+field.value);
+document.getElementById('button').onclick=()=>{document.getElementById('status').textContent='Activated';console.log('HEAVY clicked')};
+onscroll=()=>console.log('HEAVY scroll='+scrollY);
+for(let index=0;index<800;index++){const card=document.createElement('section');card.className='card';card.textContent='Layout card '+index+' 한글 text and wrapping';cards.appendChild(card)}
+let iterations=0, checksum=0;
+function calculate(seed){let value=seed;for(let index=0;index<500000;index++) value=(Math.imul(value,1664525)+1013904223)|0;return value}
+const timer=setInterval(()=>{const started=performance.now();checksum=calculate(checksum);cards.style.width=(innerWidth-((iterations++%2)*8))+'px';console.log('HEAVY work='+iterations+' duration='+Math.round(performance.now()-started)+' checksum='+checksum);if(iterations===1000){clearInterval(timer);console.log('HEAVY finished')}},50);
+console.log('HEAVY ready');
+</script>

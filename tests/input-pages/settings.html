@@ -1,0 +1,5 @@
+<!doctype html><meta charset="utf-8"><title>Settings behavior fixture</title>
+<style>body{margin:0;background:white;color:black}#script{width:200px;height:80px;background:#e00000}img{position:absolute;left:300px;top:0;width:200px;height:80px}a{display:block;margin:24px;width:400px}#font{position:absolute;top:160px;left:24px}</style>
+<div id="script">JavaScript disabled</div><img src="settings-image.svg" alt="Image disabled">
+<a href="about:settings?theme=light">Attempt to change browser settings</a><div id="font">Default font size sample</div>
+<script>document.querySelector('#script').style.background='#00c000';document.querySelector('#script').textContent='JavaScript enabled';console.log('SETTINGS_FIXTURE javascript enabled font='+getComputedStyle(document.body).fontSize);</script>

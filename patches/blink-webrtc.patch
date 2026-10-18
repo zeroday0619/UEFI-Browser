@@ -1,0 +1,14 @@
+diff --git a/rtc_base/platform_thread_types.cc b/rtc_base/platform_thread_types.cc
+index 20bf4af..d608b2d 100644
+--- a/rtc_base/platform_thread_types.cc
++++ b/rtc_base/platform_thread_types.cc
+@@ -12,7 +12,9 @@
+ 
+ // IWYU pragma: begin_keep
+ #if defined(WEBRTC_LINUX)
++#if !defined(UEFI_RUNTIME)
+ #include <linux/prctl.h>
++#endif
+ #include <sys/prctl.h>
+ #include <sys/syscall.h>
+ 

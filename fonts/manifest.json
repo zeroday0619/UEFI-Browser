@@ -1,0 +1,26 @@
+[
+  {
+    "file": "licenses/Noto-LICENSE",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/LICENSE",
+    "sha256": "0dab92d0544f7b233403f14b84a663bdbfa746982eda629e7f4f9ffe1b036feb",
+    "size": 4377
+  },
+  {
+    "file": "fonts/NotoSans-Regular.ttf",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-fonts/ffebf8c1ee449e544955a7e813c54f9b73848eac/unhinted/ttf/NotoSans/NotoSans-Regular.ttf",
+    "sha256": "2118e60a3c88075064261fd7ba82c973a01673d3eb44d58a8a983ae0b9a465ed",
+    "size": 393200
+  },
+  {
+    "file": "fonts/NotoSansCJKsc-Regular.otf",
+    "url": "https://raw.githubusercontent.com/notofonts/noto-cjk/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    "sha256": "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b",
+    "size": 16437364
+  },
+  {
+    "file": "licenses/Noto-CJK-LICENSE",
+    "source": "../uefi-browser/vendor/noto/LICENSE-CJK",
+    "sha256": "6a73f9541c2de74158c0e7cf6b0a58ef774f5a780bf191f2d7ec9cc53efe2bf2",
+    "size": 4301
+  }
+]

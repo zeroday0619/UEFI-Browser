@@ -1,0 +1,60 @@
+diff --git a/OvmfPkg/VirtioInputDxe/VirtioMouse.c b/OvmfPkg/VirtioInputDxe/VirtioMouse.c
+--- a/OvmfPkg/VirtioInputDxe/VirtioMouse.c
++++ b/OvmfPkg/VirtioInputDxe/VirtioMouse.c
+@@ -75,6 +75,14 @@
+ 
+         case REL_Y:
+           Dev->PointerState.RelativeMovementY += (INT32)Event->Value;
++          break;
++
++        case REL_WHEEL:
++          // Saturation prevents accumulated wheel reports from wrapping.
++          {
++            INT64 Movement = (INT64)Dev->PointerState.RelativeMovementZ + (INT32)Event->Value;
++            Dev->PointerState.RelativeMovementZ = (INT32)MAX (MIN (Movement, MAX_INT32), MIN_INT32);
++          }
+           break;
+ 
+         default:
+@@ -144,6 +152,7 @@
+   //
+   Dev->PointerState.RelativeMovementX = 0;
+   Dev->PointerState.RelativeMovementY = 0;
++  Dev->PointerState.RelativeMovementZ = 0;
+   Dev->PointerReady                   = FALSE;
+ 
+   gBS->RestoreTPL (OldTpl);
+@@ -184,6 +193,22 @@
+   )
+ {
+   EFI_STATUS  Status;
++
++  UINT8       Size;
++  UINT8       Bitmap;
++
++  // The Z resolution is advertised only when the device supports a wheel.
++  Status = VirtioInputConfigQuerySize (Dev, VirtioInputCfgEvBits, EV_REL, &Size);
++  if (EFI_ERROR (Status)) {
++    return Status;
++  }
++  if (Size > REL_WHEEL / 8) {
++    Status = Dev->VirtIo->ReadDevice (Dev->VirtIo, OFFSET_OF_VINPUT (Data) + REL_WHEEL / 8, 1, 1, &Bitmap);
++    if (EFI_ERROR (Status)) {
++      return Status;
++    }
++    Dev->PointerMode.ResolutionZ = (Bitmap & (1U << (REL_WHEEL % 8))) ? 1 : 0;
++  }
+ 
+   Dev->SimplePointer.Reset    = VirtioMouseReset;
+   Dev->SimplePointer.GetState = VirtioMouseGetState;
+diff --git a/OvmfPkg/VirtioInputDxe/VirtioKeyCodes.h b/OvmfPkg/VirtioInputDxe/VirtioKeyCodes.h
+--- a/OvmfPkg/VirtioInputDxe/VirtioKeyCodes.h
++++ b/OvmfPkg/VirtioInputDxe/VirtioKeyCodes.h
+@@ -305,6 +305,7 @@
+  */
+ #define REL_X  0x00
+ #define REL_Y  0x01
++#define REL_WHEEL  0x08
+ 
+ /*
+  * Absolute axes

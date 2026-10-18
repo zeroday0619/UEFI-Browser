@@ -1,0 +1,15 @@
+build/
+__pycache__/
+*.pyc
+
+# Local firmware state and generated artifacts must not enter source releases.
+*.fd
+*.efi
+*.EFI
+*.elf
+*.o
+*.a
+*.sock
+.env
+.env.*
+!.env.example

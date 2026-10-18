@@ -1,0 +1,1156 @@
+diff --git a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+index a3874e5b41..ee6623c241 100644
+--- a/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
++++ b/base/allocator/partition_allocator/src/partition_alloc/partition_alloc_base/rand_util_posix.cc
+@@ -12,6 +12,10 @@
+ #include "partition_alloc/partition_alloc_base/check.h"
+ #include "partition_alloc/partition_alloc_base/compiler_specific.h"
+ 
++#if defined(UEFI_RUNTIME)
++#include <sys/random.h>
++#endif
++
+ #if PA_BUILDFLAG(IS_MAC)
+ #include <sys/random.h>
+ #elif PA_BUILDFLAG(IS_APPLE)
+@@ -29,7 +33,7 @@
+ 
+ namespace {
+ 
+-#if !PA_BUILDFLAG(IS_APPLE)
++#if !PA_BUILDFLAG(IS_APPLE) && !defined(UEFI_RUNTIME)
+ 
+ #if PA_BUILDFLAG(IS_AIX)
+ // AIX has no 64-bit support for O_CLOEXEC.
+@@ -86,7 +90,18 @@ namespace partition_alloc::internal::base {
+ // PRECONDITION: `output` must be non-null and must point to a valid span of
+ // `output_length` bytes.
+ PA_UNSAFE_BUFFER_USAGE void RandBytes(void* output, size_t output_length) {
+-#if PA_BUILDFLAG(IS_MAC)
++#if defined(UEFI_RUNTIME)
++  // Match the firmware syscall bridge's per-request limit without opening a
++  // device file if entropy acquisition fails.
++  auto* position = static_cast<unsigned char*>(output);
++  while (output_length) {
++    const size_t length = output_length > 262144 ? 262144 : output_length;
++    const ssize_t count = WrapEINTR(getrandom)(position, length, 0);
++    PA_BASE_CHECK(count > 0 && static_cast<size_t>(count) <= length);
++    position += count;
++    output_length -= static_cast<size_t>(count);
++  }
++#elif PA_BUILDFLAG(IS_MAC)
+   PA_BASE_CHECK(getentropy(output, output_length) == 0);
+ #elif PA_BUILDFLAG(IS_APPLE)
+   PA_BASE_CHECK(CCRandomGenerateBytes(output, output_length) == kCCSuccess);
+diff --git a/base/process/process_metrics_posix.cc b/base/process/process_metrics_posix.cc
+index 205200021c..fa489cc46c 100644
+--- a/base/process/process_metrics_posix.cc
++++ b/base/process/process_metrics_posix.cc
+@@ -31,6 +31,10 @@
+ #include "base/numerics/safe_conversions.h"
+ #endif
+ 
++#if defined(UEFI_RUNTIME)
++extern "C" size_t runtime_memory_used(void);
++#endif
++
+ namespace base {
+ 
+ int64_t TimeValToMicroseconds(const struct timeval& tv) {
+@@ -111,7 +115,12 @@ void IncreaseFdLimitTo(unsigned int max_descriptors) {
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+ namespace {
+ 
+-size_t GetMallocUsageMallinfo() {
++size_t GetMallocUsageForPlatform() {
++#if defined(UEFI_RUNTIME)
++  // The firmware allocator tracks live requested bytes. Firmware pool
++  // metadata and page allocations are outside this malloc usage counter.
++  return runtime_memory_used();
++#else
+ #if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+ #if __GLIBC_PREREQ(2, 33)
+ #define MALLINFO2_FOUND_IN_LIBC
+@@ -123,6 +132,7 @@ size_t GetMallocUsageMallinfo() {
+ #endif
+ #undef MALLINFO2_FOUND_IN_LIBC
+   return checked_cast<size_t>(minfo.hblkhd + minfo.arena);
++#endif
+ }
+ 
+ }  // namespace
+@@ -135,7 +145,7 @@ size_t ProcessMetrics::GetMallocUsage() {
+   malloc_zone_statistics(nullptr, &stats);
+   return stats.size_in_use;
+ #elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
+-  return GetMallocUsageMallinfo();
++  return GetMallocUsageForPlatform();
+ #elif BUILDFLAG(IS_FUCHSIA)
+   // TODO(fuchsia): Not currently exposed. https://crbug.com/735087.
+   return 0;
+diff --git a/base/rand_util_posix.cc b/base/rand_util_posix.cc
+index 71bb35a2ff..862a576d74 100644
+--- a/base/rand_util_posix.cc
++++ b/base/rand_util_posix.cc
+@@ -14,6 +14,10 @@
+ #include "build/build_config.h"
+ #include "third_party/boringssl/src/include/openssl/rand.h"
+ 
++#if defined(UEFI_RUNTIME)
++#include <sys/random.h>
++#endif
++
+ #if BUILDFLAG(IS_MAC)
+ #include <sys/random.h>
+ #elif BUILDFLAG(IS_APPLE)
+@@ -30,7 +34,7 @@
+ #include "base/system/sys_info.h"
+ #endif  // BUILDFLAG(IS_MAC)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++#if !defined(UEFI_RUNTIME) && (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS))
+ #include "third_party/lss/linux_syscall_support.h"
+ #endif  // BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+ 
+@@ -38,7 +42,7 @@ namespace base {
+ 
+ namespace {
+ 
+-#if !BUILDFLAG(IS_APPLE)
++#if !BUILDFLAG(IS_APPLE) && !defined(UEFI_RUNTIME)
+ 
+ #if BUILDFLAG(IS_AIX)
+ // AIX has no 64-bit support for O_CLOEXEC.
+@@ -67,7 +71,7 @@ class URandomFd {
+ 
+ #endif  // !BUILDFLAG(IS_APPLE)
+ 
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID)
++#if !defined(UEFI_RUNTIME) && (BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS) || BUILDFLAG(IS_ANDROID))
+ 
+ bool KernelSupportsGetRandom() {
+   return base::SysInfo::KernelVersionNumber::Current() >=
+@@ -93,6 +97,17 @@ bool GetRandomSyscall(void* output, size_t output_length) {
+         // BUILDFLAG(IS_ANDROID)
+ 
+ void RandBytesInternal(span<uint8_t> output, bool avoid_allocation) {
++#if defined(UEFI_RUNTIME)
++  // The musl syscall bridge obtains entropy from firmware. Neither a Linux
++  // kernel-version probe nor a /dev/urandom file exists in this environment.
++  while (!output.empty()) {
++    const size_t length = output.size() > 262144 ? 262144 : output.size();
++    const ssize_t count = HANDLE_EINTR(getrandom(output.data(), length, 0));
++    CHECK_GT(count, 0);
++    CHECK_LE(static_cast<size_t>(count), length);
++    output = output.subspan(static_cast<size_t>(count));
++  }
++#else
+   if (!avoid_allocation) {
+     // BoringSSL's RAND_bytes always returns 1. Any error aborts the program.
+     (void)RAND_bytes(output.data(), output.size());
+@@ -122,6 +137,7 @@ void RandBytesInternal(span<uint8_t> output, bool avoid_allocation) {
+   const bool success = ReadFromFD(urandom_fd, as_writable_chars(output));
+   CHECK(success);
+ #endif  // BUILDFLAG(IS_MAC)
++#endif  // defined(UEFI_RUNTIME)
+ }
+ 
+ }  // namespace
+@@ -143,8 +159,12 @@ void RandBytes(span<uint8_t> output) {
+ 
+ #if !BUILDFLAG(IS_APPLE)
+ int GetUrandomFD() {
++#if defined(UEFI_RUNTIME)
++  return -1;
++#else
+   static NoDestructor<URandomFd> urandom_fd;
+   return urandom_fd->fd();
++#endif
+ }
+ #endif  // !BUILDFLAG(IS_APPLE)
+ 
+diff --git a/base/trace_event/malloc_dump_provider.cc b/base/trace_event/malloc_dump_provider.cc
+index b0912e8a10..d5b37868b1 100644
+--- a/base/trace_event/malloc_dump_provider.cc
++++ b/base/trace_event/malloc_dump_provider.cc
+@@ -50,6 +50,10 @@
+ #include "partition_alloc/partition_alloc_constants.h"  // nogncheck
+ #endif
+ 
++#if defined(UEFI_RUNTIME)
++extern "C" size_t runtime_memory_used(void);
++#endif
++
+ namespace base::trace_event {
+ 
+ namespace {
+@@ -264,6 +268,7 @@ void ReportAppleAllocStats(size_t* total_virtual_size,
+ }
+ #endif
+ 
++#if !defined(UEFI_RUNTIME)
+ #if (PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC) && BUILDFLAG(IS_ANDROID)) || \
+     (!PA_BUILDFLAG(USE_PARTITION_ALLOC_AS_MALLOC) && !BUILDFLAG(IS_WIN) &&    \
+      !BUILDFLAG(IS_APPLE) && !BUILDFLAG(IS_FUCHSIA))
+@@ -302,6 +307,8 @@ void ReportMallinfoStats(ProcessMemoryDump* pmd,
+ }
+ #endif
+ 
++#endif  // !defined(UEFI_RUNTIME)
++
+ #if PA_BUILDFLAG(USE_PARTITION_ALLOC)
+ void ReportPartitionAllocThreadCacheStats(
+     ProcessMemoryDump* pmd,
+@@ -451,6 +458,14 @@ bool MallocDumpProvider::OnMemoryDump(const MemoryDumpArgs& args,
+     }
+   }
+ 
++#if defined(UEFI_RUNTIME)
++  // Only requested live malloc bytes are measured by the firmware allocator.
++  // Physical residency and virtual reservation totals are not fabricated.
++  auto* dump = pmd->CreateAllocatorDump("uefi/malloc_requested");
++  dump->AddScalar(MemoryAllocatorDump::kNameSize,
++                  MemoryAllocatorDump::kUnitsBytes, runtime_memory_used());
++  return true;
++#else
+   size_t total_virtual_size = 0;
+   size_t resident_size = 0;
+   size_t allocated_objects_size = 0;
+@@ -653,6 +668,7 @@ bool MallocDumpProvider::OnMemoryDump(const MemoryDumpArgs& args,
+       elud_dump_for_small_objects, elud_dump_for_large_objects);
+ 
+   return true;
++#endif
+ }
+ 
+ void MallocDumpProvider::ReportPerMinuteStats(
+diff --git a/build/config/BUILDCONFIG.gn b/build/config/BUILDCONFIG.gn
+index a8dcb4d467..2a9ecd222b 100644
+--- a/build/config/BUILDCONFIG.gn
++++ b/build/config/BUILDCONFIG.gn
+@@ -123,6 +123,9 @@ if (current_os == "") {
+ #   even if the value is overridden, which is wasteful. See first bullet.
+ 
+ declare_args() {
++  use_uefi_runtime = false
++  uefi_musl_include_directories = []
++
+   # Set to enable the official build level of optimization. This has nothing
+   # to do with branding, but enables an additional level of optimization above
+   # release (!is_debug). This might be better expressed as a tri-state
+diff --git a/build/config/clang/BUILD.gn b/build/config/clang/BUILD.gn
+index 5488e4c5e2..aeb0ef5a02 100644
+--- a/build/config/clang/BUILD.gn
++++ b/build/config/clang/BUILD.gn
+@@ -178,6 +178,12 @@ group("llvm-symbolizer_data") {
+   }
+ }
+ 
++declare_args() {
++  # Distribution toolchains can retain the pre-per-target runtime layout.
++  uefi_host_clang_runtime_directory = ""
++  uefi_host_clang_runtime_suffix = ""
++}
++
+ template("clang_lib") {
+   if (!defined(invoker.libname) || is_wasm) {
+     not_needed(invoker, "*")
+@@ -257,6 +263,11 @@ template("clang_lib") {
+         assert(false)  # Unhandled target platform
+       }
+ 
++      if ((is_linux || is_chromeos) &&
++          uefi_host_clang_runtime_directory != "") {
++        _dir = uefi_host_clang_runtime_directory
++        _suffix = uefi_host_clang_runtime_suffix
++      }
+       _clang_lib_dir = "$clang_base_path/lib/clang/$clang_version/lib"
+       _lib_file = "${_prefix}clang_rt.${_libname}${_suffix}.${_ext}"
+       libs = [ "$_clang_lib_dir/$_dir/$_lib_file" ]
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index d0b1e809a2..139ad4c566 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -343,6 +343,17 @@ config("compiler") {
+   defines = []
+   configs = []
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain) {
++    assert(current_cpu == "x64")
++    assert(uefi_musl_include_directories != [])
++    cflags += [ "-nostdinc", "-mno-red-zone" ]
++    rustflags += [ "-Cno-redzone=yes" ]
++    foreach(directory, uefi_musl_include_directories) {
++      cflags += [ "-idirafter", directory ]
++    }
++    defines += [ "ANDROID_HOST_MUSL", "UEFI_RUNTIME" ]
++  }
++
+   # System-specific flags. If your compiler flags apply to one of the
+   # categories here, add it to the associated file to keep this shared config
+   # smaller.
+@@ -444,7 +455,9 @@ config("compiler") {
+     # problems. Therefore, we only enable one or the other. Clang advertises SCS
+     # as a stronger alternative to StackProtector, so we give SCS precedence
+     # over SP.
+-    if (enable_shadow_call_stack) {
++    if (use_uefi_runtime && current_toolchain == default_toolchain) {
++      cflags += [ "-fno-stack-protector" ]
++    } else if (enable_shadow_call_stack) {
+       # On Aarch64, SCS requires the x18 register to be unused because it will
+       # hold a pointer to the shadow stack. For Android we know that Clang
+       # doesn't use x18 by default. On other OSs adding "-ffixed-x18" might be
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+index 20141e482f..0e40b432c7 100644
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -92,6 +92,9 @@ buildflag_header("buildflags") {
+ 
+ config("net_internal_config") {
+   defines = [ "NET_IMPLEMENTATION" ]
++  if (use_uefi_runtime) {
++    defines += [ "UEFI_MOZILLA_ROOTS" ]
++  }
+ 
+   if (enable_built_in_dns) {
+     defines += [ "ENABLE_BUILT_IN_DNS" ]
+diff --git a/net/cert/internal/system_trust_store.cc b/net/cert/internal/system_trust_store.cc
+index b8462e0798..16fbcde32d 100644
+--- a/net/cert/internal/system_trust_store.cc
++++ b/net/cert/internal/system_trust_store.cc
+@@ -3,6 +3,11 @@
+ // found in the LICENSE file.
+ 
+ #include "net/cert/internal/system_trust_store.h"
++#if defined(UEFI_MOZILLA_ROOTS)
++#include "base/check_op.h"
++#include "third_party/boringssl/src/include/openssl/pool.h"
++#include "third_party/blink/uefi/runtime/mozilla_roots.h"
++#endif
+ 
+ #include <memory>
+ #include <optional>
+@@ -247,7 +252,9 @@ std::unique_ptr<SystemTrustStore> CreateSystemTrustStoreChromeForTesting(
+ }
+ #endif  // CHROME_ROOT_STORE_SUPPORTED
+ 
+-#if BUILDFLAG(USE_NSS_SERVER_CERTS)
++#if defined(UEFI_MOZILLA_ROOTS)
++#include "third_party/blink/uefi/src/blink/mozilla_trust_store.inc"
++#elif BUILDFLAG(USE_NSS_SERVER_CERTS)
+ 
+ std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStoreChromeRoot(
+     std::unique_ptr<TrustStoreChrome> chrome_root) {
+diff --git a/net/cert/internal/system_trust_store.h b/net/cert/internal/system_trust_store.h
+index 6c3696aaa6..769bd0de0f 100644
+--- a/net/cert/internal/system_trust_store.h
++++ b/net/cert/internal/system_trust_store.h
+@@ -114,7 +114,7 @@ NET_EXPORT std::unique_ptr<SystemTrustStore> CreateSslSystemTrustStore();
+ #endif
+ 
+ #if BUILDFLAG(CHROME_ROOT_STORE_SUPPORTED)
+-#if BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) || \
++#if defined(UEFI_MOZILLA_ROOTS) || BUILDFLAG(USE_NSS_SERVER_CERTS) || BUILDFLAG(IS_MAC) || \
+     BUILDFLAG(IS_WIN) || BUILDFLAG(IS_ANDROID)
+ // Creates an instance of SystemTrustStore that wraps the current platform's SSL
+ // trust store for user added roots, but uses the Chrome Root Store trust
+diff --git a/net/dns/public/scoped_res_state.cc b/net/dns/public/scoped_res_state.cc
+index 0a56a243cd..9d8fabe3e8 100644
+--- a/net/dns/public/scoped_res_state.cc
++++ b/net/dns/public/scoped_res_state.cc
+@@ -14,7 +14,11 @@
+ namespace net {
+ 
+ ScopedResState::ScopedResState() {
+-#if BUILDFLAG(IS_OPENBSD) || BUILDFLAG(IS_FUCHSIA)
++#if defined(UEFI_RUNTIME)
++  // EFI HTTP resolves names through firmware and has no libresolv state.
++  // Leave initialization failed so callers cannot consume invented DNS data.
++  UNSAFE_TODO(memset(&res_, 0, sizeof(res_)));
++#elif BUILDFLAG(IS_OPENBSD) || BUILDFLAG(IS_FUCHSIA)
+   // Note: res_ninit in glibc always returns 0 and sets RES_INIT.
+   // res_init behaves the same way.
+   memset(&_res, 0, sizeof(_res));
+@@ -26,7 +30,7 @@ ScopedResState::ScopedResState() {
+ }
+ 
+ ScopedResState::~ScopedResState() {
+-#if !BUILDFLAG(IS_OPENBSD) && !BUILDFLAG(IS_FUCHSIA)
++#if !defined(UEFI_RUNTIME) && !BUILDFLAG(IS_OPENBSD) && !BUILDFLAG(IS_FUCHSIA)
+ 
+   // Prefer res_ndestroy where available.
+ #if BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_FREEBSD)
+diff --git a/third_party/fontconfig/include/meson-config.h b/third_party/fontconfig/include/meson-config.h
+index 5f9aa0c4ed..25c28c2e15 100644
+--- a/third_party/fontconfig/include/meson-config.h
++++ b/third_party/fontconfig/include/meson-config.h
+@@ -72,7 +72,11 @@
+ 
+ #define HAVE_GETTEXT 1
+ 
++#if defined(UEFI_RUNTIME)
++#define HAVE_GNU_STRERROR_R 0
++#else
+ #define HAVE_GNU_STRERROR_R 1
++#endif
+ 
+ #define HAVE_INTEL_ATOMIC_PRIMITIVES 1
+ 
+@@ -98,7 +102,11 @@
+ 
+ #define HAVE_RANDOM 1
+ 
++#if defined(UEFI_RUNTIME)
++#define HAVE_RANDOM_R 0
++#else
+ #define HAVE_RANDOM_R 1
++#endif
+ 
+ #define HAVE_RAND_R 1
+ 
+diff --git a/third_party/blink/renderer/core/loader/loader_factory_for_frame.cc b/third_party/blink/renderer/core/loader/loader_factory_for_frame.cc
+index c6a0767946..d064412045 100644
+--- a/third_party/blink/renderer/core/loader/loader_factory_for_frame.cc
++++ b/third_party/blink/renderer/core/loader/loader_factory_for_frame.cc
+@@ -108,6 +108,15 @@ Vector<std::unique_ptr<URLLoaderThrottle>> CreateThrottlesImpl(
+ 
+ }  // namespace
+ 
++#if defined(UEFI_RUNTIME)
++namespace {
++LoaderFactoryForFrame::FirmwareLoaderFactory firmware_loader_factory = nullptr;
++}
++void LoaderFactoryForFrame::SetFirmwareLoaderFactory(FirmwareLoaderFactory factory) {
++  firmware_loader_factory = factory;
++}
++#endif
++
+ // static
+ void LoaderFactoryForFrame::SetCorsExemptHeaderList(
+     Vector<String> cors_exempt_header_list) {
+@@ -125,6 +134,11 @@ LoaderFactoryForFrame::LoaderFactoryForFrame(DocumentLoader& document_loader,
+       prefetched_signed_exchange_manager_(
+           document_loader.GetPrefetchedSignedExchangeManager()),
+       keep_alive_handle_factory_(&window) {
++#if defined(UEFI_RUNTIME)
++  // The firmware loader rejects keepalive requests and owns no browser process.
++  if (firmware_loader_factory)
++    return;
++#endif
+   window.GetFrame()->GetLocalFrameHostRemote().GetKeepAliveHandleFactory(
+       keep_alive_handle_factory_.BindNewPipeAndPassReceiver(
+           window.GetTaskRunner(TaskType::kNetworking)));
+@@ -149,6 +163,11 @@ std::unique_ptr<URLLoader> LoaderFactoryForFrame::CreateURLLoader(
+     bool is_from_origin_dirty_style_sheet) {
+   LocalFrame* frame = window_->GetFrame();
+   CHECK(frame);
++#if defined(UEFI_RUNTIME)
++  if (firmware_loader_factory)
++    return firmware_loader_factory(*window_->GetSecurityOrigin(),
++                                   std::move(freezable_task_runner));
++#endif
+   if (std::unique_ptr<URLLoader> loader = frame->CreateURLLoaderForTesting()) {
+     return loader;
+   }
+@@ -267,6 +286,11 @@ std::unique_ptr<URLLoader> LoaderFactoryForFrame::CreateURLLoader(
+ }
+ 
+ CodeCacheHost* LoaderFactoryForFrame::GetCodeCacheHost() {
++#if defined(UEFI_RUNTIME)
++  // Firmware currently has no persistent compiled-code cache.
++  if (firmware_loader_factory)
++    return nullptr;
++#endif
+   return document_loader_->GetCodeCacheHost();
+ }
+ 
+diff --git a/third_party/blink/renderer/core/loader/loader_factory_for_frame.h b/third_party/blink/renderer/core/loader/loader_factory_for_frame.h
+index 9723c36b65..94f0f9e32d 100644
+--- a/third_party/blink/renderer/core/loader/loader_factory_for_frame.h
++++ b/third_party/blink/renderer/core/loader/loader_factory_for_frame.h
+@@ -27,6 +27,12 @@ class PrefetchedSignedExchangeManager;
+ class CORE_EXPORT LoaderFactoryForFrame final
+     : public ResourceFetcher::LoaderFactory {
+  public:
++#if defined(UEFI_RUNTIME)
++  using FirmwareLoaderFactory = std::unique_ptr<URLLoader> (*)(
++      const SecurityOrigin&, scoped_refptr<base::SingleThreadTaskRunner>);
++  // The embedder installs its transport before creating any frames.
++  static void SetFirmwareLoaderFactory(FirmwareLoaderFactory);
++#endif
+   static void SetCorsExemptHeaderList(Vector<String>);
+   static Vector<String> GetCorsExemptHeaderList();
+ 
+diff --git a/third_party/blink/public/web/web_frame_widget.h b/third_party/blink/public/web/web_frame_widget.h
+index 87277fb611..1a0ee07261 100644
+--- a/third_party/blink/public/web/web_frame_widget.h
++++ b/third_party/blink/public/web/web_frame_widget.h
+@@ -78,6 +78,10 @@ class WebNonCompositedWidgetClient;
+ 
+ class WebFrameWidget : public WebWidget {
+  public:
++#if defined(UEFI_RUNTIME)
++  // The firmware embedder supplies animation ticks without a compositor.
++  virtual void BeginNonCompositedFrame(base::TimeTicks, uint64_t sequence) = 0;
++#endif
+   // Similar to `InitializeCompositing()` but for non-compositing widgets.
+   // Exactly one of either `InitializeCompositing()` or this method must
+   // be called before using the widget.
+diff --git a/third_party/blink/renderer/platform/fonts/font_cache.h b/third_party/blink/renderer/platform/fonts/font_cache.h
+index ffdb05fc46..24c335c9d8 100644
+--- a/third_party/blink/renderer/platform/fonts/font_cache.h
++++ b/third_party/blink/renderer/platform/fonts/font_cache.h
+@@ -290,7 +290,7 @@ class PLATFORM_EXPORT FontCache final {
+                                    const FontFaceCreationParams&,
+                                    std::string& name);
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || defined(UEFI_RUNTIME)
+   // SkFontMgr_FCI::onMatchFamilyStyleCharacter always crashes.
+   static const FontPlatformData* CreateFontPlatformDataForCharacter(
+       SkFontMgr*,
+diff --git a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+index f95d267dfd..ba2c0c97b9 100644
+--- a/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
++++ b/third_party/blink/renderer/platform/fonts/linux/font_cache_linux.cc
+@@ -25,6 +25,10 @@
+ #include "third_party/blink/renderer/platform/fonts/font_cache.h"
+ 
+ #include "build/build_config.h"
++#if defined(UEFI_RUNTIME)
++#include "skia/ext/font_utils.h"
++#include "third_party/skia/include/core/SkFontMgr.h"
++#endif
+ #include "third_party/blink/public/platform/linux/web_sandbox_support.h"
+ #include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/renderer/platform/fonts/font_fallback_priority.h"
+@@ -70,6 +74,11 @@ const SimpleFontData* FontCache::PlatformFallbackFontForCharacter(
+     UChar32 c,
+     const SimpleFontData*,
+     FontFallbackPriority fallback_priority) {
++#if defined(UEFI_RUNTIME)
++  const FontPlatformData* data = CreateFontPlatformDataForCharacter(
++      skia::DefaultFontMgr().get(), c, font_description, nullptr, fallback_priority);
++  return data ? FontDataFromFontPlatformData(data) : nullptr;
++#else
+   if (IsEmojiPresentationEmoji(fallback_priority)) {
+     // FIXME crbug.com/591346: We're overriding the fallback character here
+     // with the FAMILY emoji in the hope to find a suitable emoji font.
+@@ -153,6 +162,7 @@ const SimpleFontData* FontCache::PlatformFallbackFontForCharacter(
+   platform_data->SetSyntheticBold(should_set_synthetic_bold);
+   platform_data->SetSyntheticItalic(should_set_synthetic_italic);
+   return FontDataFromFontPlatformData(platform_data);
++#endif
+ }
+ 
+ }  // namespace blink
+diff --git a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+index 35776799ee..b0c7b62c23 100644
+--- a/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
++++ b/third_party/blink/renderer/platform/fonts/skia/font_cache_skia.cc
+@@ -97,7 +97,7 @@ const FontPlatformData* CreateFontPlatformDataForTypeface(
+ }
+ }  // namespace
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || defined(UEFI_RUNTIME)
+ // static
+ const FontPlatformData* FontCache::CreateFontPlatformDataForCharacter(
+     SkFontMgr* fm,
+@@ -228,7 +228,7 @@ const SimpleFontData* FontCache::GetLastResortFallbackFont(
+   }
+ #endif
+ 
+-#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN)
++#if BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_WIN) || defined(UEFI_RUNTIME)
+   if (!font_platform_data) {
+     // At least try to match locale.
+     font_platform_data = FontCache::CreateFontPlatformDataForCharacter(
+diff --git a/gin/v8_platform.cc b/gin/v8_platform.cc
+index d68dd800ad..7227ddea0c 100644
+--- a/gin/v8_platform.cc
++++ b/gin/v8_platform.cc
+@@ -269,11 +269,15 @@ std::shared_ptr<v8::TaskRunner> V8Platform::GetForegroundTaskRunner(
+ }
+ 
+ int V8Platform::NumberOfWorkerThreads() {
++#if defined(UEFI_RUNTIME)
++  return 0;
++#else
+   // V8Platform assumes the number of workers used by the scheduler for user
+   // blocking tasks is an upper bound.
+   const size_t num_foreground_workers =
+       base::ThreadPoolInstance::Get()->GetMaxConcurrentForegroundTasks();
+   return std::max(1, static_cast<int>(num_foreground_workers));
++#endif
+ }
+ 
+ void V8Platform::PostTaskOnWorkerThreadImpl(
+diff --git a/third_party/blink/renderer/platform/heap/thread_state.cc b/third_party/blink/renderer/platform/heap/thread_state.cc
+index 3bf7a15a78..ba8a386a01 100644
+--- a/third_party/blink/renderer/platform/heap/thread_state.cc
++++ b/third_party/blink/renderer/platform/heap/thread_state.cc
+@@ -182,6 +182,11 @@ std::unique_ptr<v8::CppHeap> CreateCppHeap(
+     v8::Platform* platform,
+     std::optional<cppgc::StackStartMarker> stack_start_marker) {
+   v8::CppHeapCreateParams params(CustomSpaces::CreateCustomSpaces());
++#if defined(UEFI_RUNTIME)
++  // Firmware has no worker threads, including before the V8 isolate is attached.
++  params.marking_support = cppgc::Heap::MarkingType::kAtomic;
++  params.sweeping_support = cppgc::Heap::SweepingType::kAtomic;
++#endif
+   params.stack_start_marker = std::move(stack_start_marker);
+   params.allocation_sampler = gin::GetCppGCAllocationSampler();
+   return v8::CppHeap::Create(platform, params);
+diff --git a/buildtools/third_party/libc++/BUILD.gn b/buildtools/third_party/libc++/BUILD.gn
+index e459bcb42f..3efb993b3d 100644
+--- a/buildtools/third_party/libc++/BUILD.gn
++++ b/buildtools/third_party/libc++/BUILD.gn
+@@ -548,10 +548,15 @@ target(libcxx_target_type, "libc++") {
+   configs += [
+     ":config",
+     "//build/config/compiler:no_chromium_code",
+-    "//build/config/compiler:exceptions",
++
+     "//build/config/compiler:rtti",
+   ]
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain) {
++    configs += [ "//build/config/compiler:no_exceptions" ]
++  } else {
++    configs += [ "//build/config/compiler:exceptions" ]
++  }
+   deps = [ "//third_party/llvm-libc:llvm-libc-shared" ]
+ 
+   if (use_clang_modules) {
+diff --git a/third_party/expat/BUILD.gn b/third_party/expat/BUILD.gn
+index f226c3eea0..32a57d520b 100644
+--- a/third_party/expat/BUILD.gn
++++ b/third_party/expat/BUILD.gn
+@@ -18,7 +18,8 @@ expat_visibility = [
+ # let's not pull it in twice.
+ # Chromecast doesn't ship expat as a system library.
+ # Libfuzzer and AFL need to build library from sources.
+-if (((is_linux && !is_castos) || is_chromeos) && !use_fuzzing_engine) {
++if (((is_linux && !is_castos) || is_chromeos) && !use_fuzzing_engine &&
++    !(use_uefi_runtime && current_toolchain == default_toolchain)) {
+   config("expat_config") {
+     libs = [ "expat" ]
+   }
+@@ -63,6 +64,11 @@ if (((is_linux && !is_castos) || is_chromeos) && !use_fuzzing_engine) {
+     configs += [ ":expat_internal_config" ]
+ 
+     defines = [ "_LIB" ]
++    if (use_uefi_runtime && current_toolchain == default_toolchain) {
++      # Firmware entropy is available through musl without a device file.
++      defines += [ "HAVE_GETRANDOM=1" ]
++      sources += [ "src/expat/lib/random_getrandom.c" ]
++    }
+     if (is_win) {
+       # expat expects to define WIN32_LEAN_AND_MEAN itself
+       configs -= [ "//build/config/win:lean_and_mean" ]
+diff --git a/third_party/blink/renderer/bindings/core/v8/script_streamer.h b/third_party/blink/renderer/bindings/core/v8/script_streamer.h
+index 439f0f91e6..8f29c18652 100644
+--- a/third_party/blink/renderer/bindings/core/v8/script_streamer.h
++++ b/third_party/blink/renderer/bindings/core/v8/script_streamer.h
+@@ -444,6 +444,7 @@ class CORE_EXPORT BackgroundResourceScriptStreamer : public ScriptStreamer {
+   std::unique_ptr<v8::ScriptCompiler::ConsumeCodeCacheTask>
+   TakeConsumeCodeCacheTask();
+ 
++#if !defined(UEFI_RUNTIME)
+   v8::WasmModuleCompilation* GetWasmModuleCompilation() const override {
+     return wasm_module_compilation_.get();
+   }
+@@ -452,6 +453,7 @@ class CORE_EXPORT BackgroundResourceScriptStreamer : public ScriptStreamer {
+       std::unique_ptr<v8::WasmModuleCompilation> compilation) {
+     wasm_module_compilation_ = std::move(compilation);
+   }
++#endif
+ 
+  private:
+   class BackgroundProcessorFactory;
+@@ -463,7 +465,9 @@ class CORE_EXPORT BackgroundResourceScriptStreamer : public ScriptStreamer {
+   const v8::ScriptType script_type_;
+ 
+   std::unique_ptr<Result> result_;
++#if !defined(UEFI_RUNTIME)
+   std::unique_ptr<v8::WasmModuleCompilation> wasm_module_compilation_;
++#endif
+ 
+   // The reason that streaming is disabled
+   NotStreamingReason suppressed_reason_ = NotStreamingReason::kInvalid;
+diff --git a/third_party/blink/renderer/bindings/core/v8/script_streamer.cc b/third_party/blink/renderer/bindings/core/v8/script_streamer.cc
+index 34a4b2d84b..e78fc57680 100644
+--- a/third_party/blink/renderer/bindings/core/v8/script_streamer.cc
++++ b/third_party/blink/renderer/bindings/core/v8/script_streamer.cc
+@@ -1609,6 +1609,7 @@ class BackgroundResourceScriptStreamer::BackgroundProcessor final
+   // Posts the Wasm compilation object to the main thread. This moves
+   // `streamer_handle_`, so it is mutually exclusive with
+   // `PostResultToMainThread` — only one may be called.
++#if !defined(UEFI_RUNTIME)
+   void PostWasmCompilationObjectToMainThread(
+       std::unique_ptr<v8::WasmModuleCompilation> module_compilation) {
+     client_->PostTaskToMainThread(CrossThreadBindOnce(
+@@ -1617,6 +1618,8 @@ class BackgroundResourceScriptStreamer::BackgroundProcessor final
+         std::move(module_compilation)));
+   }
+ 
++#endif
++
+   void DidFinishBackgroundTasks(
+       network::mojom::URLResponseHeadPtr&& head,
+       BackgroundResponseProcessor::BodyVariant&& body,
+@@ -1833,6 +1836,7 @@ class BackgroundJSStreamManager : public BackgroundStreamManager {
+   base::WeakPtrFactory<BackgroundJSStreamManager> weak_factory_{this};
+ };
+ 
++#if !defined(UEFI_RUNTIME)
+ class BackgroundWasmStreamManager : public BackgroundStreamManager {
+  public:
+   BackgroundWasmStreamManager(
+@@ -1870,6 +1874,8 @@ class BackgroundWasmStreamManager : public BackgroundStreamManager {
+       std::make_unique<v8::WasmModuleCompilation>();
+ };
+ 
++#endif
++
+ BackgroundResourceScriptStreamer::BackgroundProcessor::BackgroundProcessor(
+     v8::ScriptType script_type,
+     const String script_url_string,
+@@ -1943,12 +1949,16 @@ bool BackgroundResourceScriptStreamer::BackgroundProcessor::
+   }
+ 
+   if (is_valid_wasm_mime_type) {
++#if defined(UEFI_RUNTIME)
++    return false;
++#else
+     // TODO(https://crbug.com/42204365): Add support for code caching.
+     // For now, we clear cached_metadata to avoid unintended side-effects.
+     cached_metadata.reset();
+     stream_manager_ = std::make_unique<BackgroundWasmStreamManager>(
+         std::move(head), std::move(body), std::move(details_),
+         weak_factory_.GetWeakPtr());
++#endif
+   } else {
+     stream_manager_ = std::make_unique<BackgroundJSStreamManager>(
+         std::move(head), std::move(body), std::move(cached_metadata),
+@@ -2513,6 +2523,7 @@ void BackgroundJSStreamManager::OnFinishCodeCacheConsumerScriptDecode() {
+       std::move(cached_metadata_));
+ }
+ 
++#if !defined(UEFI_RUNTIME)
+ bool BackgroundWasmStreamManager::TryStartStreaming() {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   watcher_ = std::make_unique<mojo::SimpleWatcher>(
+@@ -2576,6 +2587,8 @@ void BackgroundWasmStreamManager::OnDataReadable(
+   watcher_->ArmOrNotify();
+ }
+ 
++#endif
++
+ BackgroundResourceScriptStreamer::BackgroundResourceScriptStreamer(
+     ScriptResource* script_resource)
+     : script_resource_(script_resource),
+diff --git a/third_party/blink/renderer/core/loader/modulescript/module_script_loader.cc b/third_party/blink/renderer/core/loader/modulescript/module_script_loader.cc
+index c5ee1774f0..1f0fa90552 100644
+--- a/third_party/blink/renderer/core/loader/modulescript/module_script_loader.cc
++++ b/third_party/blink/renderer/core/loader/modulescript/module_script_loader.cc
+@@ -368,6 +368,7 @@ void ModuleScriptLoader::NotifyFetchFinishedSuccess(
+       // moduleType is "javascript-or-wasm", then set moduleScript to the result
+       // of creating a WebAssembly module script given bodyBytes,
+       // settingsObject, response's URL, and options/</spec>
++#if !defined(UEFI_RUNTIME)
+       ScriptStreamer* streamer = params.GetScriptStreamer();
+       if (streamer) {
+         // The wasm streaming compilation is not finished yet. Call
+@@ -392,6 +393,7 @@ void ModuleScriptLoader::NotifyFetchFinishedSuccess(
+             std::move(result_callback));
+         return;
+       }
++#endif
+       module_script_ = WasmModuleScript::Create(params, modulator_, options_);
+       break;
+     }
+diff --git a/build/rust/std/rules/BUILD.gn b/build/rust/std/rules/BUILD.gn
+index e6c62cdb2e..b342d5f5ba 100644
+--- a/build/rust/std/rules/BUILD.gn
++++ b/build/rust/std/rules/BUILD.gn
+@@ -3344,6 +3344,10 @@ cargo_crate("std") {
+     "miniz_oxide",
+     "object",
+   ]
++  if (use_uefi_runtime && current_toolchain == default_toolchain) {
++    # Firmware diagnostics do not use the Linux unwinder or ELF file lookup.
++    features -= [ "backtrace" ]
++  }
+   build_root =
+       "//third_party/rust-toolchain/lib/rustlib/src/rust/library/std/build.rs"
+   build_sources = [
+diff --git a/buildtools/third_party/libc++abi/BUILD.gn b/buildtools/third_party/libc++abi/BUILD.gn
+index e04e7afbbb..2ac6c26884 100644
+--- a/buildtools/third_party/libc++abi/BUILD.gn
++++ b/buildtools/third_party/libc++abi/BUILD.gn
+@@ -81,11 +81,22 @@ target(libcxxabi_target_type, "libc++abi") {
+   ]
+   configs += [
+     "//build/config/compiler:no_chromium_code",
+-    "//build/config/compiler:exceptions",
++
+     "//build/config/compiler:rtti",
+     "//buildtools/third_party/libc++:config",
+   ]
+ 
++  if (use_uefi_runtime && current_toolchain == default_toolchain) {
++    configs += [ "//build/config/compiler:no_exceptions" ]
++    sources -= [
++      "//third_party/libc++abi/src/src/cxa_exception.cpp",
++      "//third_party/libc++abi/src/src/cxa_personality.cpp",
++    ]
++    sources += [ "//third_party/libc++abi/src/src/cxa_noexception.cpp" ]
++  } else {
++    configs += [ "//build/config/compiler:exceptions" ]
++  }
++
+   # private_typeinfo.cpp implements __dynamic_cast(), which is the runtime
+   # bit that implements dynamic_cast<>(). But ubsan's vptr check inserts
+   # dynamic_cast<>()s, which leads to infinite recursion. So make sure we don't
+diff --git a/base/system/sys_info_posix.cc b/base/system/sys_info_posix.cc
+index 5460a7f35e..25a98a9502 100644
+--- a/base/system/sys_info_posix.cc
++++ b/base/system/sys_info_posix.cc
+@@ -51,15 +51,23 @@
+ #include <optional>
+ #endif
+ 
++#if defined(UEFI_RUNTIME)
++extern "C" size_t virtual_memory_reservation_limit();
++#endif
++
+ namespace {
+ 
+ base::ByteSize AmountOfVirtualMemory() {
++#if defined(UEFI_RUNTIME)
++  return base::ByteSize(virtual_memory_reservation_limit());
++#else
+   struct rlimit limit;
+   int result = getrlimit(RLIMIT_DATA, &limit);
+   if (result != 0) {
+     NOTREACHED();
+   }
+   return base::ByteSize(limit.rlim_cur == RLIM_INFINITY ? 0 : limit.rlim_cur);
++#endif
+ }
+ using LazyVirtualMemory =
+     base::internal::LazySysInfoValue<base::ByteSize, AmountOfVirtualMemory>;
+diff --git a/third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_client.h b/third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_client.h
+index 7f5490d5f4..4e66201423 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_client.h
++++ b/third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_client.h
+@@ -92,6 +92,11 @@ class BLINK_PLATFORM_EXPORT URLLoaderClient {
+       std::variant<mojo::ScopedDataPipeConsumerHandle, SegmentedBuffer>,
+       std::optional<mojo_base::BigBuffer> cached_metadata) {}
+ 
++#if defined(UEFI_RUNTIME)
++  // Firmware loaders deliver body chunks on the renderer task queue without IPC.
++  virtual void DidReceiveData(base::span<const char> data) = 0;
++#endif
++
+   // Called when a chunk of response data is received. |data_length| is the
+   // number of bytes pointed to by |data|. This is used only for testing to
+   // pass the data to the ResourceLoader.
+diff --git a/base/memory/protected_memory_posix.cc b/base/memory/protected_memory_posix.cc
+index 9e84b31e07..1c0dd3be55 100644
+--- a/base/memory/protected_memory_posix.cc
++++ b/base/memory/protected_memory_posix.cc
+@@ -18,6 +18,10 @@
+ #include "base/bits.h"
+ #include "base/memory/page_size.h"
+ 
++#if defined(UEFI_RUNTIME)
++extern "C" int platform_memory_is_read_only(const void*);
++#endif
++
+ namespace base {
+ 
+ #if BUILDFLAG(PROTECTED_MEMORY_ENABLED)
+@@ -34,7 +38,11 @@ bool SetMemory(void* start, void* end, int prot) {
+ }  // namespace
+ 
+ namespace internal {
+-#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
++#if defined(UEFI_RUNTIME)
++void CheckMemoryReadOnly(const void* pointer) {
++  CHECK(platform_memory_is_read_only(pointer));
++}
++#elif BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_ANDROID)
+ void CheckMemoryReadOnly(const void* ptr) {
+   const uintptr_t page_start =
+       bits::AlignDown(reinterpret_cast<uintptr_t>(ptr), GetPageSize());
+diff --git a/base/debug/stack_trace_posix.cc b/base/debug/stack_trace_posix.cc
+index d4b6111077..a7cef7b131 100644
+--- a/base/debug/stack_trace_posix.cc
++++ b/base/debug/stack_trace_posix.cc
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "base/debug/stack_trace.h"
++#if defined(UEFI_RUNTIME)
++extern "C" size_t firmware_collect_stack_trace(const void**, size_t);
++#endif
+ 
+ #include <errno.h>
+ #include <fcntl.h>
+@@ -76,6 +79,9 @@
+ #include "base/debug/debugger.h"
+ #include "base/debug/debugging_buildflags.h"
+ #include "base/debug/stack_trace.h"
++#if defined(UEFI_RUNTIME)
++extern "C" size_t firmware_collect_stack_trace(const void**, size_t);
++#endif
+ #include "base/files/scoped_file.h"
+ #include "base/logging.h"
+ #include "base/memory/free_deleter.h"
+@@ -1040,7 +1046,9 @@ size_t CollectStackTrace(span<const void*> trace) {
+   // NOTE: This code MUST be async-signal safe (it's used by in-process
+   // stack dumping signal handler). NO malloc or stdio is allowed here.
+ 
+-#if BUILDFLAG(EXCLUDE_UNWIND_TABLES) && \
++#if defined(UEFI_RUNTIME)
++  return firmware_collect_stack_trace(trace.data(), trace.size());
++#elif BUILDFLAG(EXCLUDE_UNWIND_TABLES) && \
+     BUILDFLAG(CAN_UNWIND_WITH_FRAME_POINTERS)
+   // If we do not have unwind tables, then try tracing using frame pointers.
+   return base::debug::TraceStackFramePointers(trace, 0);
+@@ -1072,6 +1080,15 @@ void StackTrace::PrintWithPrefixImpl(cstring_view prefix_string) const {
+ #if defined(HAVE_BACKTRACE)
+   PrintBacktraceOutputHandler handler;
+   ProcessBacktrace(addresses(), prefix_string, &handler);
++#elif defined(UEFI_RUNTIME)
++  for (const void* address : addresses()) {
++    char text[32];
++    internal::itoa_r(reinterpret_cast<intptr_t>(address), 16, 0, text);
++    PrintToStderr(prefix_string.c_str());
++    PrintToStderr("0x");
++    PrintToStderr(text);
++    PrintToStderr("\n");
++  }
+ #endif
+ }
+ 
+@@ -1082,6 +1099,12 @@ void StackTrace::OutputToStreamWithPrefixImpl(
+   StreamBacktraceOutputHandler handler(os);
+   ProcessBacktrace(addresses(), prefix_string, &handler);
+ }
++#elif defined(UEFI_RUNTIME)
++void StackTrace::OutputToStreamWithPrefixImpl(
++    std::ostream* output, cstring_view prefix) const {
++  for (const void* address : addresses())
++    *output << prefix << address << '\n';
++}
+ #endif
+ 
+ namespace internal {
+diff --git a/base/time/time.h b/base/time/time.h
+index 039020b80e..89a17f65dc 100644
+--- a/base/time/time.h
++++ b/base/time/time.h
+@@ -1414,7 +1414,10 @@ class BASE_EXPORT ThreadTicks : public time_internal::TimeBase<ThreadTicks> {
+ 
+   // Returns true if ThreadTicks::Now() is supported on this system.
+   [[nodiscard]] static bool IsSupported() {
+-#if (defined(_POSIX_THREAD_CPUTIME) && (_POSIX_THREAD_CPUTIME >= 0)) || \
++#if defined(UEFI_RUNTIME)
++    // Firmware exposes elapsed time but does not account for thread CPU time.
++    return false;
++#elif (defined(_POSIX_THREAD_CPUTIME) && (_POSIX_THREAD_CPUTIME >= 0)) || \
+     BUILDFLAG(IS_APPLE) || BUILDFLAG(IS_ANDROID) || BUILDFLAG(IS_FUCHSIA)
+     return true;
+ #elif BUILDFLAG(IS_WIN)
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+index 2e6f81363b..008906b767 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+@@ -511,6 +511,9 @@ class CORE_EXPORT WebFrameWidgetImpl
+   // WidgetBaseClient overrides:
+   void OnCommitRequested() override;
+   void BeginMainFrame(const viz::BeginFrameArgs& args) override;
++#if defined(UEFI_RUNTIME)
++  void BeginNonCompositedFrame(base::TimeTicks, uint64_t sequence) override;
++#endif
+   void UpdateLifecycle(WebLifecycleUpdate requested_update,
+                        DocumentUpdateReason reason) override;
+   void UpdateCompositorScrollState(
+@@ -1298,6 +1301,11 @@ class CORE_EXPORT WebFrameWidgetImpl
+   // Different consumers in the browser process makes different assumptions, so
+   // must always send the first IPC regardless of value.
+   std::optional<bool> has_touch_handlers_;
++#if defined(UEFI_RUNTIME)
++  // Non-composited widgets still report touch consumers to the embedder.
++  cc::EventListenerProperties firmware_listener_properties_[
++      cc::kEventListenerClassCount] = {};
++#endif
+ 
+   Vector<mojom::blink::EditCommandPtr> edit_commands_;
+ 
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+index 7c10f4fa47..81b07f5e35 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+@@ -35,6 +35,7 @@
+ #include <optional>
+ #include <utility>
+ 
++#include "third_party/skia/include/core/SkImage.h"
+ #include "base/auto_reset.h"
+ #include "base/containers/to_vector.h"
+ #include "base/debug/crash_logging.h"
+@@ -1682,7 +1683,21 @@ void WebFrameWidgetImpl::RequestDecode(const cc::DrawImage& image,
+   if (auto* layer_tree_host = widget_base_->LayerTreeHost()) {
+     layer_tree_host->QueueImageDecode(image, std::move(callback), speculative);
+   } else {
++#if defined(UEFI_RUNTIME)
++    // Completion must be queued because ImageLoader marks the request dispatched
++    // only after this method returns. Rasterization performs the actual decode.
++    local_root_->GetTaskRunner(TaskType::kInternalDefault)->PostTask(
++        FROM_HERE, base::BindOnce(
++            [](cc::PaintImage image, base::OnceCallback<void(bool)> completion) {
++              auto source = image.GetSwSkImage();
++              auto decoded = source
++                  ? source->makeRasterImage(SkImage::kAllow_CachingHint)
++                  : nullptr;
++              std::move(completion).Run(decoded != nullptr);
++            }, image.paint_image(), std::move(callback)));
++#else
+     std::move(callback).Run(false);
++#endif
+   }
+ }
+ 
+@@ -2233,7 +2248,9 @@ void WebFrameWidgetImpl::UpdateBrowserControlsState(
+ }
+ 
+ void WebFrameWidgetImpl::SetHaveScrollEventHandlers(bool has_handlers) {
+-  widget_base_->LayerTreeHost()->SetHaveScrollEventHandlers(has_handlers);
++  if (auto* host = widget_base_->LayerTreeHost()) {
++    host->SetHaveScrollEventHandlers(has_handlers);
++  }
+ }
+ 
+ void WebFrameWidgetImpl::SetEventListenerProperties(
+@@ -2243,8 +2260,13 @@ void WebFrameWidgetImpl::SetEventListenerProperties(
+     return;
+   }
+ 
+-  widget_base_->LayerTreeHost()->SetEventListenerProperties(
+-      listener_class, listener_properties);
++#if defined(UEFI_RUNTIME)
++  firmware_listener_properties_[static_cast<size_t>(listener_class)] =
++      listener_properties;
++#endif
++  if (auto* host = widget_base_->LayerTreeHost()) {
++    host->SetEventListenerProperties(listener_class, listener_properties);
++  }
+ 
+   if (listener_class == cc::EventListenerClass::kTouchStartOrMove ||
+       listener_class == cc::EventListenerClass::kTouchEndOrCancel) {
+@@ -2271,6 +2293,11 @@ void WebFrameWidgetImpl::SetEventListenerProperties(
+ 
+ cc::EventListenerProperties WebFrameWidgetImpl::EventListenerProperties(
+     cc::EventListenerClass listener_class) const {
++#if defined(UEFI_RUNTIME)
++  if (!widget_base_->LayerTreeHost()) {
++    return firmware_listener_properties_[static_cast<size_t>(listener_class)];
++  }
++#endif
+   return widget_base_->LayerTreeHost()->event_listener_properties(
+       listener_class);
+ }
+@@ -3050,6 +3077,16 @@ void WebFrameWidgetImpl::UpdateUnboundedElementBounds(const gfx::Rect& bounds) {
+   }
+ }
+ 
++#if defined(UEFI_RUNTIME)
++void WebFrameWidgetImpl::BeginNonCompositedFrame(base::TimeTicks time,
++                                                uint64_t sequence) {
++  CHECK(non_composited_client_);
++  const auto interval = base::Milliseconds(16);
++  BeginMainFrame(viz::BeginFrameArgs::Create(BEGINFRAME_FROM_HERE, 1, sequence,
++      time, time + interval, interval, viz::BeginFrameArgs::NORMAL));
++}
++#endif
++
+ void WebFrameWidgetImpl::BeginMainFrame(const viz::BeginFrameArgs& args) {
+   base::TimeTicks last_frame_time = args.frame_time;
+   TRACE_EVENT1("blink", "WebFrameWidgetImpl::BeginMainFrame", "frameTime",
+@@ -4532,24 +4569,36 @@ void WebFrameWidgetImpl::DidHandleGestureEvent(const WebGestureEvent& event) {
+ 
+ void WebFrameWidgetImpl::SetHasPointerRawUpdateEventHandlers(
+     bool has_handlers) {
++  // Non-composited input is dispatched directly without a compositor queue.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   widget_base_->widget_input_handler_manager()
+       ->input_event_queue()
+       ->SetHasPointerRawUpdateEventHandlers(has_handlers);
+ }
+ 
+ void WebFrameWidgetImpl::SetNeedsLowLatencyInput(bool needs_low_latency) {
++  // Non-composited input is dispatched directly without a compositor queue.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   widget_base_->widget_input_handler_manager()
+       ->input_event_queue()
+       ->SetNeedsLowLatency(needs_low_latency);
+ }
+ 
+ void WebFrameWidgetImpl::RequestUnbufferedInputEvents() {
++  // Non-composited input is dispatched directly without a compositor queue.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   widget_base_->widget_input_handler_manager()
+       ->input_event_queue()
+       ->RequestUnbufferedInputEvents();
+ }
+ 
+ void WebFrameWidgetImpl::SetNeedsUnbufferedInputForDebugger(bool unbuffered) {
++  // Non-composited input is dispatched directly without a compositor queue.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   widget_base_->widget_input_handler_manager()
+       ->input_event_queue()
+       ->SetNeedsUnbufferedInputForDebugger(unbuffered);
+
+diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+index bae3a739fc..d8172ce49b 100644
+--- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
++++ b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
+@@ -759,7 +759,14 @@ void ResourceLoader::DidReceiveResponse(
+     return;
+   }
+   if (std::holds_alternative<SegmentedBuffer>(body)) {
++#if defined(UEFI_RUNTIME)
++    // Firmware buffers still require a body consumer for Fetch streaming semantics.
++    auto buffer = SharedBuffer::Create(std::move(std::get<SegmentedBuffer>(body)));
++    DidStartLoadingResponseBodyInternal(
++        *MakeGarbageCollected<SharedBufferBytesConsumer>(std::move(buffer)));
++#else
+     DidReceiveDataImpl(std::move(std::get<SegmentedBuffer>(body)));
++#endif
+     return;
+   }
+   mojo::ScopedDataPipeConsumerHandle body_handle =
+diff --git a/third_party/blink/renderer/core/html/parser/html_document_parser.cc b/third_party/blink/renderer/core/html/parser/html_document_parser.cc
+--- a/third_party/blink/renderer/core/html/parser/html_document_parser.cc
++++ b/third_party/blink/renderer/core/html/parser/html_document_parser.cc
+@@ -217,6 +217,11 @@
+ }
+ 
+ base::TimeDelta GetTimedBudget(int times_yielded) {
++#if defined(UEFI_RUNTIME)
++  // Native input shares this thread, so parsing must retain a short budget
++  // even after the initial yields. Synchronous parser scopes stay atomic.
++  return base::Milliseconds(4);
++#endif
+   // Cache the value to avoid parsing the param string more than once.
+   static const int kNumYieldsWithDefaultBudgetValue =
+       kNumYieldsWithDefaultBudgetDefaultValue;

@@ -1,0 +1,5 @@
+# Preserve Chromium's dependency overrides and build policy allowlists.
+import("//.gn")
+script_executable = "/usr/bin/python3"
+root = "//third_party/blink/uefi:browser"
+root_patterns = [ "//third_party/blink/uefi:browser" ]

@@ -1,0 +1,60 @@
+is_debug = false
+is_component_build = false
+v8_monolithic = true
+v8_use_external_startup_data = false
+v8_enable_i18n_support = false
+v8_enable_webassembly = false
+v8_enable_sandbox = false
+v8_enable_pointer_compression = false
+v8_enable_maglev = false
+v8_enable_turbofan = false
+v8_enable_sparkplug = false
+v8_jitless = true
+v8_enable_verify_heap = false
+v8_enable_test_features = false
+v8_enable_disassembler = false
+v8_enable_object_print = false
+v8_enable_backtrace = false
+v8_enable_snapshot_native_code_counters = false
+symbol_level = 0
+use_custom_libcxx = true
+use_sysroot = false
+is_clang = true
+clang_base_path = "/usr"
+clang_use_chrome_plugins = false
+use_lld = true
+treat_warnings_as_errors = false
+use_siso = false
+use_remoteexec = false
+v8_target_cpu = "x64"
+
+enable_rust = false
+
+v8_enable_temporal_support = false
+v8_enable_fuzztest = false
+
+clang_version = "23"
+
+v8_use_metagen = false
+
+cppgc_enable_caged_heap = false
+cppgc_enable_young_generation = false
+cppgc_enable_pointer_compression = false
+
+use_uefi_runtime = true
+
+custom_toolchain = "//build/toolchain/uefi:x64"
+host_toolchain = "//build/toolchain/linux:clang_x64"
+v8_snapshot_toolchain = "//build/toolchain/linux:clang_x64"
+use_clang_modules = false
+use_llvm_libatomic = false
+uefi_musl_include_directories = [
+  "@WORKSPACE@/outputs/chromium-uefi/build/musl/uapi",
+  "@CLANG_RESOURCE@/include",
+  "@WORKSPACE@/outputs/chromium-uefi/build/musl/libc/obj/include",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/include",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/x86_64",
+  "@WORKSPACE@/work/chromium-build/musl-1.2.5/arch/generic",
+]
+
+v8_lower_limits_mode = true
