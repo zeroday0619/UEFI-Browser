@@ -23,7 +23,7 @@ def run(execute, build, log):
         return sum(data[offset:offset + 3])
     position = [640, 400]
     def move(x, y, page=True):
-        if page: y += 48
+        if page: y += 80
         while position != [x, y]:
             dx = max(-100, min(100, x-position[0]))
             dy = max(-100, min(100, y-position[1]))
@@ -59,6 +59,114 @@ def run(execute, build, log):
             elif character == '.': key('dot')
             elif character == '-': key('minus')
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'client-hints':
+        for scheme, port in [('https', '8766'), ('http', '8765')]:
+            key('ctrl', 'l')
+            type_address(scheme + '://10.0.2.2:' + port + '/hints')
+            key('ret')
+            wait_marker('CLIENT_HINTS_TEST ' + scheme.upper() + ' PASS')
+        key('ctrl', 'l')
+        type_address('https://10.0.2.2:8766/hints-policy')
+        key('ret')
+        wait_marker('CLIENT_HINTS_TEST POLICY PASS')
+        print('PASS: secure Client Hints, insecure suppression, and Permissions Policy verified.')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'identity':
+        key('ctrl', 'l')
+        type_address('http://10.0.2.2:8765/identity')
+        key('ret')
+        wait_marker('USER_AGENT_TEST PASS ')
+        print('HTTP document, subresource, and navigator User-Agent match.')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'tabs':
+        def fresh(marker, offset):
+            deadline = time.monotonic() + 30
+            while marker not in healthy()[offset:]:
+                if time.monotonic() > deadline: raise AssertionError(marker + '\n' + healthy()[offset:])
+                time.sleep(.05)
+        type_address('http://10.0.2.2:8765/tabs.html')
+        key('ret')
+        wait_marker('TABS_TEST external script loaded')
+        click(100, 125)
+        key('x')
+        click(100, 215)
+        wait_marker('TABS_TEST count=1 text=x')
+        move(800, 500)
+        wheel('down', 3)
+        before_scroll = snapshot('tabs-scroll-before')
+        key('ctrl', 't')
+        wait_marker('TABS: created id=2 count=2')
+        type_address('http://10.0.2.2:8765/index.html')
+        key('ret')
+        wait_marker('INPUT_TEST first document loaded')
+        click(520, 125)
+        wait_marker('INPUT_TEST button activated')
+        key('ctrl', 'shift', 'tab')
+        move(800, 500)
+        after_scroll = snapshot('tabs-scroll-after')
+        offset = before_scroll[0] * 80 * 3
+        assert before_scroll[2][offset:] == after_scroll[2][offset:], 'Tab scroll position or page pixels changed'
+        key('ctrl', 'home')
+        click(100, 215)
+        wait_marker('TABS_TEST count=2 text=x')
+        snapshot('tabs-preserved')
+        wait_marker('TABS_TEST visibility=hidden')
+        wait_marker('TABS_TEST visibility=visible')
+        # Closing the background frame must not remove the surviving frame's loader.
+        click(425, 64, False)
+        wait_marker('TABS: closed id=2 remaining=1')
+        offset = len(healthy())
+        click(260, 24, False)
+        fresh('TABS_TEST external script loaded', offset)
+        click(100, 292)
+        wait_marker('INPUT_TEST second document loaded')
+        offset = len(healthy())
+        click(180, 24, False)
+        fresh('TABS_TEST external script loaded', offset)
+        offset = len(healthy())
+        click(220, 24, False)
+        fresh('INPUT_TEST second document loaded', offset)
+        offset = len(healthy())
+        click(180, 24, False)
+        fresh('TABS_TEST external script loaded', offset)
+        click(100, 352)
+        wait_marker('TABS: created id=3 count=2')
+        wait_marker('INPUT_TEST third document loaded')
+        key('shift', 'esc')
+        wait_marker('MONITOR: opened tabs=2')
+        expected = min(4, int(os.environ.get('QEMU_TEST_CPUS', '1')) - 1)
+        wait_marker('MONITOR: workers=' + str(expected))
+        snapshot('tabs-monitor')
+        key('esc')
+        wait_marker('MONITOR: closed tabs=2')
+        key('ctrl', 'w')
+        wait_marker('TABS: closed id=3 remaining=1')
+        key('ctrl', 't')
+        key('ctrl', 't')
+        key('ctrl', 't')
+        key('ctrl', 't')
+        wait_marker('TABS: creation refused by tab or tracked-heap limit')
+        key('ctrl', '1')
+        click(100, 215)
+        wait_marker('TABS_TEST count=1 text=')
+        key('ctrl', '9')
+        for _ in range(4): key('ctrl', 'w')
+        wait_marker('TABS: created id=7 count=1')
+        click(245, 64, False)
+        wait_marker('TABS: created id=8 count=2')
+        click(1250, 64, False)
+        snapshot('tabs-monitor-blank')
+        key('esc')
+        key('ctrl', 't')
+        type_address('http://10.0.2.2:8765/slow')
+        key('ret')
+        offset = len(healthy())
+        key('ctrl', 'w')
+        fresh('TABS: closed id=9 remaining=2', offset)
+        time.sleep(3)
+        healthy()
+        print('PASS: tabs preserve DOM and form state, isolate history, retain resource loading after close, open target blank, enforce limits and show actual process workers', flush=True)
+        return
     if os.environ.get('INPUT_SCENARIO') == 'settings-reset':
         key('ctrl', 'comma')
         wait_marker('UI: toolbar settings started')
@@ -179,7 +287,7 @@ def run(execute, build, log):
         (build/'heavy-fixture-samples.json').write_text(json.dumps(samples,indent=2))
         print('PASS: real DOM keyboard, click and wheel during repeated CPU and layout work '+json.dumps(samples),flush=True)
         return
-    if os.environ.get('INPUT_SCENARIO') == 'heavy-site':
+    if os.environ.get('INPUT_SCENARIO') in ('heavy-site', 'tabs-site'):
         import json
         type_address('https://zeroday0619.dev')
         key('ret')
@@ -238,6 +346,26 @@ def run(execute, build, log):
         wheel('down',3)
         snapshot('heavy-scroll')
         assert re.search(r'BLINK: scroll offset [\d.-]+ [1-9]', healthy()[start:]), 'Real site did not scroll'
+        if os.environ.get('INPUT_SCENARIO') == 'tabs-site':
+            key('ctrl', 't')
+            wait_marker('TABS: created id=2 count=2')
+            key('ctrl', 'comma')
+            wait_marker('UI: toolbar settings started')
+            snapshot('tabs-site-settings')
+            key('ctrl', 'shift', 'tab')
+            key('ctrl', 'home')
+            previous = snapshot('tabs-site-restored')
+            started = time.monotonic()
+            click(1170, 38)
+            changed_theme(previous, 'tabs-site-interactive', started)
+            key('shift', 'esc')
+            wait_marker('MONITOR: opened tabs=2')
+            snapshot('tabs-site-monitor')
+            key('esc')
+            key('ctrl', 'w')
+            wait_marker('TABS: closed id=1 remaining=1')
+            snapshot('tabs-site-survivor')
+            print('PASS: real website survives tab switch with interactive JavaScript; settings tab survives website close', flush=True)
         print('PASS: real site loading input exercised; post-load theme click, Space and wheel verified', flush=True)
         return
     if os.environ.get('INPUT_SCENARIO') in ('responsive-loading', 'responsive-navigation', 'responsive-cancel'):
@@ -566,7 +694,7 @@ def run(execute, build, log):
         key('ret')
         wait_marker('INPUT_TEST third document loaded')
         snapshot('new-window-document')
-        print('PASS: Tab and Enter activated a target=_blank link in the single viewport', flush=True)
+        print('PASS: Tab and Enter activated a target=_blank link in a new tab', flush=True)
         return
     assert 'relative=1' in healthy(), 'No relative UEFI pointer was discovered'
     original = snapshot('initial')

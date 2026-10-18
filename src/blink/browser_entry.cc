@@ -4,6 +4,7 @@
 #include <cstdio>
 #include "process/process.h"
 #include <cmath>
+#include <cstring>
 #include "blink/browser_settings.h"
 #include <algorithm>
 #include <vector>
@@ -37,10 +38,42 @@
 #include "third_party/skia/include/core/SkImageInfo.h"
 #include "third_party/skia/include/core/SkSurface.h"
 
+extern "C" const char* firmware_browser_user_agent(void) {
+  return "Mozilla/5.0 (UEFI; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
+         "Chrome/" UEFI_CHROMIUM_VERSION " Safari/537.36 UEFIBrowser/0.3";
+}
+
+namespace {
+blink::UserAgentMetadata BrowserUserAgentMetadata() {
+  blink::UserAgentMetadata metadata;
+  const std::string version = UEFI_CHROMIUM_VERSION;
+  metadata.brand_version_list = {{"Chromium", version.substr(0, version.find('.'))},
+                                 {"UEFIBrowser", "0"}};
+  metadata.brand_full_version_list = {{"Chromium", version}, {"UEFIBrowser", "0.3"}};
+  metadata.full_version = version;
+  metadata.platform = "UEFI";
+  // Firmware revisions vary between machines and are not an operating system version.
+  metadata.platform_version = "";
+  metadata.architecture = "x86";
+  metadata.bitness = "64";
+  metadata.mobile = false;
+  metadata.form_factors = {blink::kDesktopFormFactor};
+  return metadata;
+}
+}
+extern "C" const char* firmware_browser_client_hint(const char* name) {
+  static const std::string brands = BrowserUserAgentMetadata().SerializeBrandMajorVersionList();
+  if (!std::strcmp(name, "Sec-CH-UA")) return brands.c_str();
+  if (!std::strcmp(name, "Sec-CH-UA-Mobile")) return "?0";
+  if (!std::strcmp(name, "Sec-CH-UA-Platform")) return "\"UEFI\"";
+  return nullptr;
+}
+
 namespace uefi_browser {
 void InstallFonts();
 std::unique_ptr<base::DiscardableMemoryAllocator> CreateDiscardableAllocator();
 }
+extern "C" size_t runtime_memory_used(void);
 extern "C" const char firmware_browser_url[];
 extern "C" const char firmware_javascript_flags[];
 extern "C" const unsigned char* firmware_resource(int identifier, size_t* size);
@@ -64,7 +97,18 @@ struct Graphics {
                        size_t, size_t, size_t, size_t);
   Mode* mode;
 };
-constexpr int kToolbarHeight = 48;
+constexpr int kAddressHeight = 48;
+constexpr int kToolbarHeight = 80;
+constexpr size_t kMaximumTabs = 4;
+struct BrowserTab {
+  size_t identifier = 0, presentations = 0;
+  std::vector<Pixel> pixels;
+  sk_sp<SkSurface> surface;
+  std::unique_ptr<uefi_browser::BrowserFrame> frame;
+  std::u16string address;
+  size_t caret = 0;
+  bool focused = true, selected = false, error = false;
+};
 struct BrowserContext {
   SystemTable* table;
   base::RunLoop* run_loop;
@@ -73,9 +117,161 @@ struct BrowserContext {
   size_t width = 0;
   size_t height = 0;
   size_t frames_presented = 0;
+  bool raster_presented = false;
   int64_t presentation_microseconds = 0;
   std::unique_ptr<uefi_browser::FirmwareInput> input;
   uefi_browser::BrowserFrame* frame = nullptr;
+  blink::scheduler::WebThreadScheduler* scheduler = nullptr;
+  std::vector<std::unique_ptr<BrowserTab>> tabs;
+  size_t active_tab = 0, next_tab_identifier = 1;
+  bool monitor = false;
+  base::TimeTicks monitor_updated;
+  void SaveAddress() {
+    if (tabs.empty()) return;
+    auto& tab = *tabs[active_tab];
+    tab.address = address; tab.caret = caret; tab.focused = address_focused;
+    tab.selected = selected; tab.error = address_error;
+  }
+  void SelectTab(size_t index, bool save_address = true) {
+    if (index >= tabs.size()) return;
+    if (save_address) SaveAddress();
+    if (frame) frame->SetVisible(false);
+    active_tab = index;
+    auto& tab = *tabs[index];
+    frame = tab.frame.get();
+    address = tab.address; caret = tab.caret; address_focused = tab.focused;
+    selected = tab.selected; address_error = tab.error;
+    page_drag = false;
+    frame->SetVisible(!monitor);
+    std::printf("TABS: selected id=%zu count=%zu url=%s\n",tab.identifier,tabs.size(),frame->CurrentUrl().c_str());
+    Present();
+  }
+  void OpenTab(std::string url) { NewTab(url.c_str()); }
+  Status NewTab(const char* url = "about:blank") {
+    if (tabs.size() >= kMaximumTabs || runtime_memory_used() > 96u*1024*1024) {
+      std::puts("TABS: creation refused by tab or tracked-heap limit");
+      return 1;
+    }
+    SaveAddress();
+    if (frame) frame->SetVisible(false);
+    auto tab = std::make_unique<BrowserTab>();
+    tab->identifier = next_tab_identifier++;
+    tab->pixels.resize(width*(height-kToolbarHeight));
+    tab->surface = SkSurfaces::WrapPixels(SkImageInfo::Make(width,height-kToolbarHeight,
+        kBGRA_8888_SkColorType,kPremul_SkAlphaType),tab->pixels.data(),width*sizeof(Pixel));
+    CHECK(tab->surface);
+    tab->surface->getCanvas()->clear(SK_ColorWHITE);
+    tab->frame = std::make_unique<uefi_browser::BrowserFrame>(table,*scheduler,
+        *tab->surface->getCanvas(),gfx::Size(width,height-kToolbarHeight),
+        base::BindRepeating(&BrowserContext::TabPresented,base::Unretained(this),tab->identifier),
+        base::BindRepeating(&BrowserContext::OpenTab,base::Unretained(this)));
+    tabs.push_back(std::move(tab));
+    SelectTab(tabs.size()-1, false);
+    Status result = frame->Navigate(url);
+    address_focused = std::strcmp(url,"about:blank") == 0;
+    address = address_focused ? std::u16string() : base::UTF8ToUTF16(url);
+    caret = address.size();
+    address_error = result != 0;
+    std::printf("TABS: created id=%zu count=%zu\n",tabs[active_tab]->identifier,tabs.size());
+    return result;
+  }
+  void CloseTab(size_t index) {
+    if (index >= tabs.size()) return;
+    SaveAddress();
+    size_t old_active = active_tab;
+    size_t identifier = tabs[index]->identifier;
+    if (index == active_tab) frame = nullptr;
+    tabs.erase(tabs.begin()+index);
+    std::printf("TABS: closed id=%zu remaining=%zu\n",identifier,tabs.size());
+    if (tabs.empty()) { active_tab = 0; if (NewTab()) run_loop->Quit(); return; }
+    active_tab = old_active > index ? old_active-1 : std::min(old_active,tabs.size()-1);
+    // The erased tab must not overwrite the surviving tab's saved address state.
+    frame = nullptr;
+    auto& tab = *tabs[active_tab];
+    address = tab.address; caret = tab.caret; address_focused = tab.focused;
+    selected = tab.selected; address_error = tab.error;
+    SelectTab(active_tab, false);
+  }
+  void TabPresented(size_t identifier) {
+    for (const auto& tab : tabs) if (tab->identifier == identifier) {
+      ++tab->presentations;
+      if (tab.get() == tabs[active_tab].get() && !monitor) {
+        Present();
+        if (!raster_presented) std::puts("BLINK: first raster frame copied to GOP");
+        raster_presented = true;
+      }
+      return;
+    }
+  }
+  void ToggleMonitor() {
+    monitor = !monitor;
+    frame->SetVisible(!monitor);
+    page_drag = false;
+    std::printf("MONITOR: %s tabs=%zu\n",monitor ? "opened" : "closed",tabs.size());
+    RenderProcessSnapshot snapshot{}; render_processes_snapshot(&snapshot);
+    std::printf("MONITOR: workers=%zu tracked_heap=%zu\n",snapshot.workers,runtime_memory_used());
+    Present();
+  }
+  int TabWidth() const { return std::max(100,std::min(220,(static_cast<int>(width)-188)/static_cast<int>(std::max<size_t>(1,tabs.size())))); }
+  int TabButton(int x, int y) const {
+    if (y < kAddressHeight || y >= kToolbarHeight) return -1;
+    if (x >= static_cast<int>(width)-128) return 300;
+    int index = (x-8)/TabWidth();
+    if (x >= 8 && index >= 0 && static_cast<size_t>(index) < tabs.size())
+      return ((x-8)%TabWidth() >= TabWidth()-28 ? 200 : 100)+index;
+    if (x >= 8+static_cast<int>(tabs.size())*TabWidth() && x < 44+static_cast<int>(tabs.size())*TabWidth()) return 301;
+    return -1;
+  }
+  void TabAction(int button) {
+    if (button == 300) ToggleMonitor();
+    else if (button == 301) NewTab();
+    else if (button >= 200) CloseTab(button-200);
+    else if (button >= 100) SelectTab(button-100);
+  }
+  void DrawTabs() {
+    SkPaint paint; paint.setAntiAlias(true);
+    const bool dark = uefi_browser::preferences.dark;
+    paint.setColor(dark ? SkColorSetRGB(32,32,32) : SkColorSetRGB(232,234,237));
+    toolbar->drawRect(SkRect::MakeXYWH(0,kAddressHeight,width,32),paint);
+    for (size_t index=0;index<tabs.size();++index) {
+      int left=8+index*TabWidth();
+      paint.setColor(index==active_tab ? (dark ? SkColorSetRGB(60,60,60) : SK_ColorWHITE) : (dark ? SkColorSetRGB(32,32,32) : SkColorSetRGB(232,234,237)));
+      toolbar->drawRoundRect(SkRect::MakeXYWH(left,50,TabWidth()-4,28),4,4,paint);
+      paint.setColor(dark ? SK_ColorWHITE : SkColorSetRGB(36,36,36));
+      std::string url=tabs[index]->frame->CurrentUrl();
+      std::string label=url.empty() || url=="about:blank" ? "New tab" : url;
+      if (tabs[index]->frame->NavigationPending()) label="Loading...";
+      toolbar->save(); toolbar->clipRect(SkRect::MakeXYWH(left+8,50,TabWidth()-40,28));
+      toolbar->drawString(label.c_str(),left+8,70,*font,paint); toolbar->restore();
+      toolbar->drawString("x",left+TabWidth()-23,70,*font,paint);
+    }
+    paint.setColor(dark ? SK_ColorWHITE : SkColorSetRGB(36,36,36));
+    toolbar->drawString(tabs.size()<kMaximumTabs ? "+" : "4/4",12+tabs.size()*TabWidth(),70,*font,paint);
+    toolbar->drawString(monitor ? "Close monitor" : "Processes",width-120,70,*font,paint);
+  }
+  void DrawMonitor() {
+    if (!monitor) return;
+    RenderProcessSnapshot snapshot{}; render_processes_snapshot(&snapshot);
+    monitor_updated=base::TimeTicks::Now();
+    SkPaint paint; paint.setColor(uefi_browser::preferences.dark ? SkColorSetRGB(32,32,32) : SkColorSetRGB(246,247,249));
+    toolbar->drawRect(SkRect::MakeXYWH(0,kToolbarHeight,width,height-kToolbarHeight),paint);
+    paint.setColor(uefi_browser::preferences.dark ? SK_ColorWHITE : SkColorSetRGB(36,36,36));
+    char line[512]; int y=116;
+    auto draw=[&](const char* text) { toolbar->drawString(text,24,y,*font,paint); y+=28; };
+    draw("Process monitor - live snapshot (500 ms); Shift+Esc closes");
+    draw("Main process / BSP: browser UI, all Blink DOM, JavaScript, layout and Skia rasterization");
+    std::snprintf(line,sizeof(line),"Tracked C heap: %.1f MiB (excludes virtual-memory commitments and worker pages)",runtime_memory_used()/1048576.0); draw(line);
+    std::snprintf(line,sizeof(line),"AP transfers: %zu | BSP fallback: %zu | failures: %zu | starts: %zu | idle stops: %zu",snapshot.frames,snapshot.fallback_frames,snapshot.failures,snapshot.starts,snapshot.idle_stops); draw(line);
+    for (size_t index=0;index<snapshot.workers;++index) {
+      std::snprintf(line,sizeof(line),"Worker %zu / CPU %zu / CPL3: %s - completed-frame transfer",index+2,snapshot.processor[index],snapshot.disabled ? "disabled" : snapshot.running ? (snapshot.stopping ? "stopping" : "running") : "idle"); draw(line);
+    }
+    if (!snapshot.workers) draw("No AP workers available; BSP presentation is active.");
+    draw("Tabs share the main process. CPU percentages and per-tab memory are not measured.");
+    for (size_t index=0;index<tabs.size();++index) {
+      std::snprintf(line,sizeof(line),"Tab %zu | %s | %s | frames %zu | %.180s",tabs[index]->identifier,index==active_tab ? "selected" : "background",tabs[index]->frame->NavigationPending() ? "navigation pending" : "document committed",tabs[index]->presentations,tabs[index]->frame->CurrentUrl().c_str()); draw(line);
+    }
+    draw("Close tabs with their x button or Ctrl+W. AP workers cannot be terminated individually.");
+  }
   int pointer_x = 0, pointer_y = 0;
   bool pointer_visible = false;
   bool cursor_drawn = false;
@@ -221,10 +417,14 @@ struct BrowserContext {
     paint.setColor(address.empty() ? SkColorSetRGB(110, 115, 125) : foreground);
     toolbar->drawSimpleText(display.data(), display.size() * sizeof(char16_t), SkTextEncoding::kUTF16, 302 - offset, 30, *font, paint);
     toolbar->restore();
+    DrawTabs();
   }
   void Present() {
     auto started = base::TimeTicks::Now();
+    if (!tabs.empty() && !monitor)
+      std::memcpy(pixels.data()+width*kToolbarHeight,tabs[active_tab]->pixels.data(),width*(height-kToolbarHeight)*sizeof(Pixel));
     DrawToolbar();
+    DrawMonitor();
     size_t previous = LockCursor();
     RestoreCursor();
     Status result = 0;
@@ -236,8 +436,7 @@ struct BrowserContext {
     DrawCursor();
     UnlockCursor(previous);
     presentation_microseconds += (base::TimeTicks::Now() - started).InMicroseconds();
-    if (++frames_presented == 1)
-      std::puts("BLINK: first raster frame copied to GOP");
+    ++frames_presented;
   }
   void DrawCursor() {
     if (framebuffer && pointer_visible) {
@@ -332,13 +531,14 @@ struct BrowserContext {
       context.pointer_visible = true;
       bool pressed = (pointer_sample.buttons & 1) && !(context.pointer_buttons & 1);
       if (pressed) {
-        if (pointer_sample.y < kToolbarHeight) {
+        if (pointer_sample.y < kAddressHeight) {
           context.toolbar_pressed = context.ToolbarButton(pointer_sample.x, pointer_sample.y);
           if (pointer_sample.x >= 292 && pointer_sample.x < static_cast<int>(context.width) - 52) context.FocusAddress();
         }
-        else { context.address_focused = false; context.page_drag = true; }
+        else if (pointer_sample.y < kToolbarHeight) context.toolbar_pressed = context.TabButton(pointer_sample.x,pointer_sample.y);
+        else if (!context.monitor) { context.address_focused = false; context.page_drag = true; }
       }
-      if (pointer_sample.y >= kToolbarHeight || context.page_drag) {
+      if (!context.monitor && (pointer_sample.y >= kToolbarHeight || context.page_drag)) {
         auto page = pointer_sample;
         page.y = std::max(0, page.y - kToolbarHeight);
         context.frame->Pointer(page);
@@ -346,7 +546,9 @@ struct BrowserContext {
       if (!(pointer_sample.buttons & 1) && (context.pointer_buttons & 1)) {
         int button = context.toolbar_pressed;
         context.toolbar_pressed = -1;
-        if (button >= 0 && context.ToolbarButton(pointer_sample.x, pointer_sample.y) == button)
+        if (button >= 100 && context.TabButton(pointer_sample.x,pointer_sample.y) == button)
+          context.TabAction(button);
+        else if (button >= 0 && button < 100 && context.ToolbarButton(pointer_sample.x, pointer_sample.y) == button)
           context.ToolbarAction(button);
       }
       if (!pointer_sample.buttons) context.page_drag = false;
@@ -358,18 +560,28 @@ struct BrowserContext {
     const auto key_deadline = base::TimeTicks::Now() + base::Milliseconds(4);
     for (int count = 0; count < 8 && context.input->ReadKey(key); ++count) {
       toolbar_changed = true;
-      if (key.key.scan == 22) context.run_loop->Quit();
+      bool control = (key.shift & 0x80000000u) && (key.shift & 12);
+      bool shift = (key.shift & 0x80000000u) && (key.shift & 3);
+      auto character = key.key.character;
+      if (shift && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
+      else if (context.monitor && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
+      else if (control && (character == 20 || character == 't' || character == 'T')) context.NewTab();
+      else if (control && (character == 23 || character == 'w' || character == 'W')) context.CloseTab(context.active_tab);
+      else if (control && character == 9) context.SelectTab((context.active_tab+context.tabs.size()+(shift ? -1 : 1))%context.tabs.size());
+      else if (control && character >= '1' && character <= '9') context.SelectTab(character == '9' ? context.tabs.size()-1 : character-'1');
+      else if (key.key.scan == 22) context.run_loop->Quit();
       else if ((key.shift & 0x80000000u) && (key.shift & 12) &&
                (key.key.character == 12 || key.key.character == 'l' || key.key.character == 'L')) context.FocusAddress();
       else if ((key.shift & 0x80000000u) && (key.shift & 12) && key.key.character == ',') context.ToolbarAction(3);
       else if (context.address_focused) context.AddressKey(key);
-      else context.frame->Keyboard(key);
+      else if (!context.monitor) context.frame->Keyboard(key);
       handled = true;
       if (base::TimeTicks::Now() >= key_deadline) break;
     }
     if (handled) context.PresentInput(toolbar_changed);
     resource_async_process();
     render_processes_idle();
+    if (context.monitor && base::TimeTicks::Now()-context.monitor_updated >= base::Milliseconds(500)) context.Present();
     return handled;
   }
 };
@@ -417,6 +629,12 @@ class FirmwarePlatform final : public blink::Platform {
       return result;
     }
     return std::string(reinterpret_cast<const char*>(data), size);
+  }
+  blink::UserAgentMetadata UserAgentMetadata() override {
+    return BrowserUserAgentMetadata();
+  }
+  blink::WebString UserAgent() override {
+    return blink::WebString::FromUtf8(firmware_browser_user_agent());
   }
   blink::WebString DefaultLocale() override {
     return blink::WebString::FromAscii("ko-KR");
@@ -475,23 +693,18 @@ extern "C" int run_blink_browser(SystemTable* table) {
   context.width = context.graphics->mode->information->width;
   context.height = context.graphics->mode->information->height;
   CHECK_GT(context.width, 0u);
-  CHECK_GT(context.height, 0u);
+  CHECK_GT(context.height, 400u);
+  CHECK_GE(context.width, 640u);
   CHECK_LE(context.width, 4096u);
   CHECK_LE(context.height, 4096u);
   context.pixels.resize(context.width * context.height);
-  auto surface = SkSurfaces::WrapPixels(
-      SkImageInfo::Make(static_cast<int>(context.width),
-                        static_cast<int>(context.height - kToolbarHeight), kBGRA_8888_SkColorType,
-                        kPremul_SkAlphaType), context.pixels.data() + context.width * kToolbarHeight,
-      context.width * sizeof(Pixel));
-  CHECK(surface);
   auto toolbar_surface = SkSurfaces::WrapPixels(
-      SkImageInfo::Make(static_cast<int>(context.width), kToolbarHeight,
+      SkImageInfo::Make(static_cast<int>(context.width), static_cast<int>(context.height),
           kBGRA_8888_SkColorType, kPremul_SkAlphaType), context.pixels.data(), context.width * sizeof(Pixel));
   CHECK(toolbar_surface);
   context.toolbar = toolbar_surface->getCanvas();
   context.font = std::make_unique<SkFont>(skia::DefaultFontMgr()->matchFamilyStyle("Noto Sans", SkFontStyle()), 15);
-  surface->getCanvas()->clear(SK_ColorWHITE);
+  toolbar_surface->getCanvas()->clear(SK_ColorWHITE);
   mojo::BinderMap binders;
   std::puts("BLINK: initialize platform heap");
   blink::Platform::InitializeBlink();
@@ -503,10 +716,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
   blink::Initialize(&platform, &binders, scheduler.get());
   int navigation_result = 0;
   {
-    uefi_browser::BrowserFrame frame(table, *scheduler, *surface->getCanvas(),
-        gfx::Size(static_cast<int>(context.width), static_cast<int>(context.height - kToolbarHeight)),
-        base::BindRepeating(&BrowserContext::Present, base::Unretained(&context)));
-    context.frame = &frame;
+    context.scheduler = scheduler.get();
     context.input = std::make_unique<uefi_browser::FirmwareInput>(table, context.width, context.height);
     context.address = base::UTF8ToUTF16(firmware_browser_url);
     context.address_focused = context.address == u"about:blank";
@@ -522,7 +732,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
     }
     CHECK_EQ(resource_async_initialize(table), 0u);
     if (context.framebuffer) render_processes_initialize(table, context.width * context.height);
-    Status result = frame.Navigate(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url);
+    Status result = context.NewTab(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url);
     if (result) {
       std::printf("FAIL: navigation transport status 0x%llx\n",
                   static_cast<unsigned long long>(result));
@@ -534,6 +744,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
     std::printf("PERF: cursor_presentations=%zu\n", context.cursor_presentations);
     context.input->SetPointerObserver(nullptr, nullptr);
     context.frame = nullptr;
+    context.tabs.clear();
     context.input.reset();
   }
   render_processes_shutdown();

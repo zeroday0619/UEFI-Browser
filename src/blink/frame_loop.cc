@@ -34,6 +34,7 @@ FrameLoop::~FrameLoop() {
 bool FrameLoop::Start() {
   CHECK(runner_->RunsTasksInCurrentSequence());
   requested_ = true;
+  if (!visible_) return true;
   if (running_) return true;
   auto delay = std::max(base::TimeDelta(), last_tick_ + base::Milliseconds(16) - base::TimeTicks::Now());
   running_ = runner_->PostDelayedTask(
@@ -46,6 +47,12 @@ void FrameLoop::Stop() {
   weak_factory_.InvalidateWeakPtrs();
   picture_.reset();
   staging_.reset();
+}
+void FrameLoop::SetVisible(bool visible) {
+  if (visible_ == visible) return;
+  visible_ = visible;
+  if (visible) Start();
+  else Stop();
 }
 void FrameLoop::Tick() {
   CHECK(runner_->RunsTasksInCurrentSequence());

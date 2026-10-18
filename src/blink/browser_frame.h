@@ -16,7 +16,8 @@ namespace uefi_browser {
 class BrowserFrame {
  public:
   BrowserFrame(SystemTable*, blink::scheduler::WebThreadScheduler&, SkCanvas&,
-               gfx::Size viewport, base::RepeatingClosure present);
+               gfx::Size viewport, base::RepeatingClosure present,
+               base::RepeatingCallback<void(std::string)> open_tab);
   ~BrowserFrame();
   BrowserFrame(const BrowserFrame&) = delete;
   BrowserFrame& operator=(const BrowserFrame&) = delete;
@@ -31,6 +32,7 @@ class BrowserFrame {
   Status Reload();
   void Pointer(const PointerSample&);
   void Keyboard(const KeySample&);
+  void SetVisible(bool visible);
  private:
   class State;
   std::unique_ptr<State> state_;

@@ -173,7 +173,16 @@ class AsyncNavigation final : public NavigationRequest {
     ResponseOwner owner;
     if (!job) {
       timings.fetch_start = base::TimeTicks::Now();
-      job = resource_async_start(table, request_url.spec().c_str(), nullptr, 0);
+      // Main document navigation bypasses Blink's subresource hint generation.
+      Header hints[3];
+      size_t hint_count = 0;
+      if (request_url.SchemeIs("https")) {
+        for (const char* name : {"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"}) {
+          const char* value = firmware_browser_client_hint(name);
+          if (value) hints[hint_count++] = {const_cast<char*>(name), const_cast<char*>(value)};
+        }
+      }
+      job = resource_async_start(table, request_url.spec().c_str(), hints, hint_count);
       if (!job) { Finish(ERROR(9)); return; }
     }
     Status result;

@@ -2,6 +2,7 @@
 """Serve deterministic redirects for firmware navigation regression tests."""
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import json
 import time
 import os
 
@@ -10,6 +11,49 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*arguments, directory=str(Path(__file__).parent / 'input-pages'), **keywords)
 
     def do_GET(self):
+        if self.path in ('/hints', '/hints-policy', '/hints.js'):
+            hints = {name.lower(): self.headers.get_all(name, []) for name in
+                     ('Sec-CH-UA', 'Sec-CH-UA-Mobile', 'Sec-CH-UA-Platform')}
+            print('CLIENT_HINTS ' + self.path + ' ' + json.dumps(hints), flush=True)
+            if self.path != '/hints.js':
+                body = ('<!doctype html><title>Client Hints</title><h1>Client Hints</h1>'
+                        '<script>window.hintsPolicy=' + json.dumps(self.path == '/hints-policy') + ';window.documentHints=' + json.dumps(hints) +
+                        ';</script><script src="/hints.js"></script>').encode()
+                content_type = 'text/html'
+            else:
+                body = ('window.resourceHints=' + json.dumps(hints) + ';' +
+                        (Path(__file__).parent / 'input-pages/client-hints.js').read_text()).encode()
+                content_type = 'text/javascript'
+            self.send_response(200)
+            if self.path == '/hints-policy':
+                self.send_header('Permissions-Policy', 'ch-ua=(), ch-ua-mobile=(), ch-ua-platform=()')
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ('/identity', '/identity.js'):
+            agents = self.headers.get_all('User-Agent', [])
+            print('USER_AGENT ' + self.path + ' ' + json.dumps(agents), flush=True)
+            identity = json.dumps(agents)
+            if self.path == '/identity':
+                body = ('<!doctype html><title>User-Agent test</title>'
+                        '<h1>User-Agent consistency</h1><script>window.documentAgents=' + identity +
+                        ';</script><script src="/identity.js"></script>').encode()
+                content_type = 'text/html; charset=utf-8'
+            else:
+                body = ('const agents=' + identity + ';'
+                        'const valid=documentAgents.length===1 && agents.length===1 && '
+                        'documentAgents[0]===navigator.userAgent && agents[0]===navigator.userAgent && '
+                        '/^Mozilla\\/5\\.0 \\(UEFI; x86_64\\).* Chrome\\/[0-9.]+ Safari\\/537\\.36 UEFIBrowser\\/0\\.3$/.test(navigator.userAgent);'
+                        'console.log("USER_AGENT_TEST "+(valid?"PASS ":"FAIL ")+navigator.userAgent);').encode()
+                content_type = 'text/javascript'
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == '/held-data':
             release = Path(os.environ['NETWORK_RELEASE_FILE'])
             print('HELD_REQUEST_STARTED', flush=True)

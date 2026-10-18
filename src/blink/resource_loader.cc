@@ -203,6 +203,7 @@ class ResourceLoader final : public blink::URLLoader {
 #if defined(UEFI_RUNTIME)
 namespace {
 SystemTable* resource_system_table = nullptr;
+size_t resource_loader_owners = 0;
 std::unique_ptr<blink::URLLoader> CreateFrameResourceLoader(
     const blink::SecurityOrigin& origin,
     scoped_refptr<base::SingleThreadTaskRunner> runner) {
@@ -213,11 +214,14 @@ std::unique_ptr<blink::URLLoader> CreateFrameResourceLoader(
 }
 void InstallResourceLoader(SystemTable* table) {
   CHECK(table);
-  CHECK(!resource_system_table);
+  CHECK(!resource_system_table || resource_system_table == table);
+  if (resource_loader_owners++) return;
   resource_system_table = table;
   blink::LoaderFactoryForFrame::SetFirmwareLoaderFactory(CreateFrameResourceLoader);
 }
 void UninstallResourceLoader() {
+  CHECK(resource_loader_owners);
+  if (--resource_loader_owners) return;
   blink::LoaderFactoryForFrame::SetFirmwareLoaderFactory(nullptr);
   resource_system_table = nullptr;
 }

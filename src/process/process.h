@@ -4,6 +4,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+typedef struct {
+  size_t workers, frames, failures, starts, idle_stops, fallback_frames;
+  int running, stopping, disabled;
+  size_t processor[4];
+} RenderProcessSnapshot;
+void render_processes_snapshot(RenderProcessSnapshot *snapshot);
 int render_processes_initialize(SystemTable *table, size_t maximum_pixels);
 int render_processes_present(const void *pixels, void *framebuffer,
                              size_t width, size_t height, size_t stride,

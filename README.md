@@ -4,14 +4,14 @@ An experimental x86-64 UEFI browser built from pinned Chromium components: Blink
 
 The project is an independent port. It is not an official Chromium or Google product.
 
-![UEFI BROWSER displaying a website in QEMU](validation/idle-site.png)
+![UEFI BROWSER displaying a website in QEMU](validation/tabs-site.png)
 
 ## Project status
 
 | Area | Current implementation |
 | --- | --- |
 | Web engine | Blink DOM, CSS and layout; V8 JavaScript; Skia CPU rasterization |
-| Browser interface | Address bar, Back, Forward, Reload, session history, settings and About |
+| Browser interface | Up to four tabs, address bar, Back, Forward, Reload, per-tab session history, settings, About and process monitor |
 | Networking | Firmware HTTP/HTTPS with a Mozilla-derived CA bundle; restricted subresource support |
 | Input | Mouse movement, buttons, vertical wheel and firmware keyboard input |
 | Multiprocessing | Isolated AP workers transfer completed frames; DOM, JavaScript, layout and rasterization remain in the main process |
@@ -19,7 +19,7 @@ The project is an independent port. It is not an official Chromium or Google pro
 
 Full renderer-process separation, a Chromium-equivalent sandbox, general worker threads and broad website compatibility are not implemented. Physical hardware has not been validated. Long synchronous JavaScript and layout operations can delay DOM input dispatch.
 
-Validation evidence: [current idle-resume results](validation/IDLE-RESUME.md), [process isolation](validation/PROCESSES.md), [settings and About](validation/FLUENT-SETTINGS.md), and [input under load](validation/HEAVY-INPUT.md). Website captures document individual test runs, not universal compatibility.
+Validation evidence: [tabs and process monitor](validation/TABS-AND-MONITOR.md), [idle-resume results](validation/IDLE-RESUME.md), [process isolation](validation/PROCESSES.md), [settings and About](validation/FLUENT-SETTINGS.md), and [input under load](validation/HEAVY-INPUT.md). Website captures document individual test runs, not universal compatibility.
 
 ## AI-assisted development and disclaimer
 
@@ -45,6 +45,16 @@ The build downloads pinned upstream sources. See [build instructions](#build-the
 **The browser starts with a blank page and an address bar.** Click the address bar or press Ctrl+L, type an HTTP(S) URL and press Enter. Addresses without a scheme use HTTPS. No website is loaded automatically by the default image. The runner opens an SDL window named `UEFI BROWSER`.
 
 QEMU device-input tests verify address entry, URL replacement, page buttons, links, text editing and vertical wheel scrolling. The earlier `zeroday0619.dev` captures are website compatibility evidence rather than the default home screen. See [validation results](validation/RESULTS.md). Complete Chromium compatibility and every site interaction remain unverified.
+
+## Tabs and process monitor
+
+Use the `+` button or Ctrl+T to open a blank tab. Click a tab or use Ctrl+Tab / Ctrl+Shift+Tab to switch. Ctrl+1 through Ctrl+4 select a position; Ctrl+9 selects the last tab. Close a tab with its `x` button or Ctrl+W. Closing the last tab creates a new blank tab.
+
+Each tab owns a Blink frame, page pixels, address edit state and session history. Switching preserves the document, form values, JavaScript state and scroll position. Background tabs are marked hidden and stop scheduling paint/raster work. They are not suspended processes: background JavaScript and networking can still run. The browser supports at most four tabs and refuses new tabs when the tracked C heap exceeds 96 MiB. These limits do not guarantee that arbitrary heavy pages will fit in memory. Tabs are not persisted across browser sessions.
+
+Click **Processes** in the tab strip or press Shift+Esc to open the process monitor. Escape or the same shortcut closes it. The native monitor displays the shared main process, actual AP worker CPU assignments and running/idle/stopping/disabled state, transfer/fallback/failure counters, tracked C heap size, and per-tab committed URLs, navigation state and painted-frame counts. Its refresh target is 500 ms; long main-thread work can delay updates.
+
+Tracked C heap size excludes virtual-memory commitments and AP page allocations. CPU percentages and per-tab memory are not measured. Tabs share Blink/V8 execution in the main process and are not isolated renderer processes. The monitor does not kill AP workers; tabs can be closed through the tab controls. Opening the monitor hides the selected page and pauses its painting until the monitor closes.
 
 ## Browser settings
 
@@ -122,7 +132,7 @@ Sparkplug reduces execution cost but does not preempt arbitrary JavaScript. Page
 
 The default uses four virtual CPUs (`QEMU_CPUS=1` selects the single-CPU fallback) and opens `build/blink/esp/EFI/BOOT/BOOTX64.EFI` in an SDL window named `UEFI BROWSER`. It tries KVM first and falls back to TCG if KVM cannot initialize. Set `QEMU_ACCEL=tcg` or `QEMU_ACCEL=kvm` to require one backend. The automated browser tests default to TCG; `QEMU_TEST_ACCEL=kvm` selects KVM explicitly. If this image is missing, the runner builds it with `build-blink.sh`. The default display requires QEMU SDL support. VNC is optional.
 
-The default image requires 4 GiB of guest RAM. Press F12 to end the browser session, then press a key to return to firmware. Mouse clicks, Tab, Enter, Space, text editing, PageDown and Ctrl+Home reach the page. UEFI timer capture queues pointer transitions while Blink paints. Links navigate in the existing viewport, including target=_blank links; independent windows and opener semantics are not implemented. The EFI image embeds a patched EDK II VirtioInputDxe driver and reconnects existing virtio relative-pointer devices. The driver polls every 5 ms and queues complete virtio reports instead of overwriting button edges. A full report queue applies backpressure to the device ring. Vertical wheel events reach DOM listeners first. Uncancelled events scroll the hit-tested Blink scroll chain, including nested elements. Each wheel tick requests two lines; horizontal wheels, high-resolution touchpad gestures and kinetic scrolling are not implemented. The text path uses firmware UTF-16 keystrokes and synthesized releases; IME composition and physical key-up tracking are not implemented.
+The default image requires 4 GiB of guest RAM. Press F12 to end the browser session, then press a key to return to firmware. Mouse clicks, Tab, Enter, Space, text editing, PageDown and Ctrl+Home reach the page. UEFI timer capture queues pointer transitions while Blink paints. Ordinary links navigate the active tab. User-activated GET requests for new windows, including target=_blank links, open a new tab within the tab limit. New-window requests open foreground tabs. Independent windows and opener/WindowProxy semantics are not implemented. The EFI image embeds a patched EDK II VirtioInputDxe driver and reconnects existing virtio relative-pointer devices. The driver polls every 5 ms and queues complete virtio reports instead of overwriting button edges. A full report queue applies backpressure to the device ring. Vertical wheel events reach DOM listeners first. Uncancelled events scroll the hit-tested Blink scroll chain, including nested elements. Each wheel tick requests two lines; horizontal wheels, high-resolution touchpad gestures and kinetic scrolling are not implemented. The text path uses firmware UTF-16 keystrokes and synthesized releases; IME composition, physical key-up tracking and held-modifier mouse gestures such as Ctrl+click are not implemented. Keyboard shortcuts use the modifier state attached to each firmware keystroke.
 
 Select another image with `BUILD_DIRECTORY`. The runner does not silently substitute an image when that directory lacks an EFI executable.
 
@@ -159,7 +169,7 @@ Source: [TianoCore EDK II](https://github.com/tianocore/edk2/tree/2970e5699ba626
 
 ## Address bar
 
-The 48-pixel toolbar is rendered outside the Blink viewport. Pointer coordinates are translated into the page viewport; toolbar clicks and editing keys are not delivered to page controls. The bar follows the committed document URL after link navigation. Ctrl+L or clicking the bar selects the current address. Ctrl+A, Backspace, Delete, Left/Right and Home/End support editing. Escape returns keyboard input to the page. Invalid URLs and transport failures leave the current page visible and mark the field red. HTTP(S), `about:blank`, `about:settings` and `about:version` are supported; credentials in URLs are rejected. This is an address field, not a search box.
+The 48-pixel address toolbar and 32-pixel tab strip are rendered outside the Blink viewport. Pointer coordinates are translated into the page viewport; toolbar clicks and editing keys are not delivered to page controls. The bar follows the committed document URL after link navigation. Ctrl+L or clicking the bar selects the current address. Ctrl+A, Backspace, Delete, Left/Right and Home/End support editing. Escape returns keyboard input to the page. Invalid URLs and transport failures leave the current page visible and mark the field red. HTTP(S), `about:blank`, `about:settings` and `about:version` are supported; credentials in URLs are rejected. This is an address field, not a search box.
 
 The default build uses `about:blank`. `BLINK_START_URL` remains an explicit build-time override for integration tests; it is not set by the runner. The default startup performs no website request. IME composition, clipboard integration and advanced text selection are not implemented.
 
@@ -180,3 +190,15 @@ See [third-party licensing notes](THIRD_PARTY_NOTICES.md) and the notices in [li
 Before distributing a binary release, complete the dependency and notice inventory for that exact build and satisfy applicable source and relinking obligations. Preserve upstream copyright and license notices in copied or modified files. The development archive is not a license-audited release package.
 
 For source publication, see [GitHub publication preparation](PUBLISHING.md).
+
+### User-Agent
+
+HTTP document and subresource requests and JavaScript `navigator.userAgent` use the same browser identity:
+
+```text
+Mozilla/5.0 (UEFI; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/158.0.8110.0 Safari/537.36 UEFIBrowser/0.3
+```
+
+The Chrome version comes from the verified Chromium checkout at build time. `UEFI; x86_64` identifies the firmware environment and architecture, and `UEFIBrowser/0.3` identifies this browser. AppleWebKit and Safari are browser compatibility tokens. The syntax follows the [MDN User-Agent reference](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/User-Agent). Standalone network probes without Blink use `UEFIBrowser/0.3 (UEFI; x86_64)`. User-Agent Client Hints use the same Chromium build version. In secure contexts, `navigator.userAgentData` exposes Chromium and UEFIBrowser brands, `platform: "UEFI"`, and `mobile: false`. `getHighEntropyValues()` supports the metadata supplied to Blink, including x86 architecture, 64-bit bitness, and full brand versions. Firmware platform version and device model remain empty because no normalized values are available.
+
+HTTPS navigation sends `Sec-CH-UA`, `Sec-CH-UA-Mobile`, and `Sec-CH-UA-Platform`. Subresources use Blink's Client Hints and Permissions Policy checks. The transport suppresses UA Client Hints on HTTP. Main-document high-entropy `Accept-CH` persistence and `Critical-CH` navigation retries are not implemented. See [Client Hints validation](validation/CLIENT-HINTS.md).

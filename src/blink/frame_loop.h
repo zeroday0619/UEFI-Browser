@@ -26,6 +26,7 @@ class FrameLoop {
   FrameLoop& operator=(const FrameLoop&) = delete;
   bool Start();
   void Stop();
+  void SetVisible(bool visible);
  private:
   void Tick();
   void Record();
@@ -37,6 +38,7 @@ class FrameLoop {
   gfx::Rect viewport_;
   scoped_refptr<base::SingleThreadTaskRunner> runner_;
   base::RepeatingClosure present_;
+  bool visible_ = true;
   bool running_ = false;
   bool requested_ = false;
   base::TimeTicks last_tick_;

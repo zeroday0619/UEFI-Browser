@@ -70,8 +70,9 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
                                   public blink::mojom::PolicyContainerHost {
  public:
   State(SystemTable* table, blink::scheduler::WebThreadScheduler& scheduler,
-        SkCanvas& canvas, gfx::Size viewport, base::RepeatingClosure present)
-      : table_(table), agent_group_(scheduler.CreateWebAgentGroupScheduler()) {
+        SkCanvas& canvas, gfx::Size viewport, base::RepeatingClosure present,
+        base::RepeatingCallback<void(std::string)> open_tab)
+      : open_tab_(std::move(open_tab)), table_(table), agent_group_(scheduler.CreateWebAgentGroupScheduler()) {
     CHECK(agent_group_);
     CHECK(!viewport.IsEmpty());
     InstallResourceLoader(table_);
@@ -110,7 +111,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     auto* widget = frame->InitializeFrameWidget(
         std::move(frame_host), mojo::NullAssociatedReceiver(),
         std::move(widget_host), mojo::NullAssociatedReceiver(),
-        viz::FrameSinkId(1, 1));
+        viz::FrameSinkId(1, next_widget_identifier_++));
     CHECK(widget);
     frame_ = frame;
     widget_ = widget;
@@ -131,6 +132,15 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     if (view_)
       std::exchange(view_, nullptr)->Close();
     UninstallResourceLoader();
+  }
+  void SetVisible(bool visible) {
+    if (loop_) loop_->SetVisible(visible);
+    if (widget_) widget_->SetFocus(visible);
+    if (view_) {
+      view_->SetIsActive(visible);
+      view_->SetVisibilityState(visible ? blink::mojom::PageVisibilityState::kVisible :
+          blink::mojom::PageVisibilityState::kHidden, false);
+    }
   }
   void BindToFrame(blink::WebNavigationControl* frame) override {
     CHECK(!navigation_);
@@ -249,7 +259,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     if (!widget_) return;
     using Event = blink::WebInputEvent;
     using Button = blink::WebPointerProperties::Button;
-    int modifiers = keyboard_modifiers_;
+    // Firmware keystrokes do not provide a reliable held-modifier state for mouse events.
+    int modifiers = 0;
     if (sample.buttons & 1) modifiers |= Event::kLeftButtonDown;
     if (sample.buttons & 2) modifiers |= Event::kRightButtonDown;
     const auto now = base::TimeTicks::Now();
@@ -315,16 +326,16 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   void Keyboard(const KeySample& sample) {
     using Event = blink::WebInputEvent;
-    keyboard_modifiers_ = 0;
+    int modifiers = 0;
     if (sample.shift & 0x80000000u) {
-      if (sample.shift & 3) keyboard_modifiers_ |= Event::kShiftKey;
-      if (sample.shift & 12) keyboard_modifiers_ |= Event::kControlKey;
-      if (sample.shift & 48) keyboard_modifiers_ |= Event::kAltKey;
-      if (sample.shift & 192) keyboard_modifiers_ |= Event::kMetaKey;
+      if (sample.shift & 3) modifiers |= Event::kShiftKey;
+      if (sample.shift & 12) modifiers |= Event::kControlKey;
+      if (sample.shift & 48) modifiers |= Event::kAltKey;
+      if (sample.shift & 192) modifiers |= Event::kMetaKey;
     }
     if (sample.toggle & 0x80) {
-      if (sample.toggle & 4) keyboard_modifiers_ |= Event::kCapsLockOn;
-      if (sample.toggle & 2) keyboard_modifiers_ |= Event::kNumLockOn;
+      if (sample.toggle & 4) modifiers |= Event::kCapsLockOn;
+      if (sample.toggle & 2) modifiers |= Event::kNumLockOn;
     }
     if (!sample.key.scan && !sample.key.character) return;
     int key = 0;
@@ -354,12 +365,12 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       if (character == 9) dom_key = ui::DomKey::TAB;
       if (character == 13) dom_key = ui::DomKey::ENTER;
       if (character == 27) dom_key = ui::DomKey::ESCAPE;
-      if (character > 0 && character < 27 && (keyboard_modifiers_ & Event::kControlKey) && character != 9 && character != 13 && character != 8) {
+      if (character > 0 && character < 27 && (modifiers & Event::kControlKey) && character != 9 && character != 13 && character != 8) {
         key = 'A' + character - 1;
         dom_key = ui::DomKey::FromCharacter('a' + character - 1);
       }
     }
-    blink::WebKeyboardEvent event(Event::Type::kRawKeyDown, keyboard_modifiers_, base::TimeTicks::Now());
+    blink::WebKeyboardEvent event(Event::Type::kRawKeyDown, modifiers, base::TimeTicks::Now());
     const auto code = ui::UsLayoutDomKeyToDomCode(dom_key);
     if (!sample.key.scan) key = ui::DomCodeToUsLayoutNonLocatedKeyboardCode(code);
     event.windows_key_code = key;
@@ -387,6 +398,17 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   void NavigateRequest(std::unique_ptr<blink::WebNavigationInfo> info) {
     if (!frame_ || !navigation_) return;
+    if (info->navigation_policy != blink::kWebNavigationPolicyCurrentTab) {
+      bool new_tab = info->navigation_policy == blink::kWebNavigationPolicyNewForegroundTab ||
+          info->navigation_policy == blink::kWebNavigationPolicyNewBackgroundTab ||
+          info->navigation_policy == blink::kWebNavigationPolicyNewWindow ||
+          info->navigation_policy == blink::kWebNavigationPolicyNewPopup;
+      std::printf("TABS: navigation policy=%d activation=%d\n",
+          static_cast<int>(info->navigation_policy),info->has_transient_user_activation);
+      if (new_tab && info->has_transient_user_activation)
+        OpenTabQueued(info->url_request.Url().GetString().Utf8());
+      return;
+    }
     SaveHistoryItem();
     GURL target(info->url_request.Url().GetString().Utf8());
     GURL current(frame_->GetDocument().Url().GetString().Utf8());
@@ -425,23 +447,22 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       const blink::SessionStorageNamespaceId&, bool& consumed_user_gesture,
       const std::optional<blink::WebPictureInPictureWindowOptions>&,
       const blink::WebURL&) override {
-    // This embedder has one viewport, so requested new windows navigate it.
-    if (request.HttpMethod().Utf8() != "GET") return nullptr;
+    // New-window requests are queued so tab creation cannot reenter Blink input dispatch.
+    if (request.HttpMethod().Utf8() != "GET" || !request.HasUserGesture()) return nullptr;
     consumed_user_gesture = true;
     agent_group_->DefaultTaskRunner()->PostTask(FROM_HERE,
-        base::BindOnce(&State::NavigateQueued, weak_factory_.GetWeakPtr(),
+        base::BindOnce(&State::OpenTabQueued, weak_factory_.GetWeakPtr(),
                        request.Url().GetString().Utf8()));
     return nullptr;
   }
-  void NavigateQueued(std::string url) {
+  void OpenTabQueued(std::string url) {
     GURL target(url);
     if (!target.SchemeIsHTTPOrHTTPS() || target.has_username() || target.has_password()) {
       std::puts("BLINK: unsupported navigation URL");
       return;
     }
     std::printf("BLINK: navigating %s\n", url.c_str());
-    Status result = Navigate(url.c_str());
-    if (result) std::printf("BLINK: navigation failed status=%llx\n", static_cast<unsigned long long>(result));
+    open_tab_.Run(std::move(url));
   }
   void FocusedElementChanged(const blink::WebElement& element) override {
     if (!element.IsNull()) std::printf("BLINK: focus tag=%s\n", element.TagName().Utf8().c_str());
@@ -572,6 +593,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     }
   }
  private:
+  base::RepeatingCallback<void(std::string)> open_tab_;
+  inline static uint32_t next_widget_identifier_ = 1;
   bool navigation_pending_ = false;
   Status navigation_status_ = 0;
   std::unique_ptr<NavigationRequest> navigation_request_;
@@ -609,7 +632,6 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   blink::WebFrameWidget* widget_ = nullptr;
   int pointer_x_ = 0, pointer_y_ = 0;
   unsigned pointer_buttons_ = 0;
-  int keyboard_modifiers_ = 0;
   base::TimeTicks last_click_;
   unsigned last_click_button_ = 0;
   int last_click_x_ = 0, last_click_y_ = 0, click_count_ = 0;
@@ -617,9 +639,10 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
 };
 BrowserFrame::BrowserFrame(SystemTable* table,
     blink::scheduler::WebThreadScheduler& scheduler, SkCanvas& canvas,
-    gfx::Size viewport, base::RepeatingClosure present)
+    gfx::Size viewport, base::RepeatingClosure present,
+    base::RepeatingCallback<void(std::string)> open_tab)
     : state_(std::make_unique<State>(table, scheduler, canvas, viewport,
-                                     std::move(present))) {}
+                                     std::move(present), std::move(open_tab))) {}
 BrowserFrame::~BrowserFrame() = default;
 Status BrowserFrame::Navigate(const char* url) { return state_->Navigate(url); }
 bool BrowserFrame::NavigationPending() const { return state_->NavigationPending(); }
@@ -630,6 +653,7 @@ bool BrowserFrame::CanGoForward() const { return state_->CanGoForward(); }
 Status BrowserFrame::GoBack() { return state_->Traverse(-1); }
 Status BrowserFrame::GoForward() { return state_->Traverse(1); }
 Status BrowserFrame::Reload() { return state_->Reload(); }
+void BrowserFrame::SetVisible(bool visible) { state_->SetVisible(visible); }
 void BrowserFrame::Pointer(const PointerSample& sample) { state_->Pointer(sample); }
 void BrowserFrame::Keyboard(const KeySample& sample) { state_->Keyboard(sample); }
 }

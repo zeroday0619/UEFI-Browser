@@ -5,6 +5,16 @@
 #include <strings.h>
 #include <time.h>
 
+/* Standalone network probes do not embed the Chromium engine. */
+__attribute__((weak)) const char *firmware_browser_user_agent(void) {
+  return "UEFIBrowser/0.3 (UEFI; x86_64)";
+}
+
+__attribute__((weak)) const char *firmware_browser_client_hint(const char *name) {
+  (void)name;
+  return NULL;
+}
+
 static Guid standard_http_binding = {0xbdc8e6af,0xd9bc,0x4379,{0xa7,0x2a,0xe0,0xc4,0xe7,0x5d,0xae,0x1c}};
 static Guid http_binding = {0xc1493c30,0x94c5,0x49b3,{0x94,0xe4,0xac,0xb5,0x02,0x39,0x11,0x81}};
 static Guid http_protocol = {0x7a59b29b,
@@ -258,12 +268,19 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
   if (result)
     goto finish;
   Header headers[69] = {{"Host", host},
-                      {"User-Agent", "UEFI-Browser/0.3"},
+                      {"User-Agent", (char *)firmware_browser_user_agent()},
                       {"Accept", "*/*"},
                       {"Accept-Encoding", "identity"},
                       {"Connection", "close"}};
   size_t request_header_count = 5;
+  const int secure = !strncmp(url, "https://", 8);
   for (size_t index = 0; index < extra_count; ++index) {
+    // Insecure redirects must not retain Client Hints from a secure request.
+    if (!secure && !strncasecmp(extra_headers[index].name, "sec-ch-ua", 9))
+      continue;
+    /* The embedder owns the identity for documents and subresources alike. */
+    if (!strcasecmp(extra_headers[index].name, "user-agent"))
+      continue;
     if (!strcasecmp(extra_headers[index].name, "accept"))
       headers[2] = extra_headers[index];
     else

@@ -483,3 +483,19 @@ void render_processes_shutdown(void) {
   release(pool.barrier,1);
   memset(&pool,0,sizeof(pool));
 }
+
+void render_processes_snapshot(RenderProcessSnapshot *snapshot) {
+  if (!snapshot) return;
+  memset(snapshot,0,sizeof(*snapshot));
+  snapshot->workers = pool.count;
+  snapshot->frames = pool.frames;
+  snapshot->failures = pool.failures;
+  snapshot->starts = pool.restarts;
+  snapshot->idle_stops = pool.idle_stops;
+  snapshot->fallback_frames = pool.serial_frames;
+  snapshot->running = pool.persistent;
+  snapshot->stopping = __atomic_load_n(&pool.stopping,__ATOMIC_ACQUIRE) != 0;
+  snapshot->disabled = pool.disabled;
+  for (size_t index = 0; index < pool.count; ++index)
+    snapshot->processor[index] = pool.workers[index].processor;
+}

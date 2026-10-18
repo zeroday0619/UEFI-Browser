@@ -6,6 +6,8 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+const char *firmware_browser_user_agent(void);
+const char *firmware_browser_client_hint(const char *name);
 /* Response storage belongs to the caller until resource_release is called. */
 typedef struct {
   unsigned status_code;
