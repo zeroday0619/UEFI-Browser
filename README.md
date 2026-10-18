@@ -21,6 +21,14 @@ Full renderer-process separation, a Chromium-equivalent sandbox, general worker 
 
 Validation evidence: [current idle-resume results](validation/IDLE-RESUME.md), [process isolation](validation/PROCESSES.md), [settings and About](validation/FLUENT-SETTINGS.md), and [input under load](validation/HEAVY-INPUT.md). Website captures document individual test runs, not universal compatibility.
 
+## AI-assisted development and disclaimer
+
+This project was developed with substantial assistance from OpenAI Codex using an iterative workflow sometimes called "vibe coding." AI tools contributed to implementation, debugging, testing and documentation. This disclosure does not describe the authorship of upstream dependencies or imply that every change has received independent human review.
+
+The browser is experimental. Recorded QEMU tests cover specific scenarios; they do not establish production readiness, a complete security sandbox or physical-hardware safety. Use a disposable test environment and avoid sensitive accounts or data. Human review and validation are required before accepting AI-contributed changes.
+
+See [NOTICE.md](NOTICE.md) for the development disclosure, verification limits and operational disclaimer. The warranty disclaimer in [LICENSE](LICENSE) and the separate third-party licenses remain applicable; the notice adds no license restrictions.
+
 ## Quick start
 
 From the repository directory on a Linux development host:

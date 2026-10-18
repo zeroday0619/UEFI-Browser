@@ -2,7 +2,7 @@
 
 ## License scope
 
-Original contributions use BSD-3-Clause, Copyright (c) 2026, zeroday0619. Include `LICENSE`, `THIRD_PARTY_NOTICES.md`, the complete `licenses/` directory, `revisions.json` and `fonts/manifest.json` in source releases. Preserve existing file-level copyright and license notices.
+Original contributions use BSD-3-Clause, Copyright (c) 2026, zeroday0619. Include `LICENSE`, `NOTICE.md`, `THIRD_PARTY_NOTICES.md`, the complete `licenses/` directory, `revisions.json` and `fonts/manifest.json` in source releases. Preserve existing file-level copyright and license notices.
 
 The current source tree can be prepared independently of binary release licensing. The EFI executable incorporates a larger third-party graph whose notices and applicable source/relinking obligations still require a release-specific inventory. Do not label the development EFI archive as a license-audited release.
 
