@@ -128,9 +128,13 @@ class ResourceLoader final : public blink::URLLoader {
         return;
       }
       std::vector<Header> headers;
-      for (const auto& header : request_->headers.GetHeaderVector())
+      for (const auto& header : request_->headers.GetHeaderVector()) {
+        if (base::EqualsCaseInsensitiveASCII(header.key, "user-agent")) continue;
         headers.push_back({const_cast<char*>(header.key.c_str()),
                            const_cast<char*>(header.value.c_str())});
+      }
+      headers.push_back({const_cast<char*>("User-Agent"), const_cast<char*>(
+          firmware_browser_user_agent_for_url(origin_.GetURL().spec().c_str()))});
       GURL::Replacements replacements;
       replacements.ClearRef();
       auto url = request_->url.ReplaceComponents(replacements);

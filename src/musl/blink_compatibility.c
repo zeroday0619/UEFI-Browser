@@ -49,7 +49,8 @@ void firmware_atomic_load(size_t size, const void *source, void *destination,
 void firmware_atomic_load(size_t size, const void *source, void *destination,
                           int order) {
   (void)order;
-  /* The firmware engine runs only on the BSP and never shares its objects with APs.
+  /* Each engine address space has one execution thread and private C++ objects.
+     Cross-process channels use aligned native atomics instead of this generic ABI.
      Masking interrupts makes arbitrary-sized loads indivisible on that processor.
      Full fences provide the strongest ordering accepted by the generic ABI. */
   uintptr_t flags;

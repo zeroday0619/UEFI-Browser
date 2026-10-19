@@ -1,6 +1,8 @@
 #define _GNU_SOURCE
 #include "pthread_impl.h"
 #include "uefi.h"
+#include "renderer_runtime.h"
+extern void renderer_runtime_log(const char *);
 #include <stdio.h>
 #include <string.h>
 
@@ -11,6 +13,7 @@ _Static_assert(sizeof(struct pthread) <= 4096,
                "The EFI loader reserves one page for the thread structure.");
 SystemTable *platform_firmware(void) { return firmware; }
 void graphics_log(const char *text) {
+  if (renderer_runtime_is_child()) { renderer_runtime_log(text); return; }
   while (*text) {
     unsigned char state;
     do {
@@ -25,7 +28,7 @@ void musl_initialize(SystemTable *table, void *stack, size_t stack_size) {
   pthread_t thread = __pthread_self();
   thread->self = thread;
   thread->prev = thread->next = thread;
-  thread->tid = 1;
+  thread->tid = renderer_runtime_is_child() ? 2 : 1;
   thread->locale = &libc.global_locale;
   thread->stack = (char *)stack + stack_size;
   thread->stack_size = stack_size;
@@ -37,6 +40,10 @@ void musl_initialize(SystemTable *table, void *stack, size_t stack_size) {
 }
 /* A blocked wait cannot make progress without another schedulable thread. */
 _Noreturn void abort(void) {
+  if (renderer_runtime_is_child()) {
+    graphics_log("RENDERER: runtime abort\n");
+    __builtin_trap();
+  }
   graphics_log("FAIL: musl runtime aborted\n");
   for (;;)
     __asm__ volatile("hlt");

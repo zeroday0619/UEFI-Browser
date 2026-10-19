@@ -1,4 +1,7 @@
 #include "resource.h"
+#ifdef UEFI_RUNTIME
+#include "renderer_runtime.h"
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +16,18 @@ __attribute__((weak)) const char *firmware_browser_user_agent(void) {
 __attribute__((weak)) const char *firmware_browser_client_hint(const char *name) {
   (void)name;
   return NULL;
+}
+
+__attribute__((weak)) const char *firmware_browser_user_agent_for_url(const char *url) {
+  (void)url;
+  return firmware_browser_user_agent();
+}
+__attribute__((weak)) int firmware_browser_user_agent_valid(const char *value) {
+  return !strcmp(value, firmware_browser_user_agent());
+}
+__attribute__((weak)) const char *firmware_browser_client_hint_for_url(const char *name, const char *url) {
+  (void)url;
+  return firmware_browser_client_hint(name);
 }
 
 static Guid standard_http_binding = {0xbdc8e6af,0xd9bc,0x4379,{0xa7,0x2a,0xe0,0xc4,0xe7,0x5d,0xae,0x1c}};
@@ -92,6 +107,9 @@ int resource_is_redirect(unsigned status_code) {
          status_code == 307 || status_code == 308;
 }
 void resource_release(ResourceResponse *response) {
+#ifdef UEFI_RUNTIME
+  if (renderer_runtime_is_child()) { renderer_runtime_request(RENDERER_RESPONSE_RELEASE,(uintptr_t)response,0,0,0,0); return; }
+#endif
   for (size_t index = 0; index < response->header_count; index++) {
     free(response->headers[index].name);
     free(response->headers[index].value);
@@ -268,7 +286,7 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
   if (result)
     goto finish;
   Header headers[69] = {{"Host", host},
-                      {"User-Agent", (char *)firmware_browser_user_agent()},
+                      {"User-Agent", (char *)firmware_browser_user_agent_for_url(url)},
                       {"Accept", "*/*"},
                       {"Accept-Encoding", "identity"},
                       {"Connection", "close"}};
@@ -279,8 +297,10 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
     if (!secure && !strncasecmp(extra_headers[index].name, "sec-ch-ua", 9))
       continue;
     /* The embedder owns the identity for documents and subresources alike. */
-    if (!strcasecmp(extra_headers[index].name, "user-agent"))
+    if (!strcasecmp(extra_headers[index].name, "user-agent")) {
+      if (firmware_browser_user_agent_valid(extra_headers[index].value)) headers[1] = extra_headers[index];
       continue;
+    }
     if (!strcasecmp(extra_headers[index].name, "accept"))
       headers[2] = extra_headers[index];
     else

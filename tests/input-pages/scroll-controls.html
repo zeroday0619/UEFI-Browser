@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>Two-axis asynchronous scrollbar controls</title>
+<style>
+body{margin:0;width:2800px;height:4000px;font:20px sans-serif;background:linear-gradient(120deg,#e5eeff,#224488)}
+.controls{position:fixed;left:30px;top:20px;z-index:10;background:white;padding:8px}button{width:190px;height:40px}
+.box{position:fixed;top:170px;left:60px;width:500px;height:400px;overflow:scroll;background:white}
+#native{left:700px} .content{width:2400px;height:5000px;background:repeating-linear-gradient(90deg,transparent 0 100px,#0003 100px 104px),repeating-linear-gradient(#e9ffbb 0 100px,#5abbbb 100px 200px)}
+.sticky{position:sticky;top:0;left:0;width:200px;height:36px;background:#663399;color:white}
+#custom::-webkit-scrollbar{width:24px;height:24px;background:#dddddd}
+#custom::-webkit-scrollbar-thumb{background:#ee5522;border:3px solid #662200;border-radius:5px;min-width:40px;min-height:40px}
+#custom::-webkit-scrollbar-track{background:#bbbbbb}
+#custom::-webkit-scrollbar-track-piece:decrement{background:#7799dd}
+#custom::-webkit-scrollbar-track-piece:increment{background:#99ddbb}
+#custom::-webkit-scrollbar-button{display:block;width:24px;height:24px;background:#4488cc;border:2px solid #224466}
+#custom::-webkit-scrollbar-button:increment{background:#44aa66}
+#custom::-webkit-scrollbar-corner{background:#555555}
+</style>
+<div class="controls"><button id="start">Block renderer 20s</button><button id="reset">Reset offsets</button><button id="rtl">RTL / block 20s</button></div>
+<div id="custom" class="box" tabindex="0"><div class="content"><div class="sticky">Custom sticky</div></div></div>
+<div id="native" class="box" tabindex="0"><div class="content"><div class="sticky">Native sticky</div></div></div>
+<script>
+console.log('CONTROLS ready');
+let generation=0;
+function report(){console.log('CONTROLS offsets custom='+custom.scrollLeft+','+custom.scrollTop+' native='+native.scrollLeft+','+native.scrollTop+' root='+scrollX+','+scrollY)}
+for(const box of [custom,native])box.addEventListener('scroll',report);
+addEventListener('scroll',report);
+function clear(){scrollTo(0,0);custom.scrollTo(0,0);native.scrollTo(0,0)}
+function block(){custom.focus({preventScroll:true});const current=++generation;setTimeout(()=>{console.log('CONTROLS begin '+current);const end=performance.now()+20000;while(performance.now()<end){}console.log('CONTROLS end '+current);setTimeout(report,1000)},1200)}
+start.onclick=()=>{clear();block()};reset.onclick=clear;
+rtl.onclick=()=>{custom.style.direction='rtl';clear();block()};
+</script>

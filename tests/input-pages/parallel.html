@@ -1,0 +1,7 @@
+<!doctype html><title>Concurrent resource regression</title>
+<button onclick="console.log('PARALLEL_INPUT click')">Input test</button><input oninput="console.log('PARALLEL_INPUT key')">
+<script>
+console.log('PARALLEL_READY');
+const start = performance.now();
+for (const name of ['slow', 'fast']) fetch('/parallel-' + name).then(response => response.text()).then(() => console.log('PARALLEL_DONE ' + name + ' ' + Math.round(performance.now() - start)));
+</script>

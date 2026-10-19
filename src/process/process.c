@@ -367,7 +367,7 @@ int render_processes_initialize(SystemTable *table, size_t maximum_pixels) {
   if (!output) goto failed;
   pool.testing = 1;
   int output_valid = 1;
-  for (size_t pixel = 0; pixel < 63; ++pixel) input[pixel] = 0x00123400u + pixel;
+  for (size_t pixel = 0; pixel < 63; ++pixel) input[pixel] = 0xa5123400u + pixel;
   for (int red_first = 0; red_first <= 1; ++red_first) {
     memset(output,0xa5,PAGE);
     if (!render_processes_present(input,output+1,9,7,13,red_first)) output_valid = 0;

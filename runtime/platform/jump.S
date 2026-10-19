@@ -74,3 +74,53 @@ browser_call_on_stack:
     movq %r12, %rsp
     popq %r12
     retq
+
+/* The interrupt return clears NMI blocking before the supervisor abandons the payload stack. */
+.globl renderer_trap_nmi,renderer_trap_invalid,renderer_trap_page,renderer_trap_general,renderer_trap_divide
+renderer_trap_nmi:
+    pushq $0
+    pushq $2
+    jmp renderer_trap_common
+renderer_trap_invalid:
+    pushq $0
+    pushq $6
+    jmp renderer_trap_common
+renderer_trap_divide:
+    pushq $0
+    pushq $0
+    jmp renderer_trap_common
+renderer_trap_general:
+    pushq $13
+    jmp renderer_trap_common
+renderer_trap_page:
+    pushq $14
+renderer_trap_common:
+    pushq %rax
+    pushq %r11
+    cmpq $2,16(%rsp)
+    jne 1f
+    movl $1,renderer_nmi_seen(%rip)
+1:
+    xorl %eax,%eax
+    xchgl %eax,renderer_trap_armed(%rip)
+    testl %eax,%eax
+    jz 2f
+    movq 16(%rsp),%rax
+    movq %rax,renderer_fault(%rip)
+    movq 24(%rsp),%rax
+    movq %rax,renderer_fault+8(%rip)
+    movq 32(%rsp),%rax
+    movq %rax,renderer_fault+16(%rip)
+    leaq renderer_escape(%rip),%rax
+    movq %rax,32(%rsp)
+    movq renderer_escape_stack(%rip),%rax
+    movq %rax,56(%rsp)
+2:
+    popq %r11
+    popq %rax
+    addq $16,%rsp
+    iretq
+renderer_escape:
+    leaq renderer_escape_context(%rip),%rcx
+    movl $1,%edx
+    jmp browser_longjmp

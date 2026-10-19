@@ -2,6 +2,9 @@
 #include "uefi.h"
 #ifdef USE_MUSL
 #include "virtual_memory.h"
+#include "renderer_runtime.h"
+extern int renderer_runtime_entropy(void *, size_t);
+extern int renderer_runtime_protect(void *, size_t, int);
 #endif
 #include <errno.h>
 #include <limits.h>
@@ -38,6 +41,7 @@ int mprotect(void *address, size_t length, int protection) {
 #ifdef USE_MUSL
   if (virtual_memory_contains(address))
     return virtual_memory_protect(address, length, protection);
+  if (renderer_runtime_is_child()) return renderer_runtime_protect(address, length, protection);
 #endif
   const uint64_t read_protect = 0x2000, execute_protect = 0x4000,
                  read_only = 0x20000;
@@ -440,11 +444,19 @@ static uint64_t ticks(void) {
 static uint64_t frequency, origin;
 static uint64_t monotonic_nanoseconds(void) {
   if (!frequency) {
+#ifdef USE_MUSL
+    if (renderer_runtime_is_child()) {
+      frequency=renderer_runtime_frequency();
+      origin=ticks();
+    } else
+#endif
+    {
     origin = ticks();
     ((Status(UEFI_API *)(size_t))platform_firmware()->boot->function[28])(10000);
     frequency = (ticks() - origin) * 100;
     if (!frequency)
       abort();
+    }
   }
   uint64_t elapsed = ticks() - origin;
   return elapsed / frequency * 1000000000ULL +
@@ -512,6 +524,9 @@ struct RandomProtocol {
                         unsigned char *);
 };
 _Bool firmware_entropy(unsigned char *buffer, size_t size) {
+#ifdef USE_MUSL
+  if (renderer_runtime_is_child()) return renderer_runtime_entropy(buffer, size);
+#endif
   Guid guid = {0x3152bca5,
                0xeade,
                0x433d,
@@ -555,6 +570,8 @@ int run_platform_probe(void) {
       errno != ENOMEM) return 15;
   unsigned char *committed = reservation + reservation_size / 2;
   if (mprotect(committed, 4096, PROT_READ | PROT_WRITE)) return 11;
+  if (!firmware_entropy(committed,1024)) return 17;
+  graphics_log("PASS: entropy into private virtual mapping\n");
   committed[123] = 0x5a;
   if (mprotect(committed, 4096, PROT_NONE) ||
       page_permissions(committed) != 0 ||

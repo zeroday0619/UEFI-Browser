@@ -1,4 +1,5 @@
 #include "platform/runtime.h"
+#include "renderer_runtime.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,13 +9,50 @@ static size_t allocated;
 int _fltused;
 #define HEAP_LIMIT (128u * 1024u * 1024u)
 typedef struct Allocation {
-  size_t size;
+  size_t size, raw_size;
   void *base;
   struct Allocation *previous, *next;
 } Allocation;
 static Allocation *allocations;
 void runtime_initialize(SystemTable *table) { firmware = table; }
 size_t runtime_memory_used(void) { return allocated; }
+/* Small renderer allocations reuse private slabs instead of crossing the service queue. */
+typedef struct FreeBlock { struct FreeBlock *next; } FreeBlock;
+typedef struct Slab { struct Slab *next; uint64_t padding; } Slab;
+static FreeBlock *free_blocks[7];
+static Slab *slabs;
+static unsigned block_class(size_t size) {
+  unsigned index=0;
+  while (index<7 && size>((size_t)64<<index)) ++index;
+  return index;
+}
+static void *raw_allocate(size_t size) {
+  unsigned index=renderer_runtime_is_child() ? block_class(size) : 7;
+  if (index<7) {
+    if (!free_blocks[index]) {
+      Slab *slab=NULL;
+      if (((Status(UEFI_API *)(uint32_t,size_t,void**))firmware->boot->function[5])(
+          2,65536+sizeof(Slab),(void**)&slab)) return NULL;
+      slab->next=slabs; slabs=slab;
+      size_t stride=(size_t)64<<index;
+      for (size_t offset=0; offset<65536; offset+=stride) {
+        FreeBlock *block=(void*)((unsigned char*)(slab+1)+offset);
+        block->next=free_blocks[index]; free_blocks[index]=block;
+      }
+    }
+    FreeBlock *block=free_blocks[index]; free_blocks[index]=block->next;
+    return block;
+  }
+  void *base=NULL;
+  return ((Status(UEFI_API *)(uint32_t,size_t,void**))firmware->boot->function[5])(
+      2,size,&base) ? NULL : base;
+}
+static void raw_release(void *base, size_t size) {
+  unsigned index=renderer_runtime_is_child() ? block_class(size) : 7;
+  if (index<7) {
+    FreeBlock *block=base; block->next=free_blocks[index]; free_blocks[index]=block;
+  } else ((Status(UEFI_API *)(void*))firmware->boot->function[6])(base);
+}
 void *aligned_alloc(size_t alignment, size_t size) {
   if (alignment < 16)
     alignment = 16;
@@ -24,17 +62,15 @@ void *aligned_alloc(size_t alignment, size_t size) {
     size = 1;
   if (size > HEAP_LIMIT || allocated > HEAP_LIMIT - size)
     return 0;
-  void *base = 0;
-  Status status =
-      ((Status(UEFI_API *)(uint32_t, size_t, void **))firmware->boot->function[5])(
-          2, size + sizeof(Allocation) + alignment - 1, &base);
-  if (status)
-    return 0;
+  size_t raw_size=size+sizeof(Allocation)+alignment-1;
+  void *base=raw_allocate(raw_size);
+  if (!base) return NULL;
   Allocation *result =
       (Allocation *)(((uintptr_t)base + sizeof(Allocation) + alignment - 1) &
                      ~(uintptr_t)(alignment - 1)) -
       1;
   result->base = base;
+  result->raw_size = raw_size;
   result->size = size;
   result->previous = 0;
   result->next = allocations;
@@ -65,7 +101,7 @@ void free(void *pointer) {
   if (allocation->next)
     allocation->next->previous = allocation->previous;
   allocated -= allocation->size;
-  ((Status(UEFI_API *)(void *))firmware->boot->function[6])(allocation->base);
+  raw_release(allocation->base,allocation->raw_size);
 }
 void *calloc(size_t count, size_t size) {
   if (size && count > HEAP_LIMIT / size)
@@ -94,6 +130,11 @@ void *realloc(void *pointer, size_t size) {
 void runtime_release_all(void) {
   while (allocations)
     free(allocations + 1);
+  memset(free_blocks,0,sizeof(free_blocks));
+  while (slabs) {
+    Slab *slab=slabs; slabs=slab->next;
+    ((Status(UEFI_API *)(void*))firmware->boot->function[6])(slab);
+  }
 }
 size_t malloc_usable_size(void *pointer) {
   return pointer ? ((Allocation *)pointer - 1)->size : 0;

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include "blink/browser_settings.h"
+#include "blink/browser_identity.h"
 #include <algorithm>
 #include <vector>
 #include "base/strings/utf_string_conversions.h"
@@ -28,6 +29,8 @@
 #include "third_party/zlib/google/compression_utils.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
 #include "blink/browser_frame.h"
+#include "blink/remote_frame.h"
+#include "renderer_runtime.h"
 #include "blink/scheduler.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/public/cpp/bindings/binder_map.h"
@@ -39,34 +42,26 @@
 #include "third_party/skia/include/core/SkSurface.h"
 
 extern "C" const char* firmware_browser_user_agent(void) {
-  return "Mozilla/5.0 (UEFI; x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
-         "Chrome/" UEFI_CHROMIUM_VERSION " Safari/537.36 UEFIBrowser/0.3";
+  return uefi_browser::BrowserUserAgent(false);
 }
-
-namespace {
-blink::UserAgentMetadata BrowserUserAgentMetadata() {
-  blink::UserAgentMetadata metadata;
-  const std::string version = UEFI_CHROMIUM_VERSION;
-  metadata.brand_version_list = {{"Chromium", version.substr(0, version.find('.'))},
-                                 {"UEFIBrowser", "0"}};
-  metadata.brand_full_version_list = {{"Chromium", version}, {"UEFIBrowser", "0.3"}};
-  metadata.full_version = version;
-  metadata.platform = "UEFI";
-  // Firmware revisions vary between machines and are not an operating system version.
-  metadata.platform_version = "";
-  metadata.architecture = "x86";
-  metadata.bitness = "64";
-  metadata.mobile = false;
-  metadata.form_factors = {blink::kDesktopFormFactor};
-  return metadata;
+extern "C" const char* firmware_browser_user_agent_for_url(const char* url) {
+  return uefi_browser::BrowserUserAgent(uefi_browser::GoogleCompatibility(GURL(url)));
 }
+extern "C" int firmware_browser_user_agent_valid(const char* value) {
+  return !std::strcmp(value, uefi_browser::BrowserUserAgent(false)) ||
+         !std::strcmp(value, uefi_browser::BrowserUserAgent(true));
+}
+extern "C" const char* firmware_browser_client_hint_for_url(const char* name, const char* url) {
+  bool chrome = uefi_browser::GoogleCompatibility(GURL(url));
+  static const std::string native_brands = uefi_browser::BrowserUserAgentMetadata().SerializeBrandMajorVersionList();
+  static const std::string chrome_brands = uefi_browser::BrowserUserAgentMetadata(true).SerializeBrandMajorVersionList();
+  if (!std::strcmp(name, "Sec-CH-UA")) return chrome ? chrome_brands.c_str() : native_brands.c_str();
+  if (!std::strcmp(name, "Sec-CH-UA-Mobile")) return "?0";
+  if (!std::strcmp(name, "Sec-CH-UA-Platform")) return chrome ? "\"Linux\"" : "\"UEFI\"";
+  return nullptr;
 }
 extern "C" const char* firmware_browser_client_hint(const char* name) {
-  static const std::string brands = BrowserUserAgentMetadata().SerializeBrandMajorVersionList();
-  if (!std::strcmp(name, "Sec-CH-UA")) return brands.c_str();
-  if (!std::strcmp(name, "Sec-CH-UA-Mobile")) return "?0";
-  if (!std::strcmp(name, "Sec-CH-UA-Platform")) return "\"UEFI\"";
-  return nullptr;
+  return firmware_browser_client_hint_for_url(name, "about:blank");
 }
 
 namespace uefi_browser {
@@ -148,6 +143,7 @@ struct BrowserContext {
   }
   void OpenTab(std::string url) { NewTab(url.c_str()); }
   Status NewTab(const char* url = "about:blank") {
+    if (uefi_browser::RemoteRendererConfigured() && !renderer_runtime_available()) return ERROR(6);
     if (tabs.size() >= kMaximumTabs || runtime_memory_used() > 96u*1024*1024) {
       std::puts("TABS: creation refused by tab or tracked-heap limit");
       return 1;
@@ -259,18 +255,30 @@ struct BrowserContext {
     char line[512]; int y=116;
     auto draw=[&](const char* text) { toolbar->drawString(text,24,y,*font,paint); y+=28; };
     draw("Process monitor - live snapshot (500 ms); Shift+Esc closes");
-    draw("Main process / BSP: browser UI, all Blink DOM, JavaScript, layout and Skia rasterization");
+    draw(renderer_runtime_available() ? "BSP: browser UI and network service | AP: Blink, V8, layout and Skia" :
+         uefi_browser::RemoteRendererConfigured() ? "BSP: browser UI and network service | Renderer stopped; retry with End renderer" :
+         "BSP: browser UI, Blink, V8, layout and Skia (single CPU fallback)");
     std::snprintf(line,sizeof(line),"Tracked C heap: %.1f MiB (excludes virtual-memory commitments and worker pages)",runtime_memory_used()/1048576.0); draw(line);
     std::snprintf(line,sizeof(line),"AP transfers: %zu | BSP fallback: %zu | failures: %zu | starts: %zu | idle stops: %zu",snapshot.frames,snapshot.fallback_frames,snapshot.failures,snapshot.starts,snapshot.idle_stops); draw(line);
     for (size_t index=0;index<snapshot.workers;++index) {
       std::snprintf(line,sizeof(line),"Worker %zu / CPU %zu / CPL3: %s - completed-frame transfer",index+2,snapshot.processor[index],snapshot.disabled ? "disabled" : snapshot.running ? (snapshot.stopping ? "stopping" : "running") : "idle"); draw(line);
     }
-    if (!snapshot.workers) draw("No AP workers available; BSP presentation is active.");
-    draw("Tabs share the main process. CPU percentages and per-tab memory are not measured.");
+    if (renderer_runtime_available()) draw("Renderer AP: private runtime, TLS and page tables; BSP copies completed frames to GOP.");
+    else if (!snapshot.workers) draw("No AP workers available; BSP presentation is active.");
+    draw(renderer_runtime_available() ? "Tabs share one renderer address space. CPL0 execution is not a security sandbox." : "Tabs share the main process. CPU percentages and per-tab memory are not measured.");
     for (size_t index=0;index<tabs.size();++index) {
       std::snprintf(line,sizeof(line),"Tab %zu | %s | %s | frames %zu | %.180s",tabs[index]->identifier,index==active_tab ? "selected" : "background",tabs[index]->frame->NavigationPending() ? "navigation pending" : "document committed",tabs[index]->presentations,tabs[index]->frame->CurrentUrl().c_str()); draw(line);
     }
-    draw("Close tabs with their x button or Ctrl+W. AP workers cannot be terminated individually.");
+    if (!uefi_browser::RemoteRendererConfigured()) {
+      draw("Force termination requires a separate renderer; this session uses the BSP.");
+      return;
+    }
+    draw("End renderer: click the button below or press Delete. All tab documents are discarded.");
+    draw("After recovery, reload a tab or enter a URL. Address text and native tabs are retained.");
+    paint.setColor(SkColorSetRGB(170,32,32));
+    toolbar->drawRect(SkRect::MakeXYWH(24,height-70,230,42),paint);
+    paint.setColor(SK_ColorWHITE);
+    toolbar->drawString("End renderer",40,height-42,*font,paint);
   }
   int pointer_x = 0, pointer_y = 0;
   bool pointer_visible = false;
@@ -424,6 +432,11 @@ struct BrowserContext {
     if (!tabs.empty() && !monitor)
       std::memcpy(pixels.data()+width*kToolbarHeight,tabs[active_tab]->pixels.data(),width*(height-kToolbarHeight)*sizeof(Pixel));
     DrawToolbar();
+    if (!monitor && frame && frame->NavigationStatus()==ERROR(21)) {
+      SkPaint message; message.setColor(SkColorSetRGB(48,48,48));
+      toolbar->drawString("Renderer stopped. Reload this tab or enter a URL to continue.",32,150,*font,message);
+      toolbar->drawString("The document and its session history were discarded. Other native tabs remain open.",32,180,*font,message);
+    }
     DrawMonitor();
     size_t previous = LockCursor();
     RestoreCursor();
@@ -516,11 +529,12 @@ struct BrowserContext {
   static bool Poll(void* pointer) {
     auto& context = *static_cast<BrowserContext*>(pointer);
     if (!context.input || !context.frame) return false;
+    uefi_browser::PollRemoteFrames();
     bool handled = false;
     bool toolbar_changed = false;
     uefi_browser::PointerSample pointer_sample{};
     const auto pointer_deadline = base::TimeTicks::Now() + base::Milliseconds(4);
-    for (int count = 0; count < 8 && context.input->ReadPointer(pointer_sample); ++count) {
+    for (int count = 0; count < 8 && context.frame && (renderer_runtime_available() || context.frame->CanAcceptInput()) && context.input->ReadPointer(pointer_sample); ++count) {
       uefi_browser::PointerSample latest = pointer_sample;
       context.input->PeekPointer(latest);
       if (!context.framebuffer) {
@@ -536,17 +550,23 @@ struct BrowserContext {
           if (pointer_sample.x >= 292 && pointer_sample.x < static_cast<int>(context.width) - 52) context.FocusAddress();
         }
         else if (pointer_sample.y < kToolbarHeight) context.toolbar_pressed = context.TabButton(pointer_sample.x,pointer_sample.y);
+        else if (context.monitor && pointer_sample.x>=24 && pointer_sample.x<254 &&
+                 pointer_sample.y>=static_cast<int>(context.height)-70 && pointer_sample.y<static_cast<int>(context.height)-28)
+          context.toolbar_pressed=400;
         else if (!context.monitor) { context.address_focused = false; context.page_drag = true; }
       }
       if (!context.monitor && (pointer_sample.y >= kToolbarHeight || context.page_drag)) {
         auto page = pointer_sample;
-        page.y = std::max(0, page.y - kToolbarHeight);
+        page.y -= kToolbarHeight;
         context.frame->Pointer(page);
-      }
+      } else context.frame->PointerLeave();
       if (!(pointer_sample.buttons & 1) && (context.pointer_buttons & 1)) {
         int button = context.toolbar_pressed;
         context.toolbar_pressed = -1;
-        if (button >= 100 && context.TabButton(pointer_sample.x,pointer_sample.y) == button)
+        if (button==400 && context.monitor && pointer_sample.x>=24 && pointer_sample.x<254 &&
+            pointer_sample.y>=static_cast<int>(context.height)-70 && pointer_sample.y<static_cast<int>(context.height)-28)
+          uefi_browser::TerminateRenderer();
+        else if (button >= 100 && context.TabButton(pointer_sample.x,pointer_sample.y) == button)
           context.TabAction(button);
         else if (button >= 0 && button < 100 && context.ToolbarButton(pointer_sample.x, pointer_sample.y) == button)
           context.ToolbarAction(button);
@@ -558,13 +578,14 @@ struct BrowserContext {
     }
     uefi_browser::KeySample key{};
     const auto key_deadline = base::TimeTicks::Now() + base::Milliseconds(4);
-    for (int count = 0; count < 8 && context.input->ReadKey(key); ++count) {
+    for (int count = 0; count < 8 && context.frame && (renderer_runtime_available() || context.frame->CanAcceptInput()) && context.input->ReadKey(key); ++count) {
       toolbar_changed = true;
       bool control = (key.shift & 0x80000000u) && (key.shift & 12);
       bool shift = (key.shift & 0x80000000u) && (key.shift & 3);
       auto character = key.key.character;
       if (shift && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
       else if (context.monitor && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
+      else if (context.monitor && key.key.scan==8) uefi_browser::TerminateRenderer();
       else if (control && (character == 20 || character == 't' || character == 'T')) context.NewTab();
       else if (control && (character == 23 || character == 'w' || character == 'W')) context.CloseTab(context.active_tab);
       else if (control && character == 9) context.SelectTab((context.active_tab+context.tabs.size()+(shift ? -1 : 1))%context.tabs.size());
@@ -579,6 +600,7 @@ struct BrowserContext {
       if (base::TimeTicks::Now() >= key_deadline) break;
     }
     if (handled) context.PresentInput(toolbar_changed);
+    renderer_runtime_service();
     resource_async_process();
     render_processes_idle();
     if (context.monitor && base::TimeTicks::Now()-context.monitor_updated >= base::Milliseconds(500)) context.Present();
@@ -631,7 +653,7 @@ class FirmwarePlatform final : public blink::Platform {
     return std::string(reinterpret_cast<const char*>(data), size);
   }
   blink::UserAgentMetadata UserAgentMetadata() override {
-    return BrowserUserAgentMetadata();
+    return uefi_browser::BrowserUserAgentMetadata();
   }
   blink::WebString UserAgent() override {
     return blink::WebString::FromUtf8(firmware_browser_user_agent());
@@ -668,11 +690,11 @@ extern "C" int run_blink_browser(SystemTable* table) {
   std::printf("BLINK: V8 flags %s\n", firmware_javascript_flags);
   std::puts("BLINK: initialize command line");
   CHECK(base::CommandLine::Init(2, arguments));
-  // These optimizations require worker threads; foreground parsing remains enabled.
+  // Worker-dependent parsing is disabled; batching must not bypass native input polls.
   std::puts("BLINK: initialize feature list");
   base::FeatureList::InitInstance("",
       "BackgroundResourceFetch,ThreadedPreloadScanner,PrecompileInlineScripts,"
-      "ScriptStreaming,ThreadedBodyLoader,ConsumeCodeCacheOffThread");
+      "ScriptStreaming,ThreadedBodyLoader,ConsumeCodeCacheOffThread,RunTasksByBatches");
   std::puts("BLINK: initialize thread pool");
   base::ThreadPoolInstance::Create("UEFIBrowser");
   std::puts("BLINK: initialize ICU");
@@ -682,6 +704,15 @@ extern "C" int run_blink_browser(SystemTable* table) {
   std::puts("BLINK: initialize fonts");
   uefi_browser::InstallFonts();
   uefi_browser::LoadPreferences(table);
+  if (renderer_runtime_is_child()) {
+    mojo::BinderMap binders;
+    blink::Platform::InitializeBlink();
+    auto scheduler=uefi_browser::CreateScheduler(table,uefi_browser::PollRenderer,nullptr);
+    blink::Initialize(&platform,&binders,scheduler.get());
+    int result=uefi_browser::RunRenderer(table,*scheduler);
+    scheduler->Shutdown();
+    return result;
+  }
   BrowserContext context{table, nullptr};
   Guid graphics_guid = {0x9042a9de, 0x23dc, 0x4a38,
                          {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
@@ -731,7 +762,8 @@ extern "C" int run_blink_browser(SystemTable* table) {
       std::puts("INPUT: timer framebuffer cursor enabled");
     }
     CHECK_EQ(resource_async_initialize(table), 0u);
-    if (context.framebuffer) render_processes_initialize(table, context.width * context.height);
+    bool remote=uefi_browser::StartRenderer(table,context.width,context.height-kToolbarHeight);
+    if (!remote && context.framebuffer) render_processes_initialize(table, context.width * context.height);
     Status result = context.NewTab(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url);
     if (result) {
       std::printf("FAIL: navigation transport status 0x%llx\n",
@@ -747,6 +779,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
     context.tabs.clear();
     context.input.reset();
   }
+  uefi_browser::StopRenderer();
   render_processes_shutdown();
   resource_async_shutdown(table);
   scheduler->Shutdown();

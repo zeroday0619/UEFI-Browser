@@ -1,5 +1,6 @@
 #include "uefi.h"
 #include "virtual_memory.h"
+#include "renderer_runtime.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -21,7 +22,57 @@ static struct Region { uintptr_t start, end; } regions[MAX_REGIONS];
 
 size_t virtual_memory_reservation_limit(void) { return ARENA_SIZE; }
 
+/* Renderer commitments reuse 1 MiB physical batches to bound service round trips. */
+typedef struct PageBatch {
+  struct PageBatch *next;
+  uint64_t address, used[4];
+} PageBatch;
+static PageBatch *page_batches;
+static void *renderer_page(void) {
+  PageBatch *batch=page_batches;
+  for (; batch; batch=batch->next)
+    for (unsigned word=0; word<4; ++word) if (batch->used[word]!=UINT64_MAX) goto found;
+  batch=calloc(1,sizeof(*batch));
+  if (!batch) return NULL;
+  if (((Status(UEFI_API *)(uint32_t,uint32_t,size_t,uint64_t*))
+       platform_firmware()->boot->function[2])(0,2,256,&batch->address)) { free(batch); return NULL; }
+  batch->next=page_batches; page_batches=batch;
+found:
+  for (unsigned word=0; word<4; ++word) if (batch->used[word]!=UINT64_MAX) {
+    unsigned bit=__builtin_ctzll(~batch->used[word]);
+    batch->used[word]|=1ULL<<bit;
+    void *page=(void*)(batch->address+(word*64+bit)*PAGE_SIZE);
+    memset(page,0,PAGE_SIZE);
+    return page;
+  }
+  return NULL;
+}
+static void renderer_page_release(uint64_t address) {
+  for (PageBatch *batch=page_batches; batch; batch=batch->next) {
+    if (address<batch->address || address-batch->address>=256*PAGE_SIZE) continue;
+    size_t page=(address-batch->address)/PAGE_SIZE;
+    uint64_t bit=1ULL<<(page%64);
+    if (!(batch->used[page/64]&bit)) abort();
+    batch->used[page/64]&=~bit;
+    return;
+  }
+  abort();
+}
+static void renderer_pages_release(void) {
+  while (page_batches) {
+    PageBatch *batch=page_batches;
+    for (unsigned word=0; word<4; ++word) if (batch->used[word]) abort();
+    if (((Status(UEFI_API *)(uint64_t,size_t))platform_firmware()->boot->function[3])(batch->address,256)) abort();
+    page_batches=batch->next;
+    free(batch);
+  }
+}
 static void *allocate_page(void) {
+  if (renderer_runtime_is_child()) {
+    void *page=renderer_page();
+    if (!page) errno=ENOMEM;
+    return page;
+  }
   uint64_t address = 0;
   Status result = ((Status(UEFI_API *)(uint32_t, uint32_t, size_t, uint64_t *))
       platform_firmware()->boot->function[2])(0, 2, 1, &address);
@@ -30,6 +81,7 @@ static void *allocate_page(void) {
   return (void *)address;
 }
 static void free_page(uint64_t address) {
+  if (renderer_runtime_is_child()) { renderer_page_release(address & ADDRESS_MASK); return; }
   if (((Status(UEFI_API *)(uint64_t, size_t))
        platform_firmware()->boot->function[3])(address & ADDRESS_MASK, 1))
     abort();
@@ -216,7 +268,7 @@ static void release_tables(uint64_t *table, unsigned level) {
   free_page((uintptr_t)table);
 }
 void virtual_memory_release(void) {
-  if (!arena_start) return;
+  if (!arena_start) { renderer_pages_release(); return; }
   for (int index = 0; index < MAX_REGIONS; ++index)
     if (regions[index].start && virtual_memory_unmap((void *)regions[index].start,
         regions[index].end - regions[index].start)) abort();
@@ -225,4 +277,5 @@ void virtual_memory_release(void) {
   release_tables(directory, 3);
   free_page((uintptr_t)firmware_root);
   arena_start = 0;
+  renderer_pages_release();
 }

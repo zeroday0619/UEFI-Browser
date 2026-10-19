@@ -11,6 +11,37 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*arguments, directory=str(Path(__file__).parent / 'input-pages'), **keywords)
 
     def do_GET(self):
+        if self.path in ('/chrome-identity', '/chrome-identity.js'):
+            identity = {name: self.headers.get_all(name, []) for name in
+                        ('User-Agent', 'Sec-CH-UA', 'Sec-CH-UA-Platform', 'Sec-CH-UA-Mobile')}
+            chrome = self.headers.get('Host', '').split(':')[0] == 'google.com'
+            print('CHROME_IDENTITY ' + self.headers.get('Host', '') + ' ' + self.path + ' ' + json.dumps(identity), flush=True)
+            if self.path == '/chrome-identity':
+                body = ('<!doctype html><title>Browser identity</title><h1>Browser identity</h1><script>'
+                        'window.expectedChrome=' + json.dumps(chrome) + ';window.documentIdentity=' + json.dumps(identity) +
+                        ';</script><script src="/chrome-identity.js"></script>').encode()
+                content_type = 'text/html'
+            else:
+                body = ('window.resourceIdentity=' + json.dumps(identity) + ';' +
+                        (Path(__file__).parent / 'input-pages/chrome-identity.js').read_text()).encode()
+                content_type = 'text/javascript'
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path in ('/parallel-slow', '/parallel-fast'):
+            print('PARALLEL_START ' + self.path + ' ' + str(time.monotonic()), flush=True)
+            if self.path == '/parallel-slow': time.sleep(3)
+            body = b'completed'
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            print('PARALLEL_DONE ' + self.path + ' ' + str(time.monotonic()), flush=True)
+            return
         if self.path in ('/hints', '/hints-policy', '/hints.js'):
             hints = {name.lower(): self.headers.get_all(name, []) for name in
                      ('Sec-CH-UA', 'Sec-CH-UA-Mobile', 'Sec-CH-UA-Platform')}

@@ -12,6 +12,7 @@ import uuid
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--directory', type=Path, required=True)
+parser.add_argument('--identity-domains', action='store_true', help='Include isolated Google identity fixture names in the temporary certificate.')
 parser.add_argument('--port', type=int, default=8766)
 arguments = parser.parse_args()
 directory = arguments.directory.resolve()
@@ -20,7 +21,7 @@ certificate = directory / 'cert.pem'
 key = directory / 'key.pem'
 with (directory / 'openssl.log').open('w') as output:
     subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
-        '-days', '2', '-subj', '/CN=10.0.2.2', '-addext', 'subjectAltName=IP:10.0.2.2',
+        '-days', '2', '-subj', '/CN=10.0.2.2', '-addext', 'subjectAltName=IP:10.0.2.2' + (',DNS:google.com,DNS:google.com.evil.test' if arguments.identity_domains else ''),
         '-addext', 'basicConstraints=critical,CA:TRUE', '-keyout', str(key),
         '-out', str(certificate)], stdout=output, stderr=subprocess.STDOUT, check=True)
 der = ssl.PEM_cert_to_DER_cert(certificate.read_text())

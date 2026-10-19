@@ -45,10 +45,12 @@ url = os.environ.get('BLINK_START_URL', 'about:blank')
 parsed = urllib.parse.urlsplit(url)
 if url != 'about:blank' and (parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username or parsed.password or len(url) >= 4096):
     raise SystemExit('BLINK_START_URL must be about:blank or an HTTP(S) URL without credentials, shorter than 4096 characters.')
-mode = os.environ.get('BLINK_JAVASCRIPT_MODE', 'sparkplug')
-flags = {'sparkplug': '--single-threaded --sparkplug', 'interpreter': '--single-threaded --jitless'}
+mode = os.environ.get('BLINK_JAVASCRIPT_MODE', 'optimized')
+flags = {'optimized': '--single-threaded --sparkplug --turbofan',
+         'sparkplug': '--single-threaded --sparkplug --no-turbofan',
+         'interpreter': '--single-threaded --jitless'}
 if mode not in flags:
-    raise SystemExit('BLINK_JAVASCRIPT_MODE must be sparkplug or interpreter.')
+    raise SystemExit('BLINK_JAVASCRIPT_MODE must be optimized, sparkplug, or interpreter.')
 pathlib.Path(sys.argv[1]).write_text('const char firmware_browser_url[] = ' + json.dumps(url) + ';\n' +
     'const char firmware_javascript_flags[] = ' + json.dumps(flags[mode]) + ';\n')
 PYTHON
@@ -113,8 +115,9 @@ done
 clang "${common[@]}" "${includes[@]}" -DUSE_MUSL -c "$project/src/posix.c" -o "$build/posix.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/virtual_memory.c" -o "$build/virtual_memory.o"
 clang "${common[@]}" "${includes[@]}" -mgeneral-regs-only -c "$project/src/process/process.c" -o "$build/process.o"
+clang "${common[@]}" "${includes[@]}" -c "$project/src/process/renderer_runtime.c" -o "$build/renderer_runtime.o"
 clang -c "$project/src/process/entry.S" -o "$build/process-entry.o"
-ld.lld --error-limit=0 --gc-sections -T "$project/src/payload.ld" -o "$build/payload.next.elf" "$build/"{allocator,startup,syscalls,probe,posix,virtual_memory,process,process-entry}.o "${engine_objects[@]}" "$libc_build/lib/libc.a" "$(clang -print-libgcc-file-name --rtlib=compiler-rt)"
+ld.lld --error-limit=0 --gc-sections -T "$project/src/payload.ld" -o "$build/payload.next.elf" "$build/"{allocator,startup,syscalls,probe,posix,virtual_memory,process,process-entry,renderer_runtime}.o "${engine_objects[@]}" "$libc_build/lib/libc.a" "$(clang -print-libgcc-file-name --rtlib=compiler-rt)"
 mv -- "$build/payload.next.elf" "$build/payload.elf"
 cat > "$build/embed.S" <<ASM
 .section .rdata,"dr"

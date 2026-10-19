@@ -31,6 +31,11 @@ command = ['qemu-system-x86_64', '-machine', 'q35,accel=' + os.environ.get('QEMU
     '-device', 'virtio-mouse-pci', '-device', 'virtio-rng-pci', '-display', 'none', '-serial', f'file:{log}',
     '-qmp', f'unix:{monitor},server=on,wait=off', '-no-reboot',
     '-fw_cfg', f'name=etc/edk2/https/cacerts,file={os.environ.get("TEST_CA_FILE", project / "build/ca.esl")}']
+if os.environ.get('QEMU_TEST_GDB_PORT'):
+    port = int(os.environ['QEMU_TEST_GDB_PORT'])
+    if not 1 <= port <= 65535:
+        raise SystemExit('QEMU_TEST_GDB_PORT must be between 1 and 65535.')
+    command += ['-gdb', f'tcp:127.0.0.1:{port}']
 process = subprocess.Popen(command)
 try:
     required = ['BLINK: non-composited main frame created',

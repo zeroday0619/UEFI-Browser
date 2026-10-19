@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include <errno.h>
+#include "renderer_runtime.h"
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -10,11 +11,16 @@
 #include <unistd.h>
 extern void graphics_log(const char *);
 extern _Bool firmware_entropy(unsigned char *, size_t);
-static long serial_write(long descriptor, const char *data, size_t length) {
+long firmware_serial_write(long descriptor, const char *data, size_t length) {
   if (descriptor != 1 && descriptor != 2)
     return -EBADF;
   if (length > LONG_MAX)
     return -EINVAL;
+  if (renderer_runtime_is_child()) {
+    extern void renderer_runtime_write(const void *, size_t);
+    renderer_runtime_write(data,length);
+    return length;
+  }
   for (size_t index = 0; index < length; index++) {
     char text[2] = {data[index], 0};
     if (data[index])
@@ -37,7 +43,7 @@ long firmware_syscall(long number, long first, long second, long third,
                       long fourth, long fifth, long sixth) {
   switch (number) {
   case SYS_write:
-    return serial_write(first, (void *)second, third);
+    return firmware_serial_write(first, (void *)second, third);
   case SYS_writev: {
     if (third < 0 || third > IOV_MAX)
       return -EINVAL;
@@ -50,7 +56,7 @@ long firmware_syscall(long number, long first, long second, long third,
     }
     for (long index = 0; index < third; index++) {
       long result =
-          serial_write(first, vectors[index].iov_base, vectors[index].iov_len);
+          firmware_serial_write(first, vectors[index].iov_base, vectors[index].iov_len);
       if (result < 0)
         return result;
     }
@@ -69,7 +75,7 @@ long firmware_syscall(long number, long first, long second, long third,
     return first >= 0 && first <= 2 ? -ESPIPE : -EBADF;
   case SYS_getpid:
   case SYS_gettid:
-    return 1;
+    return renderer_runtime_is_child() ? 2 : 1;
   case SYS_clock_gettime:
     return clock_gettime(first, (void *)second) ? -errno : 0;
   case SYS_nanosleep:

@@ -1,0 +1,21 @@
+<!doctype html><meta charset="utf-8"><title>Renderer isolation regression</title>
+<style>body{font:24px sans-serif;margin:24px;height:6000px;background:linear-gradient(#fff,#8cd)}button,input{font:24px sans-serif;height:48px} .controls{position:fixed;z-index:10;top:20px;background:#fff;padding:10px}p{margin-top:160px}</style>
+<div class="controls"><button id="start">Run six seconds</button><button id="click">Page click</button><input id="field" aria-label="Page input"></div>
+<p>The renderer runs one uninterrupted JavaScript task for six seconds.</p>
+<div style="position:absolute;top:1100px;left:24px;right:24px;height:240px;background:#b83728;color:white">Offscreen raster cache marker</div>
+<script>
+const field=document.getElementById('field');
+field.oninput=()=>console.log('ISOLATION key '+field.value);
+document.getElementById('click').onclick=()=>console.log('ISOLATION click');
+onscroll=()=>console.log('ISOLATION scroll '+scrollY);
+document.getElementById('start').onclick=()=>{
+ fetch('/parallel-slow').then(response=>response.text()).then(()=>console.log('ISOLATION network delivered'));
+ setTimeout(()=>{
+  console.log('ISOLATION begin');
+  const start=performance.now();let value=0;
+  while(performance.now()-start<6000){for(let index=0;index<10000;index++)value=(Math.imul(value,1664525)+1013904223)|0;}
+  console.log('ISOLATION end '+value);
+ },200);
+};
+console.log('ISOLATION ready');
+</script>

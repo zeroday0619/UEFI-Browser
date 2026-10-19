@@ -58,7 +58,418 @@ def run(execute, build, log):
             elif character == '/': key('slash')
             elif character == '.': key('dot')
             elif character == '-': key('minus')
+            elif character == '_': key('shift','minus')
+            elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-style':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-style.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-controls':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-controls.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-input':
+        import json
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/scroll-input.html'); key('ret')
+        wait_marker('INPUT ready'); wait_marker('COMPOSITOR: scene pictures='); time.sleep(2)
+        def capture(name):
+            path=build/('input-input-'+name+'.ppm'); execute('screendump',{'filename':str(path)})
+            parts=path.read_bytes().split(b'\n',3)
+            return int(parts[1].split()[0]),int(parts[1].split()[1]),parts[3]
+        def crop(image,left,top,right,bottom):
+            width,_,pixels=image
+            return b''.join(pixels[(row*width+left)*3:(row*width+right)*3] for row in range(top,bottom))
+        def press(down):
+            execute('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':down}}]})
+            time.sleep(.1)
+        def check_busy(mode):
+            assert 'INPUT '+mode+' end' not in healthy(), 'JavaScript finished before input verification'
+        def key_position(mode,keys,expected):
+            start=len(healthy()); key(*keys); text=healthy()[start:]
+            assert re.search(r'COMPOSITOR: async key sequence=\d+ position='+str(expected)+r' ',text),text
+            check_busy(mode)
+        click(85,45); wait_marker('INPUT root begin')
+        root_start=len(healthy())
+        before=capture('root-before')
+        started=time.monotonic()
+        execute('send-key',{'keys':[{'type':'qcode','data':'down'}]})
+        deadline=started+1
+        while time.monotonic()<deadline:
+            first=capture('first-key-busy')
+            if crop(first,550,130,650,250)!=crop(before,550,130,650,250): break
+            time.sleep(.005)
+        else: raise AssertionError('Keyboard scroll did not update pixels within one second')
+        first_key_ms=(time.monotonic()-started)*1000
+        check_busy('root')
+        for keys,expected in [(('pgdn',),670),(('home',),0),(('end',),13280),
+                              (('up',),13240),(('home',),0),(('spc',),630),(('shift','spc'),0)]:
+            key_position('root',keys,expected)
+        move(500,500); start=len(healthy()); wheel('down')
+        assert re.search(r'COMPOSITOR: async scroll sequence=\d+ position=80 ',healthy()[start:]),healthy()[start:]
+        check_busy('root'); passive=capture('passive-busy')
+        assert crop(passive,400,350,650,650)!=crop(before,400,350,650,650)
+        assert 'INPUT passive cancelable=' not in healthy()[root_start:], 'Listener ran inside the long task'
+        move(150,250); start=len(healthy()); wheel('down'); check_busy('root')
+        assert 'COMPOSITOR: async scroll' not in healthy()[start:], 'Cancelable region scrolled before dispatch'
+        move(1272,35); start=len(healthy()); press(True); move(1272,350); press(False)
+        check_busy('root'); root_drag=capture('root-drag-busy')
+        assert crop(root_drag,1265,96,1280,775)!=crop(before,1265,96,1280,775), 'Root thumb did not move during JavaScript'
+        root_positions=re.findall(r'COMPOSITOR: async drag sequence=\d+ position=(\d+) element=(\d+)',healthy()[start:])
+        assert root_positions and int(root_positions[-1][0])>5000,healthy()[start:]
+        move(1142,225); start=len(healthy()); press(True); move(1142,450); press(False)
+        check_busy('root'); nested_drag=capture('nested-drag-busy')
+        assert crop(nested_drag,1135,296,1150,565)!=crop(root_drag,1135,296,1150,565), 'Nested thumb did not move during JavaScript'
+        nested_positions=re.findall(r'COMPOSITOR: async drag sequence=\d+ position=(\d+) element=(\d+)',healthy()[start:])
+        assert nested_positions and int(nested_positions[-1][0])>7000,healthy()[start:]
+        assert nested_positions[-1][1]!=root_positions[-1][1]
+        assert crop(nested_drag,750,330,1100,550)!=crop(root_drag,750,330,1100,550)
+        wait_marker('INPUT root end'); wait_marker('INPUT passive cancelable=false'); wait_marker('INPUT wheel canceled=true')
+        wait_marker('INPUT root position='+root_positions[-1][0]); wait_marker('INPUT nested position='+nested_positions[-1][0]); time.sleep(2)
+        reconciled=capture('reconciled')
+        left=crop(nested_drag,400,80,1280,700); right=crop(reconciled,400,80,1280,700)
+        mismatch=sum(abs(a-b)>2 for a,b in zip(left,right))/len(left)
+        assert mismatch<.02,('Scrollbar reconciliation differs',mismatch)
+        click(210,45); wait_marker('INPUT inside begin')
+        for keys,expected in [(('pgdn',),262),(('home',),0),(('end',),9700),(('up',),9660),
+                              (('home',),0),(('spc',),262),(('shift','spc'),0)]:
+            key_position('inside',keys,expected)
+        key_position('inside',('pgdn',),262); capture('nested-key-busy')
+        wait_marker('INPUT inside end'); wait_marker('INPUT nested position=262'); time.sleep(1)
+        click(335,45); wait_marker('INPUT cancel begin'); start=len(healthy()); key('pgdn'); check_busy('cancel')
+        assert 'COMPOSITOR: async key' not in healthy()[start:], 'Cancelable keyboard listener was bypassed'
+        wait_marker('INPUT cancel end'); wait_marker('INPUT key canceled=true'); time.sleep(1)
+        click(460,45); wait_marker('INPUT edit begin'); start=len(healthy()); key('end'); key('a'); check_busy('edit')
+        assert 'COMPOSITOR: async key' not in healthy()[start:], 'Editable control scrolled the document'
+        wait_marker('INPUT edit end'); wait_marker('INPUT editor=unchangeda')
+        click(585,45); wait_marker('INPUT selectmode begin'); start=len(healthy()); key('end'); check_busy('selectmode')
+        assert 'COMPOSITOR: async key' not in healthy()[start:], 'Select control scrolled the document'
+        wait_marker('INPUT selectmode end'); wait_marker('INPUT choice=C')
+        result={'first_key_capture_ms':round(first_key_ms,2),'select_control_preserved':True,'javascript_block_ms':12000,'passive_wheel_during_javascript':True,'cancelable_wheel_preserved':True,
+                'root_keyboard_commands':8,'nested_keyboard_commands':8,'root_drag_position':int(root_positions[-1][0]),
+                'nested_drag_position':int(nested_positions[-1][0]),'reconciliation_difference_fraction':mismatch,
+                'cancelable_keyboard_preserved':True,'editable_control_preserved':True}
+        (build/'scroll-input-results.json').write_text(json.dumps(result,indent=2))
+        print('PASS: asynchronous passive wheel, keyboard and scrollbar input',json.dumps(result)); return
+    if os.environ.get('INPUT_SCENARIO') == 'entropy':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/entropy.html'); key('ret')
+        wait_marker('ENTROPY complete 65536'); print('PASS: renderer ArrayBuffer entropy'); return
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-site','scroll-site-input'):
+        import json
+        url='https://docs.python.org/3/library/asyncio-eventloop.html'
+        key('ctrl','l'); type_address(url); start=len(healthy()); key('ret')
+        deadline=time.monotonic()+120
+        while time.monotonic()<deadline:
+            text=healthy()[start:]
+            if 'BLINK: navigation HTTP status=200' in text and 'BLINK: main frame stopped loading' in text and 'COMPOSITOR: scene pictures=' in text: break
+            time.sleep(.2)
+        else: raise AssertionError('Real website did not publish an asynchronous scene: '+healthy()[start:])
+        time.sleep(3); before=snapshot('scroll-site-before')
+        move(150,500); start=len(healthy()); wheel('down',1)
+        nested=snapshot('scroll-site-sidebar')
+        nested_log=healthy()[start:]
+        assert 'COMPOSITOR: async scroll' in nested_log, nested_log
+        assert nested!=before, 'Real sidebar did not move'
+        move(900,500); start=len(healthy()); wheel('down',24)
+        body=snapshot('scroll-site-document')
+        body_log=healthy()[start:]
+        assert 'COMPOSITOR: async scroll' in body_log, body_log
+        assert body!=nested, 'Real document did not move'
+        nested_ids=set(re.findall(r'COMPOSITOR: async scroll .*element=(\d+)',nested_log))
+        root_ids=set(re.findall(r'COMPOSITOR: async scroll .*element=(\d+)',body_log))
+        assert nested_ids and root_ids and nested_ids.isdisjoint(root_ids), ('Sidebar did not scroll independently',nested_ids,root_ids)
+        result={'url':url,'nested_elements':sorted(nested_ids),'root_elements':sorted(root_ids),'nested_async_events':nested_log.count('COMPOSITOR: async scroll'),
+                'root_async_events':body_log.count('COMPOSITOR: async scroll')}
+        if os.environ.get('INPUT_SCENARIO') == 'scroll-site-input':
+            def thumb_center(image,x,top,bottom):
+                width,_,pixels=image; runs=[]; start=None
+                for y in range(top,bottom):
+                    offset=(y*width+x)*3; color=pixels[offset:offset+3]
+                    thumb=170<=min(color)<=220 and max(color)-min(color)<6
+                    if thumb and start is None: start=y
+                    if not thumb and start is not None:
+                        if y-start>=8: runs.append((y-start,(y+start)//2))
+                        start=None
+                assert runs, ('No native scrollbar thumb',x,top,bottom)
+                return max(runs)[1]
+            drag_ids=[]
+            for name,x,end in [('document',1272,450),('sidebar',316,700)]:
+                screen=snapshot('site-input-'+name+'-before')
+                center=thumb_center(screen,x,96,775)
+                move(x,center,page=False); start=len(healthy())
+                execute('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':True}}]})
+                time.sleep(.1); move(x,end,page=False)
+                execute('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':False}}]})
+                time.sleep(.3)
+                samples=re.findall(r'COMPOSITOR: async drag sequence=\d+ position=(\d+) element=(\d+)',healthy()[start:])
+                assert samples, ('Live scrollbar did not use the compositor',name,healthy()[start:])
+                drag_ids.append(samples[-1][1]); snapshot('site-input-'+name+'-after')
+            assert len(set(drag_ids))==2, drag_ids
+            result['scrollbar_drag_elements']=drag_ids
+        (build/'scroll-site-results.json').write_text(json.dumps(result,indent=2))
+        print('PASS: real website asynchronous scrolling',json.dumps(result)); return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-tree':
+        import json
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/scroll-tree.html'); key('ret')
+        wait_marker('SCENE ready'); wait_marker('COMPOSITOR: scene pictures='); time.sleep(2)
+        def capture(name):
+            path=build/('input-'+name+'.ppm'); execute('screendump',{'filename':str(path)})
+            parts=path.read_bytes().split(b'\n',3)
+            return int(parts[1].split()[0]),int(parts[1].split()[1]),parts[3]
+        def crop(image,left,top,right,bottom):
+            width,_,pixels=image
+            return b''.join(pixels[(row*width+left)*3:(row*width+right)*3] for row in range(top,bottom))
+        def fast_wheel(ticks):
+            for _ in range(ticks):
+                for down in (True,False):
+                    execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':down}}]})
+                    time.sleep(.015)
+        click(100,45); wait_marker('SCENE begin'); move(1000,400)
+        before=capture('tree-before'); started=time.monotonic()
+        for down in (True,False):
+            execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':down}}]})
+        deadline=started+1
+        while time.monotonic()<deadline:
+            first=capture('tree-first-wheel')
+            if crop(first,720,350,950,550)!=crop(before,720,350,950,550): break
+            time.sleep(.005)
+        else: raise AssertionError('Nested scrolling did not update within one second')
+        latency=(time.monotonic()-started)*1000
+        fast_wheel(54)
+        nested=capture('tree-nested-busy')
+        assert 'SCENE end' not in healthy()
+        assert crop(nested,800,350,801,351)==bytes((238,170,34)), 'Nested distant marker was not rasterized'
+        assert crop(nested,1100,315,1101,316)==bytes((34,170,102)), 'Nested sticky header moved'
+        assert 'SCENE nested 4400' not in healthy(), 'DOM ran inside the long task'
+        move(500,500); fast_wheel(64)
+        root=capture('tree-root-busy')
+        assert 'SCENE end' not in healthy()
+        assert crop(root,500,90,501,91)==bytes((136,68,204)), 'Root sticky did not attach to the viewport'
+        assert crop(root,500,200,501,201)==bytes((184,55,40)), 'Root distant marker was not rasterized'
+        assert crop(root,800,350,801,351)==bytes((238,170,34)), 'Root scroll changed fixed nested content'
+        wait_marker('SCENE end'); wait_marker('SCENE root 5120'); wait_marker('SCENE nested 4400')
+        wait_marker('acknowledgement=119'); time.sleep(1)
+        reconciled=capture('tree-reconciled')
+        first=crop(root,300,80,1100,700); second=crop(reconciled,300,80,1100,700)
+        mismatch=sum(abs(a-b)>2 for a,b in zip(first,second))/len(first)
+        assert mismatch<.02, ('Scene reconciliation differs',mismatch)
+        result={'root_scroll_px':5120,'nested_scroll_px':4400,'javascript_block_ms':12000,
+                'first_scroll_capture_ms':round(latency,2),
+                'sticky_root_and_nested':True,'reconciliation_difference_fraction':mismatch}
+        for name,x,expected in [('boundary',205,80),('contain',285,9700)]:
+            click(x,45); wait_marker('SCENE '+name+' begin'); move(1000,400)
+            start=len(healthy()); fast_wheel(1)
+            time.sleep(.1); tail=healthy()[start:]
+            assert 'SCENE '+name+' end' not in tail
+            assert re.search(r'COMPOSITOR: async scroll sequence=\d+ position='+str(expected)+r' ',tail),tail
+            wait_marker('SCENE '+name+' end'); time.sleep(1)
+        result['boundary_chain_and_containment']=True
+        (build/'scroll-tree-results.json').write_text(json.dumps(result,indent=2))
+        print('PASS: nested, sticky and cache-independent scrolling',json.dumps(result)); return
+    if os.environ.get('INPUT_SCENARIO') == 'renderer-exit':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-infinite.html'); key('ret')
+        wait_marker('RECOVERY fixture ready'); time.sleep(1)
+        click(130,40); wait_marker('RECOVERY infinite begin')
+        print('Renderer is executing infinite JavaScript before the F12 shutdown test')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'renderer-scroll':
+        import json
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-blocking.html'); key('ret')
+        wait_marker('ISOLATION ready'); wait_marker('COMPOSITOR: scene pictures=')
+        time.sleep(2)
+        click(120,50); wait_marker('ISOLATION begin'); move(1100,500)
+        def capture(name):
+            path=build/('input-'+name+'.ppm')
+            execute('screendump',{'filename':str(path)})
+            parts=path.read_bytes().split(b'\n',3)
+            width,height=map(int,parts[1].split())
+            return width,height,parts[3]
+        def crop(image,left,top,right,bottom):
+            width,_,pixels=image
+            return b''.join(pixels[(row*width+left)*3:(row*width+right)*3] for row in range(top,bottom))
+        baseline=capture('scroll-before')
+        started=time.monotonic()
+        execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':True}}]})
+        execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':False}}]})
+        deadline=started+1
+        while time.monotonic()<deadline:
+            changed=capture('scroll-during-javascript')
+            if crop(changed,50,400,1000,700)!=crop(baseline,50,400,1000,700): break
+            time.sleep(.005)
+        else: raise AssertionError('Page pixels did not scroll during JavaScript')
+        latency=(time.monotonic()-started)*1000
+        assert 'ISOLATION end' not in healthy(), 'JavaScript completed before visual scrolling'
+        assert crop(changed,25,110,715,165)==crop(baseline,25,110,715,165), 'Fixed controls moved during asynchronous scrolling'
+        assert 'ISOLATION scroll 80' not in healthy(), 'DOM scroll unexpectedly ran inside the long task'
+        for _ in range(12):
+            for down in (True,False):
+                execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':down}}]})
+                time.sleep(.02)
+        changed=capture('scroll-offscreen-during-javascript')
+        assert 'ISOLATION end' not in healthy()
+        assert crop(changed,900,200,901,201)==bytes((184,55,40)), 'Offscreen content was not present in the raster cache'
+        assert crop(changed,25,110,715,165)==crop(baseline,25,110,715,165)
+        wait_marker('ISOLATION end'); wait_marker('ISOLATION scroll 1040')
+        wait_marker('acknowledgement=13')
+        time.sleep(.5)
+        reconciled=capture('scroll-reconciled')
+        before=crop(changed,25,180,1000,700); after=crop(reconciled,25,180,1000,700)
+        mismatched=sum(abs(a-b)>2 for a,b in zip(before,after))/len(before)
+        assert mismatched<.02, ('Reconciliation changed the composed page',mismatched)
+        result={'scroll_visible_ms':round(latency,2),'reconciliation_channel_difference_fraction':mismatched,
+                'fixed_controls_unchanged':True,'offscreen_content_visible':True,'scroll_distance_px':1040,'javascript_block_ms':6000}
+        (build/'renderer-scroll-results.json').write_text(json.dumps(result,indent=2))
+        print('PASS: asynchronous scroll during JavaScript',json.dumps(result))
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'renderer-recovery':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-infinite.html'); key('ret')
+        wait_marker('RECOVERY fixture ready'); time.sleep(2)
+        key('ctrl','t'); key('ctrl','1')
+        assert 'TABS: selected id=1 count=2' in healthy()
+        click(130,40); wait_marker('RECOVERY infinite begin')
+        key('shift','esc'); wait_marker('MONITOR: opened')
+        started=time.monotonic()
+        execute('send-key',{'keys':[{'type':'qcode','data':'delete'}]})
+        deadline=time.monotonic()+5
+        while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy(): time.sleep(.005)
+        assert 'RENDERER: recovery launched' in healthy()
+        print('RECOVERY termination_ms',round((time.monotonic()-started)*1000,2))
+        assert 'vector=2' in healthy(), 'NMI did not interrupt the renderer'
+        assert re.search(r'detached renderer jobs=[1-9]',healthy()), 'The termination test did not cover an active network request'
+        key('esc'); selection_start=len(healthy()); key('ctrl','2')
+        assert 'TABS: selected id=2 count=2' in healthy()[selection_start:]
+        key('ctrl','1'); key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-blocking.html'); key('ret')
+        wait_marker('ISOLATION ready'); time.sleep(2)
+        click(280,50); wait_marker('ISOLATION click')
+        if os.environ.get('QEMU_TEST_GDB_PORT'):
+            import subprocess
+            offset=len(healthy())
+            subprocess.run(['gdb','-q','-batch','-ex','set pagination off',
+                '-ex','target remote 127.0.0.1:'+os.environ['QEMU_TEST_GDB_PORT'],
+                '-ex','thread 2','-ex','set $rip = 0xffff800000001000','-ex','detach'],check=True)
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy()[offset:]: time.sleep(.1)
+            assert 'vector=14' in healthy()[offset:], healthy()[offset:]
+            assert 'RENDERER: recovery launched' in healthy()[offset:]
+            key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-blocking.html'); key('ret')
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.1)
+            assert 'ISOLATION ready' in healthy()[offset:]
+            time.sleep(2); click(280,50)
+            assert 'ISOLATION click' in healthy()[offset:]
+        offset=len(healthy())
+        click(120,50)
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline and 'ISOLATION begin' not in healthy()[offset:]: time.sleep(.02)
+        assert 'ISOLATION begin' in healthy()[offset:]
+        key('shift','esc'); click(120,750,False)
+        deadline=time.monotonic()+10
+        while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy()[offset:]: time.sleep(.02)
+        assert 'RENDERER: recovery launched' in healthy()[offset:]
+        assert 'ISOLATION end' not in healthy()[offset:]
+        key('esc'); snapshot('renderer-recovery-message')
+        click(260,24,False)
+        deadline=time.monotonic()+20
+        while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
+        assert 'ISOLATION ready' in healthy()[offset:]
+        time.sleep(1); click(280,50)
+        assert 'ISOLATION click' in healthy()[offset:]
+        if os.environ.get('QEMU_TEST_GDB_PORT'):
+            disassembly=subprocess.check_output(['llvm-objdump','-d','--disassemble-symbols=abort',str(build/'payload.elf')],text=True)
+            invalid=re.search(r'^\s*([0-9a-f]+):.*\bud2\b',disassembly,re.M)
+            assert invalid, disassembly
+            offset=len(healthy())
+            subprocess.run(['gdb','-q','-batch','-ex','target remote 127.0.0.1:'+os.environ['QEMU_TEST_GDB_PORT'],
+                '-ex','thread 2','-ex','set $rip = 0x'+invalid.group(1),'-ex','detach'],check=True)
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy()[offset:]: time.sleep(.02)
+            assert 'vector=6' in healthy()[offset:]
+            assert 'RENDERER: recovery launched' in healthy()[offset:]
+            click(260,24,False)
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
+            assert 'ISOLATION ready' in healthy()[offset:]
+            time.sleep(1); click(280,50)
+            assert 'ISOLATION click' in healthy()[offset:]
+        tracked=re.findall(r'reclaimed broker allocations=([0-9]+) tracked=([0-9]+)',healthy())
+        assert len(tracked)==4 and all(freed==owned for freed,owned in tracked), tracked
+        selection_start=len(healthy()); key('ctrl','2')
+        assert 'TABS: selected id=2 count=2' in healthy()[selection_start:]
+        key('ctrl','1'); snapshot('renderer-recovered')
+        print('PASS: infinite JavaScript termination, monitor button, page fault, invalid opcode and renderer recovery')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'renderer-blocking':
+        import json
+        type_address('http://10.0.2.2:8765/renderer-blocking.html')
+        key('ret')
+        wait_marker('ISOLATION ready')
+        snapshot('renderer-ready')
+        click(120, 50)
+        wait_marker('ISOLATION begin')
+        started=time.monotonic()
+        # The native address field must paint while the renderer is still in JavaScript.
+        click(600,24,False)
+        def address_pixels(name):
+            path=build/('input-'+name+'.ppm')
+            execute('screendump',{'filename':str(path)})
+            parts=path.read_bytes().split(b'\n',3)
+            width=int(parts[1].split()[0]); data=parts[3]
+            return b''.join(data[(y*width+300)*3:(y*width+420)*3] for y in range(10,38))
+        before=address_pixels('renderer-address-selected')
+        pressed=time.monotonic()
+        execute('send-key',{'keys':[{'type':'qcode','data':'x'}]})
+        deadline=pressed+1
+        while address_pixels('renderer-address-during-javascript')==before:
+            if time.monotonic()>deadline: raise AssertionError('Native address did not paint within one second')
+            time.sleep(.005)
+        painted=time.monotonic()
+        assert 'ISOLATION end' not in healthy(), 'Native UI observation occurred after JavaScript returned'
+        results={'native_address_observed_while_javascript_running':True,
+                 'native_key_to_paint_ms':round((painted-pressed)*1000,2),
+                 'address_observation_ms':round((painted-started)*1000,2)}
+        key('esc')
+        click(280,50)
+        click(600,50)
+        key('y')
+        wheel('down')
+        wait_marker('ISOLATION end')
+        wait_marker('ISOLATION click')
+        wait_marker('ISOLATION key y')
+        wait_marker('ISOLATION scroll ')
+        wait_marker('ISOLATION network delivered')
+        interval=healthy().split('ISOLATION begin',1)[1].split('ISOLATION end',1)[0]
+        assert 'NETWORK_SERVICE: completed status=0 bytes=9' in interval, 'Network service waited for JavaScript'
+        results['network_completed_during_javascript']=True
+        snapshot('renderer-after-javascript')
+        results['page_events_delivered_after_javascript']=True
+        (build/'renderer-blocking-results.json').write_text(json.dumps(results,indent=2))
+        print('PASS: native UI remained active and queued page input survived a six-second JavaScript task')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'chrome-identity':
+        for hostname in ('google.com', 'google.com.evil.test', '10.0.2.2'):
+            key('ctrl', 'l')
+            type_address('https://' + hostname + ':8766/chrome-identity')
+            key('ret')
+            wait_marker('CHROME_IDENTITY PASS ' + hostname + ' ')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'parallel':
+        key('ctrl', 'l')
+        type_address('http://10.0.2.2:8765/parallel.html')
+        key('ret')
+        wait_marker('PARALLEL_READY')
+        click(60, 18)
+        wait_marker('PARALLEL_INPUT click')
+        click(220, 18)
+        key('x')
+        wait_marker('PARALLEL_INPUT key')
+        assert 'PARALLEL_DONE slow ' not in healthy(), 'Input waited for the slow response'
+        wait_marker('PARALLEL_DONE fast ')
+        wait_marker('PARALLEL_DONE slow ')
+        values = {name: int(value) for name, value in re.findall(r'PARALLEL_DONE (fast|slow) (\d+)', healthy())}
+        assert values['fast'] < 1500 and values['slow'] >= 3000, values
+        return
     if os.environ.get('INPUT_SCENARIO') == 'client-hints':
         for scheme, port in [('https', '8766'), ('http', '8765')]:
             key('ctrl', 'l')
@@ -134,7 +545,7 @@ def run(execute, build, log):
         wait_marker('INPUT_TEST third document loaded')
         key('shift', 'esc')
         wait_marker('MONITOR: opened tabs=2')
-        expected = min(4, int(os.environ.get('QEMU_TEST_CPUS', '1')) - 1)
+        expected = 0 if 'RENDERER: AP process launched' in healthy() else min(4, int(os.environ.get('QEMU_TEST_CPUS', '1')) - 1)
         wait_marker('MONITOR: workers=' + str(expected))
         snapshot('tabs-monitor')
         key('esc')
@@ -283,6 +694,22 @@ def run(execute, build, log):
             samples.append({'keyboard_ms':keyboard,'click_ms':button,'scroll_ms':scrolling})
             assert 'HEAVY finished' not in healthy(), 'Load ended before input measurements'
             click(130,45)
+        # Affine exponentiation independently checks the repeated JavaScript LCG.
+        def expected_checksum(iterations):
+            multiplier, increment = 1664525, 1013904223
+            result_multiplier, result_increment = 1, 0
+            count = iterations * 500000
+            mask = (1 << 32) - 1
+            while count:
+                if count & 1:
+                    result_multiplier, result_increment = (multiplier * result_multiplier) & mask, (multiplier * result_increment + increment) & mask
+                multiplier, increment = (multiplier * multiplier) & mask, (multiplier * increment + increment) & mask
+                count >>= 1
+            return result_increment if result_increment < (1 << 31) else result_increment - (1 << 32)
+        checksums = re.findall(r'HEAVY work=(\d+) duration=\d+ checksum=(-?\d+)', healthy())
+        assert checksums
+        for iteration, checksum in checksums:
+            assert int(checksum) == expected_checksum(int(iteration)), (iteration, checksum)
         snapshot('heavy-fixture')
         (build/'heavy-fixture-samples.json').write_text(json.dumps(samples,indent=2))
         print('PASS: real DOM keyboard, click and wheel during repeated CPU and layout work '+json.dumps(samples),flush=True)
@@ -298,6 +725,7 @@ def run(execute, build, log):
         samples = []
         for index in range(12):
             start = len(healthy())
+            loading_at_start = 'BLINK: main document load finished' not in healthy().split('UI: address navigation started')[-1]
             began = time.monotonic()
             # The real page receives these events while resources are arriving.
             move(800, 500)
@@ -309,7 +737,7 @@ def run(execute, build, log):
             key('x')
             image = snapshot('heavy-loading-' + str(index))
             key('esc')
-            samples.append({'iteration': index, 'elapsed_ms': (time.monotonic()-began)*1000,
+            samples.append({'iteration': index, 'loading_at_start': loading_at_start, 'elapsed_ms': (time.monotonic()-began)*1000,
                 'loading_finished': 'BLINK: main document load finished' in healthy().split('UI: address navigation started')[-1],
                 'scroll_records': re.findall(r'BLINK: scroll offset [^\n]+', healthy()[start:])})
             if samples[-1]['loading_finished']: break
@@ -335,7 +763,9 @@ def run(execute, build, log):
             raise AssertionError('Theme did not visibly change within five seconds')
         move(1170,38)
         started=time.monotonic()
-        click(1170, 38)
+        execute('input-send-event', {'events':[{'type':'btn','data':{'button':'left','down':True}}]})
+        time.sleep(.03)
+        execute('input-send-event', {'events':[{'type':'btn','data':{'button':'left','down':False}}]})
         changed,click_ms = changed_theme(original,'heavy-click',started)
         started=time.monotonic()
         execute('send-key',{'keys':[{'type':'qcode','data':'spc'}]})
@@ -510,7 +940,11 @@ def run(execute, build, log):
                 execute('screendump', {'filename': str(build / 'input-google-home.ppm')})
             healthy()
         snapshot('google-home')
-        click(500, 312, False)
+        if os.environ.get('QEMU_TEST_GDB_PORT'):
+            print('DEBUG: Google loaded; holding input for 60 seconds for GDB inspection.', flush=True)
+            time.sleep(60)
+        click(500, 352, False)
+        wait_marker('BLINK: focus tag=TEXTAREA')
         for character in 'uefi specification':
             key('spc' if character == ' ' else character)
         snapshot('google-query')

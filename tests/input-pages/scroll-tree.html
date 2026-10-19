@@ -1,0 +1,25 @@
+<!doctype html><meta charset="utf-8"><title>Scroll tree isolation</title>
+<style>
+body{margin:0;height:14000px;background:linear-gradient(#e5edff,#164488);font:20px sans-serif}
+.controls{position:fixed;left:20px;top:20px;z-index:10;background:white;padding:8px}button{height:40px;width:110px}
+.spacer{height:100px}.sticky{position:sticky;top:0;height:50px;background:#8844cc;color:white;z-index:2}
+.root-marker{position:absolute;top:5200px;left:20px;width:620px;height:500px;background:#b83728}
+#nested{position:fixed;left:700px;top:200px;width:450px;height:300px;overflow:auto;background:white;z-index:3}
+.content{position:relative;height:10000px;background:linear-gradient(#ddffdd,#224422)}
+.nested-sticky{position:sticky;top:0;height:40px;background:#22aa66;z-index:1}
+.nested-marker{position:absolute;top:4400px;left:0;width:430px;height:400px;background:#eeaa22}
+</style>
+<div class="controls"><button id="run">Run 12 seconds</button><button id="boundary">Boundary</button><button id="contain">Contain</button></div>
+<div class="spacer"></div><div class="sticky">Root sticky header · 고정 헤더</div>
+<div class="root-marker">Root outside old cache</div>
+<div id="nested"><div class="content"><div class="nested-sticky">Nested sticky header · 중첩 고정</div><div class="nested-marker">Nested distant content</div></div></div>
+<script>
+console.log('SCENE ready');
+run.onclick=()=>setTimeout(()=>{console.log('SCENE begin');const end=performance.now()+12000;while(performance.now()<end){}console.log('SCENE end')},200);
+for (const name of ['boundary','contain']) document.getElementById(name).onclick=()=>{
+ scrollTo(0,0);nested.scrollTop=9700;nested.style.overscrollBehavior=name==='contain'?'contain':'auto';
+ setTimeout(()=>{console.log('SCENE '+name+' begin');const end=performance.now()+3000;while(performance.now()<end){}console.log('SCENE '+name+' end')},1000);
+};
+addEventListener('scroll',()=>console.log('SCENE root '+scrollY));
+nested.addEventListener('scroll',()=>console.log('SCENE nested '+nested.scrollTop));
+</script>

@@ -1,7 +1,19 @@
+#include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/frame/local_frame_view.h"
+#include "third_party/blink/renderer/core/scroll/scrollable_area.h"
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "blink/browser_frame.h"
+#include "blink/remote_frame.h"
+#include "blink/scroll_scene.h"
+#include "renderer_runtime.h"
+#include "blink/browser_identity.h"
+#include "blink/browser_broker.h"
+#include "process/renderer_protocol.h"
+#include "third_party/blink/public/platform/task_type.h"
+#include <deque>
 #include "blink/browser_settings.h"
 #include <cstdio>
 #include <utility>
@@ -84,6 +96,10 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         std::nullopt, base::UnguessableToken::Create(), &colors, -1, 0);
     CHECK(view_);
     view_->GetSettings()->SetJavaScriptEnabled(true);
+    // No cookie service exists, so synchronous cookie IPC cannot make progress.
+    view_->GetSettings()->SetCookieEnabled(false);
+    // Software input scrolling must not wait for main-thread animation frames.
+    view_->GetSettings()->SetEnableScrollAnimator(false);
     view_->GetSettings()->SetImagesEnabled(true);
     view_->GetSettings()->SetLoadsImagesAutomatically(true);
     view_->GetSettings()->SetDownloadableBinaryFontsEnabled(true);
@@ -96,7 +112,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     view_->GetSettings()->SetFixedFontFamily(family);
     view_->SetDefaultPageScaleLimits(1, 1);
     auto* frame = blink::WebLocalFrame::CreateMainFrame(
-        view_, this, nullptr, mojo::NullRemote(), blink::LocalFrameToken(),
+        view_, this, nullptr, broker_.Bind(), blink::LocalFrameToken(),
         blink::DocumentToken(), blink::InitiatorStateToken(), nullptr);
     CHECK(frame);
     CHECK(navigation_);
@@ -127,11 +143,27 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     std::puts("BLINK: non-composited main frame created");
   }
   ~State() override {
+    std::printf("RENDERER: input_messages=%llu maximum_queue_us=%lld maximum_dispatch_us=%lld\n",
+        static_cast<unsigned long long>(input_sequence_), static_cast<long long>(maximum_input_wait_),
+        static_cast<long long>(maximum_input_dispatch_));
     navigation_request_.reset();
     loop_.reset();
     if (view_)
       std::exchange(view_, nullptr)->Close();
     UninstallResourceLoader();
+  }
+  const ScrollSnapshot& Snapshot() const { return loop_->Snapshot(); }
+  uint64_t KeyboardScrollTarget() const { return view_ ? uefi_browser::KeyboardScrollTarget(*view_) : 0; }
+  void ScrollTo(uint64_t element, int x, int y, uint64_t sequence) {
+    if (frame_) {
+      auto* local=static_cast<blink::WebLocalFrameImpl*>(frame_)->GetFrame();
+      if (auto* area=local->View()->ScrollableAreaWithElementId(blink::CompositorElementId(element)))
+        area->SetScrollOffset(blink::ScrollOffset(x,y),
+            blink::mojom::blink::ScrollType::kCompositor,cc::ScrollSourceType::kRelativeScroll);
+    }
+    // A pre-scroll raster cannot acknowledge this offset and would delay the next scroll event.
+    loop_->Stop();
+    loop_->AcknowledgeScroll(sequence); loop_->Start();
   }
   void SetVisible(bool visible) {
     if (loop_) loop_->SetVisible(visible);
@@ -141,6 +173,12 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       view_->SetVisibilityState(visible ? blink::mojom::PageVisibilityState::kVisible :
           blink::mojom::PageVisibilityState::kHidden, false);
     }
+  }
+  blink::WebString UserAgentOverride() override {
+    return blink::WebString::FromUtf8(BrowserUserAgent(GoogleCompatibility(GURL(CurrentUrl()))));
+  }
+  std::optional<blink::UserAgentMetadata> UserAgentMetadataOverride() override {
+    return BrowserUserAgentMetadata(GoogleCompatibility(GURL(CurrentUrl())));
   }
   void BindToFrame(blink::WebNavigationControl* frame) override {
     CHECK(!navigation_);
@@ -255,7 +293,69 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     if (widget_ == widget) widget->SetHandlingInputEvent(previous);
     return result;
   }
+  bool CanAcceptInput() const { return input_messages_.size() < RENDERER_INPUT_CAPACITY; }
+  void QueuePointer(const PointerSample& sample) {
+    RendererInputMessage message{};
+    message.kind = RENDERER_INPUT_POINTER;
+    message.x = sample.x; message.y = sample.y; message.wheel = sample.wheel;
+    message.buttons = sample.buttons; message.wheel_consumed = sample.wheel_consumed;
+    QueueInput(message);
+  }
+  void QueueKey(const KeySample& sample) {
+    RendererInputMessage message{};
+    message.kind = RENDERER_INPUT_KEY;
+    message.scan = sample.key.scan; message.character = sample.key.character;
+    message.shift = sample.shift; message.toggle = sample.toggle;
+    QueueInput(message);
+  }
+  void QueueInput(RendererInputMessage message) {
+    CHECK(CanAcceptInput());
+    message.version = RENDERER_PROTOCOL_VERSION;
+    message.generation = input_generation_;
+    message.sequence = ++input_sequence_;
+    input_messages_.push_back({message, base::TimeTicks::Now()});
+    // The current in-process adapter consumes immediately to avoid another task hop.
+    // Nested delivery stays queued so DOM dispatch cannot recursively enter itself.
+    if (!input_dispatching_) DrainInput();
+  }
+  void ScheduleInput() {
+    if (!frame_ || input_scheduled_ || input_messages_.empty()) return;
+    input_scheduled_ = true;
+    frame_->GetTaskRunner(blink::TaskType::kInternalInputBlocking)->PostTask(FROM_HERE,
+        base::BindOnce(&State::DrainInput, weak_factory_.GetWeakPtr()));
+  }
+  void DrainInput() {
+    input_scheduled_ = false;
+    if (input_dispatching_) return;
+    if (!frame_) { input_messages_.clear(); return; }
+    if (input_messages_.empty()) return;
+    auto queued = input_messages_.front();
+    input_messages_.pop_front();
+    const auto& message = queued.message;
+    if (message.generation != input_generation_) { ScheduleInput(); return; }
+    auto started = base::TimeTicks::Now();
+    maximum_input_wait_ = std::max(maximum_input_wait_, (started - queued.received).InMicroseconds());
+    auto alive = weak_factory_.GetWeakPtr();
+    input_dispatching_ = true;
+    if (message.kind == RENDERER_INPUT_POINTER)
+      Pointer({message.x, message.y, message.wheel, message.buttons, message.wheel_consumed != 0});
+    else if (message.kind == RENDERER_INPUT_KEY)
+      Keyboard({{message.scan, message.character}, message.shift, message.toggle});
+    if (!alive) return;
+    input_dispatching_ = false;
+    maximum_input_dispatch_ = std::max(maximum_input_dispatch_, (base::TimeTicks::Now()-started).InMicroseconds());
+    ScheduleInput();
+  }
+  bool pointer_capabilities_=false;
   void Pointer(const PointerSample& sample) {
+    if (!pointer_capabilities_) {
+      pointer_capabilities_=true;
+      // Firmware pointer samples represent a mouse cursor rather than touch contacts.
+      view_->GetSettings()->SetAvailablePointerTypes(static_cast<int>(blink::mojom::PointerType::kPointerFineType));
+      view_->GetSettings()->SetPrimaryPointerType(blink::mojom::PointerType::kPointerFineType);
+      view_->GetSettings()->SetAvailableHoverTypes(static_cast<int>(blink::mojom::HoverType::kHoverHoverType));
+      view_->GetSettings()->SetPrimaryHoverType(blink::mojom::HoverType::kHoverHoverType);
+    }
     if (!widget_) return;
     using Event = blink::WebInputEvent;
     using Button = blink::WebPointerProperties::Button;
@@ -302,8 +402,9 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       event.delta_y = sample.wheel * 80;
       event.wheel_ticks_y = sample.wheel;
       event.event_action = blink::WebMouseWheelEvent::EventAction::kScrollVertical;
+      if (sample.wheel_consumed) event.dispatch_type = Event::DispatchType::kEventNonBlocking;
       auto result = Dispatch(event);
-      if (result == blink::WebInputEventResult::kNotHandled && frame_) {
+      if (!sample.wheel_consumed && result == blink::WebInputEventResult::kNotHandled && frame_) {
         // The software widget has no cc input handler; Blink's main-thread
         // scroll chain still enforces overflow and overscroll containment.
         auto* local = static_cast<blink::WebLocalFrameImpl*>(frame_)->GetFrame();
@@ -507,6 +608,10 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   void DidCommitNavigation(blink::WebHistoryCommitType type, bool,
       const network::ParsedPermissionsPolicy&,
       const blink::DocumentPolicyFeatureState&) override {
+    ++input_generation_;
+    input_messages_.clear();
+    pointer_buttons_ = 0;
+    click_count_ = 0;
     // A committed document must not present a snapshot of its predecessor.
     if (loop_) { loop_->Stop(); loop_->Start(); }
     RecordCommit(type);
@@ -559,6 +664,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   Status NavigateInternal(const char* url, blink::WebFrameLoadType load_type,
                           blink::WebHistoryItem history_item) {
     CHECK(navigation_);
+    ++input_generation_;
+    input_messages_.clear();
     const bool internal = IsBrowserPage(GURL(url));
     view_->GetSettings()->SetJavaScriptEnabled(internal || preferences.javascript);
     view_->GetSettings()->SetImagesEnabled(internal || preferences.images);
@@ -593,6 +700,11 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     }
   }
  private:
+  struct QueuedInput { RendererInputMessage message; base::TimeTicks received; };
+  std::deque<QueuedInput> input_messages_;
+  uint64_t input_generation_ = 0, input_sequence_ = 0;
+  int64_t maximum_input_wait_ = 0, maximum_input_dispatch_ = 0;
+  bool input_scheduled_ = false, input_dispatching_ = false;
   base::RepeatingCallback<void(std::string)> open_tab_;
   inline static uint32_t next_widget_identifier_ = 1;
   bool navigation_pending_ = false;
@@ -624,6 +736,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   std::vector<network::mojom::ContentSecurityPolicyPtr> content_security_policies_;
   SystemTable* table_;
   blink::WebViewClient view_client_;
+  BrowserBroker broker_;
   std::unique_ptr<blink::scheduler::WebAgentGroupScheduler> agent_group_;
   blink::WebView* view_ = nullptr;
   blink::WebNavigationControl* navigation_ = nullptr;
@@ -641,19 +754,26 @@ BrowserFrame::BrowserFrame(SystemTable* table,
     blink::scheduler::WebThreadScheduler& scheduler, SkCanvas& canvas,
     gfx::Size viewport, base::RepeatingClosure present,
     base::RepeatingCallback<void(std::string)> open_tab)
-    : state_(std::make_unique<State>(table, scheduler, canvas, viewport,
-                                     std::move(present), std::move(open_tab))) {}
+{
+  if (RemoteRendererConfigured()) remote_=std::make_unique<RemoteFrame>(canvas,viewport,std::move(present),std::move(open_tab));
+  else state_=std::make_unique<State>(table,scheduler,canvas,viewport,std::move(present),std::move(open_tab));
+}
 BrowserFrame::~BrowserFrame() = default;
-Status BrowserFrame::Navigate(const char* url) { return state_->Navigate(url); }
-bool BrowserFrame::NavigationPending() const { return state_->NavigationPending(); }
-Status BrowserFrame::NavigationStatus() const { return state_->NavigationStatus(); }
-std::string BrowserFrame::CurrentUrl() const { return state_->CurrentUrl(); }
-bool BrowserFrame::CanGoBack() const { return state_->CanGoBack(); }
-bool BrowserFrame::CanGoForward() const { return state_->CanGoForward(); }
-Status BrowserFrame::GoBack() { return state_->Traverse(-1); }
-Status BrowserFrame::GoForward() { return state_->Traverse(1); }
-Status BrowserFrame::Reload() { return state_->Reload(); }
-void BrowserFrame::SetVisible(bool visible) { state_->SetVisible(visible); }
-void BrowserFrame::Pointer(const PointerSample& sample) { state_->Pointer(sample); }
-void BrowserFrame::Keyboard(const KeySample& sample) { state_->Keyboard(sample); }
+const ScrollSnapshot& BrowserFrame::Snapshot() const { return state_->Snapshot(); }
+uint64_t BrowserFrame::KeyboardScrollTarget() const { return state_->KeyboardScrollTarget(); }
+void BrowserFrame::ScrollTo(uint64_t element, int x, int y, uint64_t sequence) { state_->ScrollTo(element,x,y,sequence); }
+Status BrowserFrame::Navigate(const char* url) { return remote_ ? remote_->Navigate(url) : state_->Navigate(url); }
+bool BrowserFrame::NavigationPending() const { return remote_ ? remote_->NavigationPending() : state_->NavigationPending(); }
+Status BrowserFrame::NavigationStatus() const { return remote_ ? remote_->NavigationStatus() : state_->NavigationStatus(); }
+std::string BrowserFrame::CurrentUrl() const { return remote_ ? remote_->CurrentUrl() : state_->CurrentUrl(); }
+bool BrowserFrame::CanGoBack() const { return remote_ ? remote_->CanGoBack() : state_->CanGoBack(); }
+bool BrowserFrame::CanGoForward() const { return remote_ ? remote_->CanGoForward() : state_->CanGoForward(); }
+Status BrowserFrame::GoBack() { return remote_ ? remote_->GoBack() : state_->Traverse(-1); }
+Status BrowserFrame::GoForward() { return remote_ ? remote_->GoForward() : state_->Traverse(1); }
+Status BrowserFrame::Reload() { return remote_ ? remote_->Reload() : state_->Reload(); }
+void BrowserFrame::SetVisible(bool visible) { if (remote_) remote_->SetVisible(visible); else state_->SetVisible(visible); }
+bool BrowserFrame::CanAcceptInput() const { return remote_ ? remote_->CanAcceptInput() : state_->CanAcceptInput(); }
+void BrowserFrame::Pointer(const PointerSample& sample) { if (remote_) remote_->Pointer(sample); else state_->QueuePointer(sample); }
+void BrowserFrame::PointerLeave() { if (remote_) remote_->PointerLeave(); }
+void BrowserFrame::Keyboard(const KeySample& sample) { if (remote_) remote_->Keyboard(sample); else state_->QueueKey(sample); }
 }

@@ -1154,3 +1154,64 @@ diff --git a/third_party/blink/renderer/core/html/parser/html_document_parser.cc
    // Cache the value to avoid parsing the param string more than once.
    static const int kNumYieldsWithDefaultBudgetValue =
        kNumYieldsWithDefaultBudgetDefaultValue;
+diff --git a/third_party/blink/renderer/platform/scheduler/common/scheduler_helper.cc b/third_party/blink/renderer/platform/scheduler/common/scheduler_helper.cc
+--- a/third_party/blink/renderer/platform/scheduler/common/scheduler_helper.cc
++++ b/third_party/blink/renderer/platform/scheduler/common/scheduler_helper.cc
+@@ -24,4 +24,9 @@
+ SchedulerHelper::SchedulerHelper(SequenceManager* sequence_manager)
+     : sequence_manager_(sequence_manager), observer_(nullptr) {
++#if defined(UEFI_RUNTIME)
++  // The firmware pump must poll native input between individual Blink tasks.
++  sequence_manager_->SetWorkBatchSize(1);
++#else
+   sequence_manager_->SetWorkBatchSize(4);
++#endif
+ }
+diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink/renderer/core/dom/document.cc
+--- a/third_party/blink/renderer/core/dom/document.cc
++++ b/third_party/blink/renderer/core/dom/document.cc
+@@ -6967,3 +6967,8 @@
+ bool Document::CookiesEnabled() const {
++#if defined(UEFI_RUNTIME)
++  // Storage-access queries must honor the absence of a firmware cookie service.
++  if (!GetSettings() || !GetSettings()->GetCookieEnabled())
++    return false;
++#endif
+   if (!dom_window_)
+     return false;
+diff --git a/third_party/blink/renderer/core/layout/custom_scrollbar.cc b/third_party/blink/renderer/core/layout/custom_scrollbar.cc
+index 6c99a3ad6b..d398eda513 100644
+--- a/third_party/blink/renderer/core/layout/custom_scrollbar.cc
++++ b/third_party/blink/renderer/core/layout/custom_scrollbar.cc
+@@ -26,2 +26,3 @@
+ #include "third_party/blink/renderer/core/layout/custom_scrollbar.h"
++#include "base/auto_reset.h"
+
+@@ -239,2 +240,15 @@ static PseudoId PseudoForScrollbarPart(ScrollbarPart part) {
+
++#if defined(UEFI_RUNTIME)
++const ComputedStyle* CustomScrollbar::PartStyleForSnapshot(
++    ScrollbarPart part, unsigned appearance) {
++  auto active = part == kTrackBGPart ? kThumbPart : part;
++  base::AutoReset<ScrollbarPart> hover(&hovered_part_,
++                                      appearance & 1 ? active : kNoPart);
++  base::AutoReset<ScrollbarPart> press(&pressed_part_,
++                                      appearance & 2 ? active : kNoPart);
++  base::AutoReset<bool> enabled(&enabled_, !(appearance & 4));
++  return GetScrollbarPseudoElementStyle(part, PseudoForScrollbarPart(part));
++}
++#endif
++
+ void CustomScrollbar::UpdateScrollbarPart(ScrollbarPart part_type) {
+diff --git a/third_party/blink/renderer/core/layout/custom_scrollbar.h b/third_party/blink/renderer/core/layout/custom_scrollbar.h
+index 7d550f4a24..abdbc903ac 100644
+--- a/third_party/blink/renderer/core/layout/custom_scrollbar.h
++++ b/third_party/blink/renderer/core/layout/custom_scrollbar.h
+@@ -72,2 +72,7 @@ class CORE_EXPORT CustomScrollbar final : public Scrollbar {
+
++#if defined(UEFI_RUNTIME)
++  // Snapshot callers use a detached scrollbar to resolve states without input side effects.
++  const ComputedStyle* PartStyleForSnapshot(ScrollbarPart, unsigned appearance);
++#endif
++
+   // Custom scrollbars may be translucent.

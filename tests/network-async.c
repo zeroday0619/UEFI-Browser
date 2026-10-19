@@ -9,10 +9,12 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
     const Header *headers, size_t count, ResourceResponse *response) {
   (void)table; (void)headers; (void)count;
   ++requests;
-  errno = 73;
-  for (unsigned index = 0; index < 8; ++index) {
+  int expected_errno = 70 + (int)strlen(url);
+  errno = expected_errno;
+  unsigned iterations = !strcmp(url, "slow") ? 200 : 8;
+  for (unsigned index = 0; index < iterations; ++index) {
     resource_cooperate();
-    assert(errno == 73);
+    assert(errno == expected_errno);
   }
   response->status_code = 200;
   response->body = (unsigned char*)strdup(url);
@@ -42,5 +44,21 @@ int main(void) {
   resource_async_release(second);
   resource_release(&response);
   assert(requests == 2);
-  puts("PASS: cooperative stack switching, errno isolation, queued requests and abandoned active job cleanup");
+  ResourceJob *slow = resource_async_start(NULL, "slow", NULL, 0);
+  ResourceJob *fast = resource_async_start_priority(NULL, "fast", NULL, 0, 4);
+  ResourceJob *cancelled = resource_async_start(NULL, "cancelled", NULL, 0);
+  assert(slow && fast && cancelled);
+  resource_async_release(cancelled);
+  unsigned steps = 0;
+  while (!resource_async_result(fast, &status, &response) && steps++ < 100)
+    resource_async_process();
+  assert(steps < 100 && status == 0);
+  resource_release(&response);
+  assert(!resource_async_result(slow, &status, &response));
+  resource_async_release(fast);
+  resource_async_release(slow);
+  for (unsigned index = 0; index < 300; ++index) resource_async_process();
+  assert(requests == 4);
+  assert(!resource_async_start_priority(NULL, "invalid", NULL, 0, 0));
+  puts("PASS: cooperative stack switching, errno isolation, concurrent completion, priority, queued cancellation and abandoned active job cleanup");
 }

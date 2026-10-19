@@ -92,21 +92,34 @@ process_program_start:
  cmp %r9,%rbx
  jae .Ldone
  xor %rcx,%rcx
- test %r11,%r11
- jnz .Lpixel
- test $15,%rdx
- jnz .Lpixel
-.Lvector:
- lea 4(%rcx),%rax
- cmp %r8,%rax
- ja .Lpixel
- movdqu (%rsi,%rcx,4),%xmm0
- movntdq %xmm0,(%rdx,%rcx,4)
- add $4,%rcx
- jmp .Lvector
+# Scalar prefixes align streaming stores without dropping odd-width tails.
 .Lpixel:
  cmp %r8,%rcx
  jae .Lnext
+ lea (%rdx,%rcx,4),%rax
+ test $15,%rax
+ jnz .Lscalar
+ lea 4(%rcx),%rax
+ cmp %r8,%rax
+ ja .Lscalar
+ movdqu (%rsi,%rcx,4),%xmm0
+ test %r11,%r11
+ jz .Lvector_store
+# SSE2 converts four BGRA pixels to RGB with zero reserved bytes.
+ movdqa %xmm0,%xmm1
+ psrld $16,%xmm1
+ pand .Llow_mask(%rip),%xmm1
+ movdqa %xmm0,%xmm2
+ pslld $16,%xmm2
+ pand .Lhigh_mask(%rip),%xmm2
+ pand .Lgreen_mask(%rip),%xmm0
+ por %xmm1,%xmm0
+ por %xmm2,%xmm0
+.Lvector_store:
+ movntdq %xmm0,(%rdx,%rcx,4)
+ add $4,%rcx
+ jmp .Lpixel
+.Lscalar:
  mov (%rsi,%rcx,4),%eax
  test %r11,%r11
  jz .Lstore
@@ -141,5 +154,9 @@ process_program_start:
  sfence
  int $0x80
  ud2
+.balign 16
+.Llow_mask: .long 0xff,0xff,0xff,0xff
+.Lhigh_mask: .long 0xff0000,0xff0000,0xff0000,0xff0000
+.Lgreen_mask: .long 0xff00,0xff00,0xff00,0xff00
 process_program_end:
 .section .note.GNU-stack,"",@progbits

@@ -4,6 +4,7 @@
 #ifndef UEFI_BLINK_FRAME_LOOP_H_
 #define UEFI_BLINK_FRAME_LOOP_H_
 #include "base/functional/callback.h"
+#include "blink/scroll_snapshot.h"
 #include <optional>
 #include "cc/paint/paint_record.h"
 #include "third_party/skia/include/core/SkSurface.h"
@@ -27,9 +28,13 @@ class FrameLoop {
   bool Start();
   void Stop();
   void SetVisible(bool visible);
+  const ScrollSnapshot& Snapshot() const { return scroll_snapshot_; }
+  void AcknowledgeScroll(uint64_t sequence) { scroll_sequence_=sequence; }
  private:
   void Tick();
+  void Layout();
   void Record();
+  void RecordScroll();
   void Raster();
   void Finish();
   blink::WebView& view_;
@@ -45,11 +50,15 @@ class FrameLoop {
   uint64_t frame_sequence_ = 0;
   std::optional<cc::PaintRecord> picture_;
   sk_sp<SkSurface> staging_;
+  int scroll_fallback_=-1;
+  uint64_t scroll_sequence_=0;
+  ScrollSnapshot scroll_snapshot_, pending_scroll_;
   int raster_y_ = 0;
   int raster_rows_ = 128;
   int64_t raster_total_us_ = 0;
   int raster_slices_ = 0;
   int64_t maximum_raster_us_ = 0;
+  int64_t maximum_layout_us_ = 0;
   base::WeakPtrFactory<FrameLoop> weak_factory_{this};
 };
 }

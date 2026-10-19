@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "blink/message_pump.h"
+#include "renderer_runtime.h"
 #include <algorithm>
 #include <cstdio>
 #include "base/check.h"
@@ -19,7 +20,7 @@ void MessagePump::Run(Delegate* delegate) {
   loop_.Run(*delegate, [this, delegate, &last_poll] {
     auto now = base::TimeTicks::Now();
     if (!last_poll.is_null() && now - last_poll > base::Milliseconds(50))
-      std::printf("PERF: input_poll_gap_us=%lld\n", static_cast<long long>((now - last_poll).InMicroseconds()));
+      std::printf(renderer_runtime_is_child() ? "PERF: renderer_task_gap_us=%lld\n" : "PERF: input_poll_gap_us=%lld\n", static_cast<long long>((now - last_poll).InMicroseconds()));
     last_poll = now;
     delegate->BeginNativeWorkBeforeDoWork();
     auto work_item = delegate->BeginWorkItem();
@@ -36,7 +37,11 @@ void MessagePump::Run(Delegate* delegate) {
     if (microseconds) {
       auto stall = reinterpret_cast<Status(UEFI_API *)(size_t)>(
           table_->boot->function[28]);
-      CHECK_EQ(stall(static_cast<size_t>(microseconds)), Status{0});
+      if (renderer_runtime_available()) {
+        // Service AP runtime requests throughout idle waits without delaying native polls.
+        auto end=base::TimeTicks::Now()+base::Microseconds(microseconds);
+        do { renderer_runtime_service(); __asm__ volatile("pause"); } while (base::TimeTicks::Now()<end);
+      } else CHECK_EQ(stall(static_cast<size_t>(microseconds)), Status{0});
     }
   });
 }

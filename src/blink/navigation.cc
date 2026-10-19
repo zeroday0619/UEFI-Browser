@@ -178,11 +178,11 @@ class AsyncNavigation final : public NavigationRequest {
       size_t hint_count = 0;
       if (request_url.SchemeIs("https")) {
         for (const char* name : {"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"}) {
-          const char* value = firmware_browser_client_hint(name);
+          const char* value = firmware_browser_client_hint_for_url(name, request_url.spec().c_str());
           if (value) hints[hint_count++] = {const_cast<char*>(name), const_cast<char*>(value)};
         }
       }
-      job = resource_async_start(table, request_url.spec().c_str(), hints, hint_count);
+      job = resource_async_start_priority(table, request_url.spec().c_str(), hints, hint_count, 4);
       if (!job) { Finish(ERROR(9)); return; }
     }
     Status result;

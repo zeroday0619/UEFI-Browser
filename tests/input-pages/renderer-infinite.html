@@ -1,0 +1,7 @@
+<!doctype html><meta charset="utf-8"><title>Renderer termination regression</title>
+<style>body{font:24px sans-serif}button{height:60px;width:300px;font:24px sans-serif}</style>
+<button id="start">Run infinite JavaScript</button>
+<script>
+start.onclick=()=>{fetch('/parallel-slow');setTimeout(()=>{console.log('RECOVERY infinite begin');while(true){}},200)};
+console.log('RECOVERY fixture ready');
+</script>

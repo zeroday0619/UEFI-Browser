@@ -3,7 +3,7 @@
 #include <memory>
 #include "uefi.h"
 namespace uefi_browser {
-struct PointerSample { int x, y, wheel; unsigned buttons; };
+struct PointerSample { int x, y, wheel; unsigned buttons; bool wheel_consumed=false; };
 struct KeySample { Key key; uint32_t shift; uint8_t toggle; };
 class FirmwareInput {
  public:

@@ -14,6 +14,9 @@ source_set("navigation") {
     "src/blink/scheduler.cc",
     "src/blink/scheduler.h",
     "src/blink/frame_loop.cc",
+    "src/blink/scroll_scene.cc",
+    "src/blink/scroll_scene.h",
+    "src/blink/scroll_snapshot.h",
     "src/blink/frame_loop.h",
     "src/network/resource.c",
     "src/network/async.c",
@@ -21,7 +24,7 @@ source_set("navigation") {
     "src/network/chunks.c",
   ]
   if (use_uefi_runtime && current_toolchain == default_toolchain) {
-    sources += [ "src/blink/browser_frame.cc", "src/blink/browser_frame.h" ]
+    sources += [ "src/blink/browser_frame.cc", "src/blink/browser_frame.h", "src/blink/remote_frame.cc", "src/blink/remote_frame.h" ]
   }
   include_dirs = [ "src", "runtime" ]
   deps = [

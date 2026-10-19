@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 #include "platform/runtime.h"
+#include "renderer_runtime.h"
 #include <errno.h>
 #include <locale.h>
 #include <math.h>
@@ -148,12 +149,14 @@ static void console_message(SystemTable *table, const char *text) {
   buffer[count] = 0;
   table->output->write(table->output, buffer);
 }
-int engine_entry(Handle image, SystemTable *table, void *stack) {
+int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstrap *bootstrap) {
   (void)image;
+  renderer_runtime_initialize(bootstrap);
+  table = renderer_runtime_table(table);
   musl_initialize(table, stack, 4 * 1024 * 1024);
   runtime_initialize(table);
-  table->output->clear(table->output);
-  console_message(table, "UEFI BROWSER\r\n\r\nRunning musl checks...\r\n");
+  if (!renderer_runtime_is_child()) table->output->clear(table->output);
+  if (!renderer_runtime_is_child()) console_message(table, "UEFI BROWSER\r\n\r\nRunning musl checks...\r\n");
 #ifdef ENABLE_CPP
   for (void (**callback)(void) = __init_array_start;
        callback < __init_array_end; callback++)
@@ -196,6 +199,7 @@ int engine_entry(Handle image, SystemTable *table, void *stack) {
   if (!result)
     graphics_log("PASS: engine teardown and pool cleanup\n");
 #ifdef ENABLE_BLINK
+  if (renderer_runtime_is_child()) return result;
   const char *scope = "Blink browser session ended.";
 #elif defined(ENABLE_V8)
   const char *scope =

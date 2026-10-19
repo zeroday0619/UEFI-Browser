@@ -17,7 +17,9 @@ typedef struct {
   uint32_t type, flags;
   uint64_t offset, address, physical, file_size, memory_size, alignment;
 } ElfProgram;
-typedef int(__attribute__((sysv_abi)) * Engine)(Handle, SystemTable *, void *);
+#include "renderer_runtime.h"
+typedef int(__attribute__((sysv_abi)) * Engine)(Handle, SystemTable *, void *, RendererBootstrap *);
+static RendererBootstrap browser_bootstrap;
 static Engine engine;
 static void *engine_stack;
 static void *engine_thread;
@@ -31,7 +33,7 @@ static Status UEFI_API invoke(Handle image, SystemTable *table) {
   __asm__ volatile("wrmsr" ::"a"((uint32_t)current),
                    "d"((uint32_t)(current >> 32)), "c"(0xc0000100u)
                    : "memory");
-  int result = engine(image, table, engine_stack);
+  int result = engine(image, table, engine_stack, &browser_bootstrap);
   __asm__ volatile("wrmsr" ::"a"((uint32_t)saved), "d"((uint32_t)(saved >> 32)),
                    "c"(0xc0000100u)
                    : "memory");
@@ -43,6 +45,7 @@ static void copy(void *destination, const void *source, size_t size) {
   while (size--)
     *output++ = *input++;
 }
+#include "loader-renderer.h"
 Status UEFI_API efi_main(Handle image, SystemTable *table) {
 #ifdef ENABLE_INPUT_DRIVER
   Status input_status = install_http_driver(image, table);
@@ -144,6 +147,10 @@ Status UEFI_API efi_main(Handle image, SystemTable *table) {
       2, 4 * 1024 * 1024, &stack);
   if (!result) {
     engine = (Engine)header->entry;
+    renderer.table = table; renderer.image = image; renderer.header = header;
+    renderer.programs = programs; renderer.tls = tls;
+    browser_bootstrap.start = renderer_start; browser_bootstrap.join = renderer_join;
+    browser_bootstrap.terminate = renderer_terminate; browser_bootstrap.fault = renderer_fault;
     engine_stack = stack;
     result = browser_call_on_stack((unsigned char *)stack + 4 * 1024 * 1024,
                                    image, table, invoke);

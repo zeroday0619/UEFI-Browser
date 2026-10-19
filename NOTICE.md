@@ -12,7 +12,7 @@ AI-generated changes can contain incorrect assumptions, incomplete implementatio
 
 The evidence in [validation/](validation/) records specific builds, QEMU configurations and test scenarios. Passing a build, static check or website interaction test does not establish general correctness, browser security or compatibility with other sites and firmware.
 
-Blink DOM, JavaScript, layout and Skia rasterization still execute in the main process. The isolated application-processor workers transfer completed frames; they do not provide a Chromium-equivalent renderer sandbox. Physical hardware has not been validated. Full renderer separation and broad browser compatibility remain incomplete. See the [README](README.md#project-status) for the current implementation boundary.
+On supported multi-CPU firmware, Blink DOM, JavaScript, layout and normal viewport rasterization execute in an AP address space with private writable image data and TLS. Scroll-tile rasterization, native UI and firmware networking run on the BSP. The renderer retains CPL0 privileges and firmware mappings; it does not provide a Chromium-equivalent security sandbox. A supervisor can interrupt the AP and recover selected CPU exceptions, but cannot contain arbitrary memory corruption or stack destruction. Per-tab processes and general fault isolation remain incomplete. Asynchronous vertical wheel scrolling uses serialized paint scenes with a bounded tile cache and falls back to renderer dispatch for unsupported layouts. Physical hardware and broad browser compatibility have not been validated. See the [README](README.md#project-status) for the current implementation boundary.
 
 ## Intended use and operational risk
 

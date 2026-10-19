@@ -12,6 +12,8 @@
 class SkCanvas;
 namespace blink::scheduler { class WebThreadScheduler; }
 namespace uefi_browser {
+class RemoteFrame;
+struct ScrollSnapshot;
 // Blink must be initialized before construction and outlive the frame owner.
 class BrowserFrame {
  public:
@@ -30,12 +32,18 @@ class BrowserFrame {
   Status GoBack();
   Status GoForward();
   Status Reload();
+  bool CanAcceptInput() const;
   void Pointer(const PointerSample&);
+  void PointerLeave();
   void Keyboard(const KeySample&);
   void SetVisible(bool visible);
+  const ScrollSnapshot& Snapshot() const;
+  uint64_t KeyboardScrollTarget() const;
+  void ScrollTo(uint64_t element, int x, int y, uint64_t sequence);
  private:
   class State;
   std::unique_ptr<State> state_;
+  std::unique_ptr<RemoteFrame> remote_;
 };
 }
 #endif

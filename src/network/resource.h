@@ -7,6 +7,9 @@
 extern "C" {
 #endif
 const char *firmware_browser_user_agent(void);
+const char *firmware_browser_user_agent_for_url(const char *url);
+int firmware_browser_user_agent_valid(const char *value);
+const char *firmware_browser_client_hint_for_url(const char *name, const char *url);
 const char *firmware_browser_client_hint(const char *name);
 /* Response storage belongs to the caller until resource_release is called. */
 typedef struct {
@@ -20,6 +23,7 @@ typedef struct {
 typedef struct ResourceJob ResourceJob;
 int resource_async_available(void);
 Status resource_async_initialize(SystemTable *table);
+ResourceJob *resource_async_start_priority(SystemTable *, const char *, const Header *, size_t, unsigned);
 ResourceJob *resource_async_start(SystemTable *, const char *, const Header *, size_t);
 void resource_async_process(void);
 int resource_async_result(ResourceJob *, Status *, ResourceResponse *);

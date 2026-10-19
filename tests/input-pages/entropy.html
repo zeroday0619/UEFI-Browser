@@ -1,0 +1,4 @@
+<!doctype html><title>Renderer entropy</title><h1>Renderer entropy</h1><script>
+console.log('ENTROPY begin');const values=new Uint8Array(65536);crypto.getRandomValues(values);
+if(values.some(value=>value!==0)) console.log('ENTROPY complete 65536');
+</script>
