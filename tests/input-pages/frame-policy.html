@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="script-src 'nonce-probe'"><title>Child frame policies</title><h1>Child frame policies</h1>
+<script nonce="probe">
+const received=new Map();let loaded=0;
+addEventListener('message',event=>{if(event.data&&event.data.probe){received.set(event.data.probe,{access:event.data.access,origin:event.origin});console.log('FRAME_POLICY message '+JSON.stringify(event.data)+' origin='+event.origin)}});
+function frame(name,url,sandbox,source){const element=document.createElement('iframe');element.name=name;if(sandbox!==null)element.setAttribute('sandbox',sandbox);element.onload=()=>{loaded++;};if(source!==undefined)element.srcdoc=source;else element.src=url;document.body.append(element);return element;}
+frame('same','/frame-policy-child.html#same',null);
+frame('cross','http://10.0.2.2:8766/frame-policy-child.html#cross',null);
+frame('sandbox','/frame-policy-child.html#sandbox','allow-scripts');
+const source='<script nonce="probe">let access=false;try{access=!!parent.document}catch(error){}parent.postMessage({probe:"srcdoc",access},"*");<\/script>';
+frame('srcdoc',null,'allow-scripts',source);
+frame('blocked',null,'',source.replace('"srcdoc"','"blocked"'));
+frame('csp',null,null,'<p>Inherited policy</p><script>parent.postMessage({probe:"csp",access:true},"*");<\/script>');
+const removed=frame('removed','/parallel-slow',null);setTimeout(()=>removed.remove(),100);
+setTimeout(()=>{
+const same=received.get('same'),cross=received.get('cross'),sandbox=received.get('sandbox'),srcdoc=received.get('srcdoc');
+const passed=loaded>=6&&same?.access===true&&cross?.access===false&&sandbox?.access===false&&sandbox.origin==='null'&&srcdoc?.access===false&&srcdoc.origin==='null'&&!received.has('blocked')&&!received.has('csp');
+console.log('FRAME_POLICY '+(passed?'PASS ':'FAIL ')+JSON.stringify({loaded,received:[...received]}));
+},8000);
+</script>

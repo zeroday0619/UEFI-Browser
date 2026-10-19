@@ -131,9 +131,9 @@ class AsyncNavigation final : public NavigationRequest {
   AsyncNavigation(SystemTable* system, blink::WebNavigationControl& navigation,
       const char* address, std::unique_ptr<blink::WebPolicyContainer> container,
       blink::WebFrameLoadType load_type, blink::WebHistoryItem item,
-      base::OnceCallback<void(Status)> callback)
+      base::OnceCallback<void(Status)> callback, std::unique_ptr<blink::WebNavigationParams> initial)
       : table(system), frame(navigation), url(address), policy(std::move(container)),
-        parameters(std::make_unique<blink::WebNavigationParams>()), completion(std::move(callback)) {
+        parameters(initial ? std::move(initial) : std::make_unique<blink::WebNavigationParams>()), completion(std::move(callback)) {
     parameters->navigation_timings.navigation_start = base::TimeTicks::Now();
     parameters->frame_load_type = load_type;
     parameters->history_item = item;
@@ -263,9 +263,10 @@ class AsyncNavigation final : public NavigationRequest {
 std::unique_ptr<NavigationRequest> LoadNavigation(SystemTable* table,
     blink::WebNavigationControl& frame, const char* address,
     std::unique_ptr<blink::WebPolicyContainer> policy, blink::WebFrameLoadType type,
-    blink::WebHistoryItem item, base::OnceCallback<void(Status)> completion) {
+    blink::WebHistoryItem item, base::OnceCallback<void(Status)> completion,
+    std::unique_ptr<blink::WebNavigationParams> parameters) {
   return std::make_unique<AsyncNavigation>(table, frame, address, std::move(policy),
-      type, item, std::move(completion));
+      type, item, std::move(completion), std::move(parameters));
 }
 
 void PaintFrame(blink::WebView &view, blink::WebFrameWidget &widget,

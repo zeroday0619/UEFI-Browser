@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Asynchronous document reflow</title>
+<style>
+html{overflow-y:scroll;overflow-x:hidden}body{margin:0;overflow:visible;background:#e5edff;font:20px sans-serif}
+button{position:fixed;z-index:10;left:30px;top:20px;width:220px;height:44px}
+#box{padding-top:120px;background:white;overflow-anchor:auto}
+#content{}p{font:24px/32px monospace;margin:0}
+#marker{height:12px;background:#ff0088}#grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;height:40px}#grid div{background:#2288dd}
+#sticky{position:sticky;top:0;height:24px;background:#22bb66}
+html::-webkit-scrollbar{width:24px;height:16px;background:#dddddd}
+html::-webkit-scrollbar:vertical:hover{width:80px}
+html::-webkit-scrollbar:vertical:active{width:120px}
+html::-webkit-scrollbar-thumb{background:#ee5522;min-height:50px}
+html::-webkit-scrollbar-thumb:hover{background:#cc33cc}
+html::-webkit-scrollbar-thumb:active{background:#22cccc}
+html::-webkit-scrollbar-corner{background:#555555}
+</style>
+<button id="start">Block JavaScript 25s</button>
+<iframe id="child" src="/scroll-gutter-responsive-child.html" style="display:block;border:0;width:100%;height:3500px"></iframe><script>document.documentElement.scrollTop=80;start.onclick=()=>child.contentWindow.postMessage('block','*');</script>

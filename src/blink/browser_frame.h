@@ -39,6 +39,7 @@ class BrowserFrame {
   void SetVisible(bool visible);
   const ScrollSnapshot& Snapshot() const;
   uint64_t KeyboardScrollTarget() const;
+  void ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence);
   void ScrollTo(uint64_t element, int x, int y, uint64_t sequence);
  private:
   class State;

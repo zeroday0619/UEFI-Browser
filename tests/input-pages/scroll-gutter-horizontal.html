@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>Asynchronous document reflow</title>
+<style>
+body{margin:0;overflow:hidden;background:#e5edff;font:20px sans-serif}
+button{position:fixed;left:30px;top:20px;width:220px;height:44px}
+#box{position:fixed;left:60px;top:120px;width:500px;height:540px;overflow:scroll;background:white;overflow-anchor:none}
+#content{height:100%;width:1600px;display:flex;align-items:flex-start}#column{height:50%;aspect-ratio:1;flex:none}p{font:18px/24px monospace;margin:0}
+#marker{height:12px;background:#ff0088}#grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;height:40px}#grid div{background:#2288dd}
+#sticky{position:sticky;top:0;height:24px;background:#22bb66}
+#box::-webkit-scrollbar{width:24px;height:16px;background:#dddddd}
+#box::-webkit-scrollbar:horizontal:hover{height:48px}
+#box::-webkit-scrollbar:horizontal:active{height:80px}
+#box::-webkit-scrollbar-thumb{background:#ee5522;min-height:50px}
+#box::-webkit-scrollbar-thumb:hover{background:#cc33cc}
+#box::-webkit-scrollbar-thumb:active{background:#22cccc}
+#box::-webkit-scrollbar-corner{background:#555555}
+</style>
+<button id="start">Block JavaScript 25s</button>
+<div id="box" tabindex="0"><div id="content"><div id="column"><div id="sticky"></div><p id="text">alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.</p><div id="marker"></div><div id="grid"><div></div><div></div></div></div></div></div>
+<script>
+const scroller=box;
+text.style.wordBreak="break-all";
+text.textContent="Thequickbrownfoxjumpsoverthelazydog".repeat(6);
+
+let observations=0;
+new ResizeObserver(()=>{observations++;console.log('GUTTER size='+scroller.clientHeight+','+text.offsetHeight+' range='+scroller.scrollHeight+' observer='+observations)}).observe(text);
+start.onclick=()=>setTimeout(()=>{console.log('GUTTER begin');const end=performance.now()+25000;while(performance.now()<end){}console.log('GUTTER end width='+scroller.clientHeight)},1500);
+scroller.addEventListener('scroll',()=>console.log('GUTTER scroll='+scroller.scrollTop));
+console.log('GUTTER ready');
+</script>

@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Iframe gutter reflow</title>
+<style>body{margin:0;background:#e5edff}button{position:fixed;left:30px;top:20px;width:220px;height:44px}iframe{position:fixed;left:60px;top:120px;width:500px;height:540px;border:0}</style>
+<button id="start">Block child JavaScript 25s</button><iframe id="child" srcdoc="&lt;!doctype html&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;title&gt;Asynchronous document reflow&lt;/title&gt;
+&lt;style&gt;
+body{margin:0;overflow:hidden;background:#e5edff;font:20px sans-serif}
+button{position:fixed;left:30px;top:20px;width:220px;height:44px}
+#box{position:fixed;left:0;top:0;width:500px;height:540px;overflow:scroll;background:white;overflow-anchor:auto}
+#content{}p{font:24px/32px monospace;margin:0}
+#marker{height:12px;background:#ff0088}#grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;height:40px}#grid div{background:#2288dd}
+#sticky{position:sticky;top:0;height:24px;background:#22bb66}
+#box::-webkit-scrollbar{width:24px;height:16px;background:#dddddd}
+#box::-webkit-scrollbar:vertical:hover{width:80px}
+#box::-webkit-scrollbar:vertical:active{width:120px}
+#box::-webkit-scrollbar-thumb{background:#ee5522;min-height:50px}
+#box::-webkit-scrollbar-thumb:hover{background:#cc33cc}
+#box::-webkit-scrollbar-thumb:active{background:#22cccc}
+#box::-webkit-scrollbar-corner{background:#555555}
+#box{container-type:inline-size}
+@container (max-width:450px){#text{font-size:28px;line-height:36px}#grid{grid-template-columns:1fr;height:80px}#grid div{background:#8044cc}}
+&lt;/style&gt;
+
+&lt;div id=&quot;box&quot; tabindex=&quot;0&quot;&gt;&lt;div id=&quot;content&quot;&gt;&lt;div id=&quot;sticky&quot;&gt;&lt;/div&gt;&lt;p id=&quot;text&quot;&gt;alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.&lt;/p&gt;&lt;div id=&quot;marker&quot;&gt;&lt;/div&gt;&lt;div id=&quot;grid&quot;&gt;&lt;div&gt;&lt;/div&gt;&lt;div&gt;&lt;/div&gt;&lt;/div&gt;&lt;/div&gt;&lt;p id=&quot;tail&quot;&gt;&lt;/p&gt;&lt;/div&gt;
+&lt;script&gt;
+const scroller=box;
+tail.textContent=text.textContent.repeat(8);
+scroller.scrollTop=80;
+let observations=0;
+new ResizeObserver(()=&gt;{observations++;console.log(&#x27;GUTTER size=&#x27;+scroller.clientWidth+&#x27;,&#x27;+text.offsetHeight+&#x27; range=&#x27;+scroller.scrollHeight+&#x27; observer=&#x27;+observations)}).observe(text);
+window.addEventListener(&#x27;message&#x27;,event=&gt;{if(event.data===&#x27;block&#x27;)setTimeout(()=&gt;{console.log(&#x27;GUTTER begin&#x27;);const end=performance.now()+25000;while(performance.now()&lt;end){}console.log(&#x27;GUTTER end width=&#x27;+scroller.clientWidth)},1500)});
+scroller.addEventListener(&#x27;scroll&#x27;,()=&gt;console.log(&#x27;GUTTER scroll=&#x27;+scroller.scrollTop));
+console.log(&#x27;GUTTER ready&#x27;);
+&lt;/script&gt;
+"></iframe>
+<script>start.onclick=()=>child.contentWindow.postMessage('block','*');</script>

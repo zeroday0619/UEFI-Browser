@@ -1,5 +1,9 @@
 # Asynchronous scrollbar appearance
 
+This report describes its recorded image. See [gutter reflow validation](SCROLL-GUTTER.md) for the subsequent outer-thickness and document-layout implementation.
+
+This report preserves the earlier image and results. [Scrollbar layout validation](SCROLL-LAYOUT.md) supersedes the fixed internal part-geometry limitation; outer gutter and document reflow remain renderer work.
+
 Validation date: 2026-10-19. This extends [two-axis scrollbar controls](SCROLL-CONTROLS.md) without adding a dependency. The tested EFI image SHA-256 is `37e912e1d9a42a39567dd06024d1a90e0749c31d2ee9d550da49fbf2a6404acf`.
 
 ## Implementation

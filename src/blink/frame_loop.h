@@ -43,6 +43,7 @@ class FrameLoop {
   gfx::Rect viewport_;
   scoped_refptr<base::SingleThreadTaskRunner> runner_;
   base::RepeatingClosure present_;
+  bool recording_reflows_ = false;
   bool visible_ = true;
   bool running_ = false;
   bool requested_ = false;

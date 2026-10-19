@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8"><title>Asynchronous scrollbar layout</title>
+<style>
+body{margin:0;overflow:hidden;background:#e5edff;font:20px sans-serif}
+button{position:fixed;left:30px;top:20px;width:220px;height:44px}
+.box{position:fixed;left:60px;top:150px;width:500px;height:380px;overflow:scroll;background:white}
+#native{left:700px}.content{width:2400px;height:5000px;background:repeating-linear-gradient(#eeffcc 0 100px,#99cccc 100px 200px)}
+.custom::-webkit-scrollbar{width:24px;height:24px;background:#dddddd}
+.custom::-webkit-scrollbar-thumb{background:#ee5522;min-width:40px;min-height:40px}
+.custom::-webkit-scrollbar-thumb:hover{background:#cc33cc;min-height:80px;min-width:100px}
+.custom::-webkit-scrollbar-thumb:active{background:#22bb66;min-height:120px;min-width:140px}
+.custom::-webkit-scrollbar-thumb:hover:active{background:#22cccc;min-height:140px;min-width:160px}
+.custom::-webkit-scrollbar-track{background:#bbbbbb}
+.custom::-webkit-scrollbar-track:vertical:hover{margin-top:12px;margin-bottom:18px}
+.custom::-webkit-scrollbar-track:vertical:active{margin-top:24px;margin-bottom:30px}
+.custom::-webkit-scrollbar-track:horizontal:hover{margin-left:12px;margin-right:18px}
+.custom::-webkit-scrollbar-track:horizontal:active{margin-left:24px;margin-right:30px}
+.custom::-webkit-scrollbar-track-piece{background:#99ddbb}
+.custom::-webkit-scrollbar-track-piece:hover{background:#dd9955}
+.custom::-webkit-scrollbar-track-piece:active{background:#7755dd}
+.custom::-webkit-scrollbar-button{display:block;width:calc(12px + 12px);height:calc(12px + 12px);background:#4488cc}
+.custom::-webkit-scrollbar-button:hover{background:#eebb22;width:42px;height:42px}
+.custom::-webkit-scrollbar-button:active{background:#8844cc;width:80px;height:80px;max-width:60px;max-height:60px}
+.custom::-webkit-scrollbar:disabled,.custom::-webkit-scrollbar-thumb:disabled,.custom::-webkit-scrollbar-button:disabled,.custom::-webkit-scrollbar-track-piece:disabled{background:#777777}
+.custom::-webkit-scrollbar-button:disabled:hover{background:#aaaaaa}
+.custom::-webkit-scrollbar-button:disabled:active{background:#ff00ff}
+.custom::-webkit-scrollbar-button:increment:end:active{display:none}
+.custom::-webkit-scrollbar-button:decrement:end:active{width:600px;height:600px;max-width:none;max-height:none}
+.custom::-webkit-scrollbar-corner{background:#555555}
+#disabled{top:580px;height:110px}.small{width:80px;height:20px}
+</style>
+<button id="start">Block JavaScript 25s</button>
+<div id="custom" class="box custom" tabindex="0"><div class="content"></div></div>
+<div id="native" class="box" tabindex="0"><div class="content"></div></div>
+<div id="disabled" class="box custom"><div class="small">Disabled</div></div>
+<script>
+console.log('LAYOUT ready');
+start.onclick=()=>{console.log('LAYOUT capabilities hover='+matchMedia('(hover: hover)').matches+' fine='+matchMedia('(pointer: fine)').matches);custom.scrollTo(0,0);native.scrollTo(0,0);custom.focus({preventScroll:true});
+ setTimeout(()=>{console.log('LAYOUT begin');const end=performance.now()+25000;while(performance.now()<end){}console.log('LAYOUT end')},1500)};
+for(const box of [custom,native,disabled])box.addEventListener('scroll',()=>console.log('LAYOUT '+box.id+'='+box.scrollLeft+','+box.scrollTop));
+</script>

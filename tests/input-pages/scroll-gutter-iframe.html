@@ -1,0 +1,4 @@
+<!doctype html><meta charset="utf-8"><title>Iframe gutter reflow</title>
+<style>body{margin:0;background:#e5edff}button{position:fixed;left:30px;top:20px;width:220px;height:44px}iframe{position:fixed;left:60px;top:120px;width:500px;height:540px;border:0}</style>
+<button id="start">Block child JavaScript 25s</button><iframe id="child" src="/scroll-gutter-child.html"></iframe>
+<script>start.onclick=()=>child.contentWindow.postMessage('block','*');</script>

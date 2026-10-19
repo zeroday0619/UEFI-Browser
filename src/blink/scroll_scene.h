@@ -10,9 +10,14 @@ namespace blink { class WebView; }
 namespace uefi_browser {
 uint64_t KeyboardScrollTarget(blink::WebView&);
 std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView&, int* reason, const ScrollScene* previous);
+void CaptureScrollbarReflows(blink::WebView&, ScrollScene&);
+void ApplyScrollOffset(blink::WebView&, uint64_t element, int x, int y);
+void ApplyScrollbarState(blink::WebView&, uint64_t element, bool horizontal, unsigned hover, unsigned press);
+struct ScrollbarState { uint64_t element; bool horizontal; unsigned hover, press; };
 class ScrollCompositor {
  public:
   bool Install(const ScrollScene&);
+  std::vector<ScrollbarState> TakeReflowStates();
   void Clear();
   uint64_t Scroll(int x, int y, int delta, ScrollPosition* position);
   bool WheelAllowed(int x, int y) const;
@@ -22,17 +27,26 @@ class ScrollCompositor {
   bool AppearanceChanged() const;
   bool Pointer(int x, int y, unsigned buttons, uint64_t* element, ScrollPosition* position);
   bool Tick(int64_t now, uint64_t* element, ScrollPosition* position);
-  void CancelDrag() { drag_element_=0; pressed_part_=0; }
+  void CancelDrag();
   void Draw(SkCanvas& canvas, int width, int height);
   bool Ready() const { return !pictures_.empty(); }
  private:
+  bool SelectReflow();
+  void SwapScene(ScrollCompositor&);
+  bool InstallScene(const ScrollScene&);
+  std::vector<std::unique_ptr<ScrollCompositor>> reflows_;
+  std::vector<ScrollbarState> reflow_states_;
+  unsigned selected_reflow_=0, painted_reflow_=0;
   uint64_t Move(uint64_t element, int value, bool absolute, bool chain, ScrollPosition* position, bool horizontal=false);
   SkRect Global(SkRect bounds, int transform) const;
   void UpdateTransforms();
+  void UpdateLayouts();
+  SkRect Bounds(const ScrollPicture&) const;
   void Clip(SkCanvas&, int clip);
   bool Contains(int clip, float x, float y) const;
   uint64_t drag_element_=0;
   float drag_offset_=0;
+  int drag_coordinate_=0;
   bool drag_horizontal_=false;
   int drag_part_=0, pointer_x_=-1, pointer_y_=-1;
   unsigned pressed_part_=0;
@@ -42,7 +56,7 @@ class ScrollCompositor {
   uint64_t Repeat(ScrollPosition* position);
   ScrollScene scene_;
   std::vector<sk_sp<SkPicture>> pictures_;
-  std::vector<std::array<sk_sp<SkPicture>,8>> appearances_;
+  std::vector<std::vector<sk_sp<SkPicture>>> appearances_;
   std::vector<sk_sp<SkImage>> images_;
   std::vector<sk_sp<SkTypeface>> fonts_;
   std::vector<SkPoint> offsets_;

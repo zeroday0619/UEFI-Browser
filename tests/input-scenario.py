@@ -61,6 +61,25 @@ def run(execute, build, log):
             elif character == '_': key('shift','minus')
             elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'frame-policy':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'frame-policy.py'))['run'](key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-gutter-fallback':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-gutter-fallback.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-gutter', 'scroll-gutter-root', 'scroll-gutter-horizontal', 'scroll-gutter-container', 'scroll-gutter-iframe', 'scroll-gutter-srcdoc', 'scroll-gutter-nested-frame', 'scroll-gutter-parent-frame'):
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-gutter.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-layout':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-layout.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
     if os.environ.get('INPUT_SCENARIO') == 'scroll-style':
         import runpy
         runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-style.py'))['run'](

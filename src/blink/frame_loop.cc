@@ -36,6 +36,7 @@ FrameLoop::~FrameLoop() {
 }
 bool FrameLoop::Start() {
   CHECK(runner_->RunsTasksInCurrentSequence());
+  if (recording_reflows_) return true;
   requested_ = true;
   if (!visible_) return true;
   if (running_) return true;
@@ -117,6 +118,11 @@ void FrameLoop::RecordScroll() {
   if (!renderer_runtime_is_child()) return;
   int reason=0;
   pending_scroll_.scene=CaptureScrollScene(view_,&reason,scroll_snapshot_.scene.get());
+  if (pending_scroll_.scene) {
+    recording_reflows_=true;
+    CaptureScrollbarReflows(view_,*pending_scroll_.scene);
+    recording_reflows_=false;
+  }
   if (reason!=scroll_fallback_) std::printf("COMPOSITOR: eligibility=%d\n",reason);
   scroll_fallback_=reason;
 }

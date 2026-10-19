@@ -20,7 +20,7 @@
 namespace uefi_browser {
 namespace {
 constexpr unsigned kSlots=8, kCommands=256;
-enum Operation { Create, Close, Navigate, Back, Forward, Reload, Visible, Pointer, Keyboard, Scroll, Quit };
+enum Operation { Create, Close, Navigate, Back, Forward, Reload, Visible, Pointer, Keyboard, Scroll, Gutter, Quit };
 struct Command {
   unsigned operation, slot;
   uint64_t generation, navigation, scroll_sequence, scroll_element, focus_sequence;
@@ -148,6 +148,14 @@ class RemoteFrame::State {
     maximum_deferred=std::max(maximum_deferred,inputs.size());
     Flush();
   }
+  bool Reflowed() {
+    auto states=compositor.TakeReflowStates();
+    for (const auto& state:states) {
+      PointerSample pointer{}; pointer.x=state.hover; pointer.y=state.press; pointer.buttons=state.horizontal;
+      Enqueue({Gutter,pointer,{},false,++scroll_sequence,state.element});
+    }
+    return !states.empty();
+  }
   void Scrolled(uint64_t element,ScrollPosition position,const char* source) {
     PointerSample pointer{}; pointer.x=position.x; pointer.y=position.y;
     Enqueue({Scroll,pointer,{},false,++scroll_sequence,element});
@@ -212,11 +220,14 @@ bool RemoteFrame::CanAcceptInput() const { return state_->inputs.size()<8192; }
 void RemoteFrame::Pointer(const PointerSample& sample) {
   if (!renderer_runtime_available() || state_->recovered) return;
   state_->pointer_outside=false;
-  bool eligible=state_->compositor.Ready() && !state_->pending && state_->inputs.size()<8190;
+  // A reflow can enqueue several gutter states before the matching pointer or scroll command.
+  bool eligible=state_->compositor.Ready() && !state_->pending && state_->inputs.size()<8176;
   bool appearance_changed=eligible && state_->compositor.Hover(sample.x,sample.y);
+  if (eligible) state_->Reflowed();
   if (eligible && (state_->pointer_drag || ((sample.buttons&1) && !(state_->last_buttons&1)))) {
     uint64_t element=0; ScrollPosition position;
     if (state_->compositor.Pointer(sample.x,sample.y,sample.buttons,&element,&position)) {
+      state_->Reflowed();
       state_->pointer_drag=(sample.buttons&1)!=0;
       if (element) state_->Scrolled(element,position,"drag");
       else state_->CompositeScroll();
@@ -241,7 +252,7 @@ void RemoteFrame::Pointer(const PointerSample& sample) {
 void RemoteFrame::PointerLeave() {
   if (state_->pointer_outside || state_->recovered) return;
   state_->pointer_outside=true;
-  if (state_->compositor.Ready() && state_->compositor.Hover(-1,-1)) state_->CompositeScroll();
+  if (state_->compositor.Ready() && state_->compositor.Hover(-1,-1)) { state_->Reflowed(); state_->CompositeScroll(); }
   PointerSample sample{}; sample.x=sample.y=-1;
   state_->Enqueue({::uefi_browser::Pointer,sample,{}});
 }
@@ -260,7 +271,7 @@ void RemoteFrame::Keyboard(const KeySample& sample) {
 }
 void RemoteFrame::SetVisible(bool visible) {
   state_->visible=visible;
-  if (!visible) { state_->compositor.CancelDrag(); state_->compositor.Hover(-1,-1); state_->pointer_drag=false; }
+  if (!visible) { state_->compositor.CancelDrag(); state_->compositor.Hover(-1,-1); state_->pointer_drag=false; state_->Reflowed(); }
   Command command{}; command.operation=Visible; command.slot=state_->slot;
   command.generation=state_->generation; command.visible=visible; Send(command);
 }
@@ -270,8 +281,10 @@ void RemoteFrame::Poll() {
   if (state_->recovered) return;
   if (state_->visible && !state_->pending && state_->pointer_drag && state_->inputs.size()<8190) {
     uint64_t element=0; ScrollPosition position;
-    if (state_->compositor.Tick(base::TimeTicks::Now().since_origin().InMilliseconds(),&element,&position) && element)
-      state_->Scrolled(element,position,"repeat");
+    bool moved=state_->compositor.Tick(base::TimeTicks::Now().since_origin().InMilliseconds(),&element,&position);
+    bool reflowed=state_->Reflowed();
+    if (moved && element) state_->Scrolled(element,position,"repeat");
+    else if (reflowed) state_->CompositeScroll();
   }
   auto& input=channel->slots[state_->slot];
   if (!__atomic_load_n(&input.ready,__ATOMIC_ACQUIRE)) return;
@@ -399,6 +412,7 @@ bool PollRenderer(void*) {
       case Visible: tab.browser->SetVisible(command.visible); break;
       case Pointer: tab.browser->Pointer(command.pointer); break;
       case Keyboard: tab.browser->Keyboard(command.key); break;
+      case Gutter: tab.browser->ScrollbarState(command.scroll_element,command.pointer.buttons!=0,command.pointer.x,command.pointer.y,command.scroll_sequence); break;
       case Scroll: tab.browser->ScrollTo(command.scroll_element,command.pointer.x,command.pointer.y,command.scroll_sequence); break;
       default: break;
     }

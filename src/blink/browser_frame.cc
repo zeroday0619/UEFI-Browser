@@ -20,6 +20,7 @@
 #include "base/check.h"
 #include "base/notreached.h"
 #include "services/network/public/mojom/content_security_policy.mojom.h"
+#include "services/network/public/cpp/web_sandbox_flags.h"
 #include "third_party/blink/public/mojom/frame/policy_container.mojom.h"
 #include "third_party/blink/public/mojom/input/touch_event.mojom.h"
 #include "third_party/blink/public/mojom/frame/intrinsic_sizing_info.mojom.h"
@@ -74,7 +75,117 @@
 #include "third_party/blink/public/common/scheduler/task_attribution_id.h"
 #include "third_party/blink/public/web/web_document.h"
 #include "third_party/blink/public/mojom/commit_result/commit_result.mojom.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/policy_container.h"
+#include "third_party/blink/renderer/core/html/html_frame_owner_element.h"
+#include "third_party/blink/renderer/core/html_names.h"
+#include "third_party/blink/renderer/platform/loader/fetch/policy_container_utils.h"
+#include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+#include "third_party/blink/renderer/core/dom/document.h"
 namespace uefi_browser {
+namespace {
+// Local child frames share the renderer task sequence and the root software widget.
+class ChildFrame final : public blink::WebLocalFrameClient,
+                         public blink::mojom::PolicyContainerHost {
+ public:
+  static blink::WebLocalFrame* Create(blink::WebLocalFrame* parent,SystemTable* table,
+      base::RepeatingClosure changed,blink::mojom::TreeScopeType scope,
+      blink::WebPolicyContainerBindParams bind,FinishChildFrameCreationFn finish) {
+    auto* root=static_cast<blink::WebLocalFrameImpl*>(parent)->GetFrame();
+    while (root->Tree().Parent()) root=blink::To<blink::LocalFrame>(root->Tree().Parent());
+    unsigned count=0;
+    for (auto* frame=static_cast<blink::Frame*>(root);frame;frame=frame->Tree().TraverseNext(root))
+      if (++count>=16) return nullptr;
+    auto* client=new ChildFrame(table,std::move(changed));
+    client->policy_receiver_.Bind(std::move(bind.receiver));
+    client->frame_=parent->CreateLocalChild(scope,client,nullptr,blink::LocalFrameToken());
+    finish(client->frame_,blink::DocumentToken(),blink::InitiatorStateToken(),client->broker_.Bind(),
+        std::make_unique<base::UnguessableToken>(base::UnguessableToken::Create()));
+    return client->frame_;
+  }
+  void BindToFrame(blink::WebNavigationControl* navigation) override { navigation_=navigation; }
+  void FrameDetached(blink::DetachReason reason) override {
+    weak_.InvalidateWeakPtrs(); request_.reset(); frame_=nullptr;
+    if (navigation_) std::exchange(navigation_,nullptr)->Close(reason);
+    delete this;
+  }
+  blink::WebLocalFrame* CreateChildFrame(blink::mojom::TreeScopeType scope,
+      const blink::WebString&,const blink::WebString&,const blink::FramePolicy&,
+      const blink::WebFrameOwnerProperties&,blink::FrameOwnerElementType,
+      blink::WebPolicyContainerBindParams bind,ukm::SourceId,FinishChildFrameCreationFn finish) override {
+    return Create(frame_,table_,changed_,scope,std::move(bind),finish);
+  }
+  void BeginNavigation(std::unique_ptr<blink::WebNavigationInfo> info) override {
+    if (info->url_request.HttpMethod().Utf8()!="GET" || info->navigation_policy!=blink::kWebNavigationPolicyCurrentTab) return;
+    if (!navigation_->WillStartNavigation(*info)) return;
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
+        base::BindOnce(&ChildFrame::Navigate,weak_.GetWeakPtr(),std::move(info)));
+  }
+  void DidFinishLoad() override { changed_.Run(); std::puts("BLINK: child document load finished"); }
+  void DidStopLoading() override { changed_.Run(); }
+  void DidChangeScrollOffset(blink::mojom::ScrollType) override { changed_.Run(); }
+  void DidAddMessageToConsole(const blink::WebConsoleMessage& message,
+      const blink::WebString&,unsigned line,const blink::WebString&) override {
+    std::printf("BLINK: child console level=%d line=%u %.2048s\n",static_cast<int>(message.level),line,message.text.Utf8().c_str());
+  }
+  blink::WebString UserAgentOverride() override {
+    return blink::WebString::FromUtf8(BrowserUserAgent(GoogleCompatibility(GURL(frame_->GetDocument().Url().GetString().Utf8()))));
+  }
+  std::optional<blink::UserAgentMetadata> UserAgentMetadataOverride() override {
+    return BrowserUserAgentMetadata(GoogleCompatibility(GURL(frame_->GetDocument().Url().GetString().Utf8())));
+  }
+  void SetReferrerPolicy(network::mojom::ReferrerPolicy,const blink::InitiatorStateToken&) override {}
+  void AddContentSecurityPolicies(std::vector<network::mojom::ContentSecurityPolicyPtr>,const blink::InitiatorStateToken&) override {}
+ private:
+  ChildFrame(SystemTable* table,base::RepeatingClosure changed):table_(table),changed_(std::move(changed)) {}
+  void Navigate(std::unique_ptr<blink::WebNavigationInfo> info) {
+    if (!frame_ || !navigation_) return;
+    GURL url(info->url_request.Url().GetString().Utf8());
+    const bool local=url.spec()=="about:srcdoc" || url.spec()=="about:blank";
+    if (!local && (!url.SchemeIsHTTPOrHTTPS() || url.has_username() || url.has_password())) return;
+    request_.reset();
+    auto* core=static_cast<blink::WebLocalFrameImpl*>(frame_)->GetFrame();
+    auto* owner=blink::DynamicTo<blink::HTMLFrameOwnerElement>(core->Owner());
+    if (!owner) return;
+    auto* parent=blink::To<blink::LocalFrame>(core->Tree().Parent());
+    auto parameters=blink::WebNavigationParams::CreateFromInfo(*info);
+    parameters->frame_policy=owner->GetFramePolicy();
+    blink::WebPolicyContainerPolicies policies;
+    if (local) policies=blink::ToWebPolicyContainerPolicies(parent->DomWindow()->GetPolicyContainer()->GetPolicies());
+    policies.sandbox_flags|=owner->GetFramePolicy().sandbox_flags |
+        parent->DomWindow()->GetPolicyContainer()->GetPolicies().sandbox_flags;
+    if ((policies.sandbox_flags & network::mojom::WebSandboxFlags::kOrigin)!=network::mojom::WebSandboxFlags::kNone)
+      parameters->origin_to_commit=blink::SecurityOrigin::Create(info->url_request.Url())->DeriveNewOpaqueOrigin();
+    policy_receiver_.reset();
+    mojo::PendingAssociatedRemote<blink::mojom::PolicyContainerHost> remote;
+    auto receiver=remote.InitWithNewEndpointAndPassReceiver(); remote.EnableUnassociatedUsage();
+    policy_receiver_.Bind(std::move(receiver));
+    auto policy=std::make_unique<blink::WebPolicyContainer>(std::move(policies),std::move(remote));
+    if (local) {
+      parameters->policy_container=std::move(policy);
+      parameters->navigation_timings.navigation_start=base::TimeTicks::Now();
+      std::string text=url.spec()=="about:srcdoc" ? owner->getAttribute(blink::html_names::kSrcdocAttr).Utf8() : std::string();
+      blink::WebNavigationParams::FillStaticResponse(parameters.get(),blink::WebString::FromAscii("text/html"),
+          blink::WebString::FromAscii("UTF-8"),base::span(text.data(),text.size()));
+      navigation_->CommitNavigation(std::move(parameters),nullptr);
+      return;
+    }
+    request_=LoadNavigation(table_,*navigation_,url.spec().c_str(),std::move(policy),info->frame_load_type,{},
+        base::BindOnce(&ChildFrame::Finished,weak_.GetWeakPtr()),std::move(parameters));
+  }
+  void Finished(Status status) {
+    std::printf("BLINK: child navigation status=%llx\n",static_cast<unsigned long long>(status)); changed_.Run();
+  }
+  SystemTable* table_;
+  base::RepeatingClosure changed_;
+  BrowserBroker broker_;
+  blink::WebLocalFrame* frame_=nullptr;
+  blink::WebNavigationControl* navigation_=nullptr;
+  mojo::AssociatedReceiver<blink::mojom::PolicyContainerHost> policy_receiver_{this};
+  std::unique_ptr<NavigationRequest> request_;
+  base::WeakPtrFactory<ChildFrame> weak_{this};
+};
+}
 class BrowserFrame::State final : public blink::WebLocalFrameClient,
                                   public blink::WebNonCompositedWidgetClient,
                                   public blink::mojom::FrameWidgetHost,
@@ -154,13 +265,13 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   const ScrollSnapshot& Snapshot() const { return loop_->Snapshot(); }
   uint64_t KeyboardScrollTarget() const { return view_ ? uefi_browser::KeyboardScrollTarget(*view_) : 0; }
+  void ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence) {
+    if (view_) ApplyScrollbarState(*view_,element,horizontal,hover,press);
+    // Queued content clicks must hit the geometry that was already presented by the BSP.
+    loop_->Stop(); loop_->AcknowledgeScroll(sequence); loop_->Start();
+  }
   void ScrollTo(uint64_t element, int x, int y, uint64_t sequence) {
-    if (frame_) {
-      auto* local=static_cast<blink::WebLocalFrameImpl*>(frame_)->GetFrame();
-      if (auto* area=local->View()->ScrollableAreaWithElementId(blink::CompositorElementId(element)))
-        area->SetScrollOffset(blink::ScrollOffset(x,y),
-            blink::mojom::blink::ScrollType::kCompositor,cc::ScrollSourceType::kRelativeScroll);
-    }
+    if (view_) ApplyScrollOffset(*view_,element,x,y);
     // A pre-scroll raster cannot acknowledge this offset and would delay the next scroll event.
     loop_->Stop();
     loop_->AcknowledgeScroll(sequence); loop_->Start();
@@ -489,6 +600,13 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     event.SetType(Event::Type::kKeyUp);
     Dispatch(event);
   }
+  blink::WebLocalFrame* CreateChildFrame(blink::mojom::TreeScopeType scope,
+      const blink::WebString&,const blink::WebString&,const blink::FramePolicy&,
+      const blink::WebFrameOwnerProperties&,blink::FrameOwnerElementType,
+      blink::WebPolicyContainerBindParams bind,ukm::SourceId,FinishChildFrameCreationFn finish) override {
+    return ChildFrame::Create(frame_,table_,base::BindRepeating(&State::ScheduleNonCompositedAnimation,
+        weak_factory_.GetWeakPtr()),scope,std::move(bind),finish);
+  }
   void BeginNavigation(std::unique_ptr<blink::WebNavigationInfo> info) override {
     if (info->url_request.HttpMethod().Utf8() != "GET") {
       std::puts("BLINK: unsupported navigation method");
@@ -761,6 +879,7 @@ BrowserFrame::BrowserFrame(SystemTable* table,
 BrowserFrame::~BrowserFrame() = default;
 const ScrollSnapshot& BrowserFrame::Snapshot() const { return state_->Snapshot(); }
 uint64_t BrowserFrame::KeyboardScrollTarget() const { return state_->KeyboardScrollTarget(); }
+void BrowserFrame::ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence) { state_->ScrollbarState(element,horizontal,hover,press,sequence); }
 void BrowserFrame::ScrollTo(uint64_t element, int x, int y, uint64_t sequence) { state_->ScrollTo(element,x,y,sequence); }
 Status BrowserFrame::Navigate(const char* url) { return remote_ ? remote_->Navigate(url) : state_->Navigate(url); }
 bool BrowserFrame::NavigationPending() const { return remote_ ? remote_->NavigationPending() : state_->NavigationPending(); }

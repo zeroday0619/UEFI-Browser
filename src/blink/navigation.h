@@ -7,6 +7,7 @@
 #include <memory>
 #include "base/functional/callback.h"
 #include "third_party/blink/public/web/web_frame_load_type.h"
+#include "third_party/blink/public/web/web_navigation_params.h"
 #include "third_party/blink/public/web/web_history_item.h"
 #include "third_party/blink/public/platform/web_policy_container.h"
 class SkCanvas;
@@ -25,7 +26,8 @@ std::unique_ptr<NavigationRequest> LoadNavigation(SystemTable *table, blink::Web
                       const char *url, std::unique_ptr<blink::WebPolicyContainer> policy,
                       blink::WebFrameLoadType load_type = blink::WebFrameLoadType::kStandard,
                       blink::WebHistoryItem history_item = {},
-                      base::OnceCallback<void(Status)> completion = {});
+                      base::OnceCallback<void(Status)> completion = {},
+                      std::unique_ptr<blink::WebNavigationParams> parameters = {});
 void PaintFrame(blink::WebView &view, blink::WebFrameWidget &widget,
                 SkCanvas &canvas, const gfx::Rect &viewport);
 } // namespace uefi_browser

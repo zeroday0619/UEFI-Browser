@@ -27,16 +27,23 @@ struct ScrollPicture {
   SkRect bounds;
   int scrollbar=-1, track_piece=0;
   unsigned part=0;
-  std::array<sk_sp<SkData>,8> appearances;
+  std::vector<sk_sp<SkData>> appearances;
+  std::vector<SkRect> appearance_bounds;
   sk_sp<SkData> data;
 };
 struct ScrollRegion { int transform=-1, clip=-1; SkRect bounds; };
+struct ScrollbarLayout {
+  unsigned hover=0, press=0;
+  SkRect track, thumb, back_start, back_end, forward_start, forward_end;
+};
 struct ScrollbarScene {
   uint64_t element=0;
   int transform=-1, clip=-1, thumb_transform=-1;
   unsigned track_picture=0, thumb_picture=0, last_picture=0;
   bool horizontal=false, jump=false, custom=false, enabled=true;
-  unsigned painted_hover=0, painted_press=0;
+  std::array<int,4> thickness{};
+  unsigned painted_hover=0, painted_press=0, hover=0, layout=0;
+  std::vector<ScrollbarLayout> layouts;
   int initial_delay=250, repeat_delay=50;
   SkRect back_start=SkRect::MakeEmpty(), back_end=SkRect::MakeEmpty(), forward_start=SkRect::MakeEmpty(), forward_end=SkRect::MakeEmpty();
   SkRect frame, track, thumb;
@@ -44,6 +51,7 @@ struct ScrollbarScene {
 struct ScrollImage { int width=0, height=0; sk_sp<SkData> pixels; };
 // Shared publications contain values and immutable bytes; Skia objects are rebuilt by the consumer.
 struct ScrollScene {
+  std::vector<std::shared_ptr<ScrollScene>> reflows;
   bool wheel_listeners=false, wheel_blocked=false;
   std::vector<ScrollRegion> wheel_regions;
   std::vector<ScrollbarScene> scrollbars;
