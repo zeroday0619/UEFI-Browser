@@ -30,7 +30,8 @@ uint64_t renderer_runtime_frequency(void);
 uint64_t renderer_runtime_request(unsigned operation, uint64_t first, uint64_t second,
                                   uint64_t third, uint64_t fourth, uint64_t fifth);
 enum { RENDERER_NETWORK_START = 64, RENDERER_NETWORK_RESULT,
-       RENDERER_NETWORK_RELEASE, RENDERER_RESPONSE_RELEASE };
+       RENDERER_NETWORK_RELEASE, RENDERER_RESPONSE_RELEASE,
+       RENDERER_NETWORK_REQUEST };
 uint64_t renderer_network_service(unsigned operation, uint64_t first, uint64_t second,
                                   uint64_t third, uint64_t fourth, uint64_t fifth);
 #ifdef __cplusplus

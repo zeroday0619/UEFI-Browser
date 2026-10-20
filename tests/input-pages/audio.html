@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>AC97 output</title>
+<style>body{font:18px sans-serif;background:#10202b;color:#dcefff;padding:24px}button{position:absolute;left:380px;top:180px;padding:16px;margin:10px}pre{white-space:pre-wrap}</style>
+<h1>AC97 audio playback</h1><audio preload="auto" src="/audio-tone.wav"></audio><button>Run audio checks</button><pre></pre>
+<script>
+const audio=document.querySelector('audio'),results=document.querySelector('pre');let checks=0;
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function check(condition,name){if(!condition)throw Error(name);++checks;results.textContent+=name+'\n';console.log('AUDIO CHECK '+name)}
+function event(name,action){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{cleanup();reject(Error('timeout '+name))},10000);function cleanup(){clearTimeout(timer);audio.removeEventListener(name,success);audio.removeEventListener('error',failure)}function success(){cleanup();resolve()}function failure(){cleanup();reject(Error('media '+audio.error?.code+' '+audio.error?.message))}audio.addEventListener(name,success);audio.addEventListener('error',failure);action?.()})}
+audio.onloadeddata=()=>console.log('AUDIO READY');audio.onerror=()=>console.error('AUDIO FAILURE '+audio.error?.message);
+document.querySelector('button').onclick=async()=>{try{
+ check(audio.readyState>=2,'PCM loaded');check(audio.duration===8,'duration from PCM frames');
+ audio.volume=1;await audio.play();await wait(700);check(audio.currentTime>.4&&!audio.paused,'DMA playback advances');
+ const beforeBusy=audio.currentTime;console.log('AUDIO busy begin');const end=performance.now()+1200;while(performance.now()<end){}console.log('AUDIO busy end');await wait(0);check(audio.currentTime>beforeBusy+1,'DMA advances during JavaScript');
+ audio.pause();const paused=audio.currentTime;await wait(500);check(Math.abs(audio.currentTime-paused)<.002,'pause freezes device position');
+ await event('seeked',()=>audio.currentTime=4.2);check(Math.abs(audio.currentTime-4.2)<.002,'paused seek');
+ await audio.play();await wait(700);check(audio.currentTime>4.6,'seek resumes second tone');
+ audio.muted=true;console.log('AUDIO muted');await wait(650);audio.muted=false;audio.volume=.25;console.log('AUDIO quiet');await wait(650);audio.pause();
+ check(audio.currentTime>5.6,'muted and quiet DMA advance');
+ audio.volume=1;await event('seeked',()=>audio.currentTime=7.7);await event('ended',()=>audio.play());check(audio.ended,'hardware end');
+ await audio.play();await wait(350);audio.pause();check(audio.currentTime>.15&&audio.currentTime<1,'replay starts from zero');
+ await event('loadeddata',()=>audio.load());check(audio.currentTime===0&&audio.error===null,'reload releases old DMA clip');
+ for(const name of ['audio-mono8.wav','audio-mono16.wav']){
+  await event('loadeddata',()=>{audio.src='/'+name;audio.load()});check(audio.duration===1,'mono duration '+name);
+  await event('ended',()=>audio.play());check(audio.ended,'mono device output '+name);
+ }
+ document.querySelector('h1').textContent='Audio: '+checks+' checks passed';console.log('AUDIO PASS checks='+checks);
+}catch(error){console.error('AUDIO FAILURE '+error.stack)}};
+</script>

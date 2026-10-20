@@ -1,0 +1,74 @@
+<!doctype html><meta charset="utf-8"><title>Cache Storage verification</title>
+<style>body{font:18px sans-serif;background:#10202b;color:#dcefff;padding:24px}pre{white-space:pre-wrap}</style>
+<h1>Cache Storage and Blob</h1><pre id="result">Running…</pre>
+<script>
+(async()=>{
+ let checks=0;
+ function check(value,label){if(!value)throw Error(label);checks++;console.log('CACHE CHECK '+label)}
+ const text='한글 العربية 日本語 \u0000 cache';
+ const blob=new Blob(['prefix',new Blob([text]),'suffix'],{type:'text/plain'});
+ check(await new Blob([]).text()==='','empty Blob');
+ check(await blob.slice(6,-6).text()===text,'Blob composition and slice');
+ const binary=new Uint8Array(262145);for(let index=0;index<binary.length;index++)binary[index]=index%251;
+ check(new Uint8Array(await new Blob([binary]).arrayBuffer()).every((value,index)=>value===binary[index]),'Blob large bytes provider');
+ for(const name of await caches.keys()) if(name.startsWith('test-'))await caches.delete(name);
+ check(!await caches.has('test-a'),'missing cache');
+ const cache=await caches.open('test-a');
+ check(await caches.has('test-a'),'open cache');
+ await caches.open('test-b');
+ check((await caches.keys()).filter(name=>name.startsWith('test-')).join(',')==='test-a,test-b','cache insertion order');
+ await cache.put('/unicode',new Response(text,{status:201,statusText:'Created',headers:{'X-Test':'retained'}}));
+ const response=await cache.match('/unicode');
+ check(response.status===201&&response.statusText==='Created'&&response.headers.get('x-test')==='retained','response metadata');
+ check(await response.text()===text,'response body');
+ check(await (await cache.match('/unicode')).text()===text,'repeated body reads');
+ await cache.put('/binary',new Response(binary));
+ const read=new Uint8Array(await (await cache.match('/binary')).arrayBuffer());
+ check(read.length===binary.length&&read.every((value,index)=>value===binary[index]),'binary pipe backpressure');
+ await cache.put('/query?v=1#fragment',new Response('query'));
+ check(!await cache.match('/query?v=2'),'search mismatch');
+ check(await(await cache.match('/query?v=2',{ignoreSearch:true})).text()==='query','ignoreSearch and fragments');
+ check(!await cache.match(new Request('/unicode',{method:'POST'})),'method mismatch');
+ check(await(await cache.match(new Request('/unicode',{method:'POST'}),{ignoreMethod:true})).text()===text,'ignoreMethod');
+ await cache.put(new Request('/vary',{headers:{'X-Language':'ko'}}),new Response('ko',{headers:{Vary:'X-Language'}}));
+ check(!await cache.match('/vary'),'Vary mismatch');
+ check(await(await cache.match(new Request('/vary',{headers:{'x-language':'ko'}}))).text()==='ko','Vary match');
+ check(await(await cache.match('/vary',{ignoreVary:true})).text()==='ko','ignoreVary');
+ await cache.put('/unicode',new Response('replacement'));
+ check(await(await cache.match('/unicode')).text()==='replacement','replace matching entry');
+ check((await cache.keys()).length===4,'request keys');
+ check((await cache.matchAll()).length===4,'matchAll');
+ check(await(await caches.match('/unicode')).text()==='replacement','global match');
+ check(!await caches.match('/unicode',{cacheName:'test-b'}),'named global miss');
+ check(await cache.delete('/query?v=2',{ignoreSearch:true})&&!await cache.delete('/missing'),'delete query');
+ let rejected=false;try{await cache.put('/invalid',new Response('x',{headers:{Vary:'*'}}))}catch(error){rejected=error.name==='TypeError'}
+ check(rejected&&!await cache.match('/invalid'),'reject Vary wildcard');
+ rejected=false;try{await cache.put(new Request('/post',{method:'POST'}),new Response('x'))}catch(error){rejected=error.name==='TypeError'}
+ check(rejected,'reject non-GET put');
+ await cache.addAll(['/cache-resource-a.txt','/cache-resource-b.txt']);
+ check(await(await cache.match('/cache-resource-a.txt')).text()==='resource-a\n'&&await(await cache.match('/cache-resource-b.txt')).text()==='resource-b\n','fetch addAll');
+ rejected=false;try{await cache.addAll(['/cache-resource-c.txt','/missing-cache-resource'])}catch(error){rejected=true}
+ check(rejected&&!await cache.match('/cache-resource-c.txt'),'failed addAll leaves cache unchanged');
+ await Promise.all(Array.from({length:4},(_,index)=>cache.put('/concurrent-'+index,new Response('entry-'+index))));
+ check((await Promise.all(Array.from({length:4},(_,index)=>cache.match('/concurrent-'+index)))).every(Boolean),'concurrent queued mutations');
+ const held=await caches.open('test-held');await held.put('/held',new Response('old'));
+ check(await caches.delete('test-held')&&!await caches.has('test-held')&&await(await held.match('/held')).text()==='old','deleted cache handle remains usable');
+ const reopened=await caches.open('test-held');check(!await reopened.match('/held'),'recreated cache is independent');
+ const isolated=await new Promise((resolve,reject)=>{const frame=document.createElement('iframe');frame.src='https://10.0.2.2:8768/cache-frame.html';window.addEventListener('message',function listener(event){if(event.source!==frame.contentWindow)return;window.removeEventListener('message',listener);resolve(event.data)});document.body.append(frame);setTimeout(()=>reject(Error('origin iframe timeout')),10000)});
+ check(isolated==='isolated','cross-origin cache isolation');
+ await cache.put(new Request('/vary-empty',{headers:{'X-Empty':''}}),new Response('empty',{headers:{Vary:'X-Empty'}}));
+ check(!await cache.match('/vary-empty'),'Vary distinguishes absent and empty header');
+ const opaque=await fetch('https://10.0.2.2:8768/cache-resource-a.txt',{mode:'no-cors'});
+ await cache.put('/opaque',opaque);
+ const opaqueRead=await cache.match('/opaque');
+ check(opaqueRead.type==='opaque'&&opaqueRead.status===0&&await opaqueRead.text()==='','opaque response remains filtered');
+ rejected=false;try{await cache.put('/unicode',new Response('x',{headers:{'X-Padding':'x'.repeat(70000)}}))}catch(error){rejected=error.name==='QuotaExceededError'}
+ check(rejected&&await(await cache.match('/unicode')).text()==='replacement','quota failure preserves earlier entries');
+ const persistent=await caches.open('persistent');const old=await persistent.match('/generation');const generation=(old?Number(await old.text()):0)+1;
+ await persistent.put('/generation',new Response(String(generation)));
+ console.log('CACHE GENERATION '+generation);
+ check(Number(await(await persistent.match('/generation')).text())===generation,'durable counter');
+ await persistent.put('/guard',new Response('flushed'));
+ const message='CACHE PASS checks='+checks;document.getElementById('result').textContent=message+'\nGeneration '+generation;console.log(message);
+})().catch(error=>{document.getElementById('result').textContent='CACHE FAIL '+error.stack;console.error('CACHE FAIL '+error.stack)});
+</script>

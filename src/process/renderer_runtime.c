@@ -1,4 +1,5 @@
 #include "renderer_runtime.h"
+#include "firmware_audio.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -18,7 +19,7 @@ static SystemTable *firmware;
 static SystemTable proxy;
 static BootServices boot;
 static struct { TableHeader header; void *function[14]; } runtime;
-static uint64_t requests, operations[80];
+static uint64_t requests, operations[256];
 typedef struct Allocation Allocation;
 struct Allocation { uint64_t address; size_t pages; Allocation *next; };
 static Allocation *allocations;
@@ -97,9 +98,10 @@ Status renderer_runtime_join(void) {
         (unsigned long long)result,(unsigned long long)bootstrap->fault[0],
         (unsigned long long)bootstrap->fault[1],(unsigned long long)bootstrap->fault[2]);
     renderer_network_reset();
+    firmware_audio_reset(1);
     release_allocations();
     printf("RENDERER: runtime service requests=%llu\n",(unsigned long long)requests);
-    for (unsigned index=1; index<80; ++index) if (operations[index])
+    for (unsigned index=1; index<256; ++index) if (operations[index])
       printf("RENDERER: service operation=%u requests=%llu\n",index,(unsigned long long)operations[index]);
     free(channel); channel=NULL;
   }
@@ -197,6 +199,7 @@ __attribute__((__weak__)) uint64_t renderer_network_service(unsigned operation, 
   (void)operation; (void)first; (void)second; (void)third; (void)fourth; (void)fifth;
   return ERROR(3);
 }
+#include "firmware_io.h"
 void renderer_runtime_service(void) {
   if (!renderer_runtime_available() || !__atomic_load_n(&channel->pending,__ATOMIC_ACQUIRE)) return;
   if (private_data_probe!=41 || private_tls_probe!=43) abort();
@@ -212,6 +215,10 @@ void renderer_runtime_service(void) {
   void *function=NULL;
   void **services=(void**)((unsigned char*)firmware->runtime+sizeof(TableHeader));
   switch (channel->operation) {
+    case RENDERER_AUDIO_REQUEST: result=firmware_audio_service(1,a[0],a[1],a[2],a[3],a[4]); break;
+    case RENDERER_DNS_REQUEST: result=firmware_dns_service(1,a[0],a[1],(void *)a[2]); break;
+    case RENDERER_FILE_REQUEST: result=firmware_file_service(1,a[0],(const long *)a[1]); break;
+    case RENDERER_SOCKET_REQUEST: result=firmware_socket_service(1,a[0],(const long *)a[1]); break;
     case ALLOCATE_POOL: function=firmware->boot->function[5]; break;
     case FREE_POOL: function=firmware->boot->function[6]; break;
     case ALLOCATE_PAGES: function=firmware->boot->function[2]; break;
@@ -261,6 +268,6 @@ void renderer_runtime_service(void) {
   if (position && !result) { entry=*position; *position=entry->next; free(entry); --allocation_count; }
   channel->result=result;
   ++requests;
-  if (channel->operation<80) ++operations[channel->operation];
+  if (channel->operation<256) ++operations[channel->operation];
   __atomic_store_n(&channel->pending,0,__ATOMIC_RELEASE);
 }

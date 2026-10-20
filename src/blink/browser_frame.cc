@@ -11,6 +11,7 @@
 #include "renderer_runtime.h"
 #include "blink/browser_identity.h"
 #include "blink/browser_broker.h"
+#include "blink/web_storage.h"
 #include "process/renderer_protocol.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include <deque>
@@ -30,7 +31,9 @@
 #include "third_party/blink/public/mojom/widget/platform_widget.mojom.h"
 #include "base/unguessable_token.h"
 #include "blink/frame_loop.h"
+#include "blink/media_player.h"
 #include "blink/resource_loader.h"
+#include "blink/workers.h"
 #include "components/viz/common/surfaces/frame_sink_id.h"
 #include "mojo/public/cpp/bindings/pending_associated_receiver.h"
 #include "mojo/public/cpp/bindings/pending_associated_remote.h"
@@ -99,9 +102,21 @@ class ChildFrame final : public blink::WebLocalFrameClient,
     auto* client=new ChildFrame(table,std::move(changed));
     client->policy_receiver_.Bind(std::move(bind.receiver));
     client->frame_=parent->CreateLocalChild(scope,client,nullptr,blink::LocalFrameToken());
+    client->broker_.SetFrameToken(client->frame_->GetLocalFrameToken());
     finish(client->frame_,blink::DocumentToken(),blink::InitiatorStateToken(),client->broker_.Bind(),
         std::make_unique<base::UnguessableToken>(base::UnguessableToken::Create()));
     return client->frame_;
+  }
+  scoped_refptr<blink::WebWorkerFetchContext> CreateWorkerFetchContext(
+      blink::WebDedicatedWorkerHostFactoryClient*) override {
+    return uefi_browser::CreateWorkerFetchContext(table_, frame_);
+  }
+  std::unique_ptr<blink::WebMediaPlayer> CreateMediaPlayer(
+      const blink::WebMediaPlayerSource&, blink::WebMediaPlayerClient* client,
+      blink::MediaInspectorContext*, blink::WebMediaPlayerEncryptedMediaClient*,
+      blink::WebContentDecryptionModule*, const blink::WebString&,
+      const cc::LayerTreeSettings*, scoped_refptr<base::TaskRunner>) override {
+    return uefi_browser::CreateMediaPlayer(frame_, client);
   }
   void BindToFrame(blink::WebNavigationControl* navigation) override { navigation_=navigation; }
   void FrameDetached(blink::DetachReason reason) override {
@@ -116,7 +131,7 @@ class ChildFrame final : public blink::WebLocalFrameClient,
     return Create(frame_,table_,changed_,scope,std::move(bind),finish);
   }
   void BeginNavigation(std::unique_ptr<blink::WebNavigationInfo> info) override {
-    if (info->url_request.HttpMethod().Utf8()!="GET" || info->navigation_policy!=blink::kWebNavigationPolicyCurrentTab) return;
+    if ((info->url_request.HttpMethod().Utf8()!="GET" && info->url_request.HttpMethod().Utf8()!="POST") || info->navigation_policy!=blink::kWebNavigationPolicyCurrentTab) return;
     if (!navigation_->WillStartNavigation(*info)) return;
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(FROM_HERE,
         base::BindOnce(&ChildFrame::Navigate,weak_.GetWeakPtr(),std::move(info)));
@@ -171,7 +186,7 @@ class ChildFrame final : public blink::WebLocalFrameClient,
       return;
     }
     request_=LoadNavigation(table_,*navigation_,url.spec().c_str(),std::move(policy),info->frame_load_type,{},
-        base::BindOnce(&ChildFrame::Finished,weak_.GetWeakPtr()),std::move(parameters));
+        base::BindOnce(&ChildFrame::Finished,weak_.GetWeakPtr()),std::move(parameters),false);
   }
   void Finished(Status status) {
     std::printf("BLINK: child navigation status=%llx\n",static_cast<unsigned long long>(status)); changed_.Run();
@@ -203,12 +218,13 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     view_ = blink::WebView::Create(
         &view_client_, false, nullptr, std::nullopt,
         /*compositing_enabled=*/false, /*widgets_never_composited=*/true,
-        nullptr, mojo::NullAssociatedReceiver(), *agent_group_, std::string(),
+        nullptr, mojo::NullAssociatedReceiver(), *agent_group_, base::UnguessableToken::Create().ToString(),
         std::nullopt, base::UnguessableToken::Create(), &colors, -1, 0);
     CHECK(view_);
     view_->GetSettings()->SetJavaScriptEnabled(true);
-    // No cookie service exists, so synchronous cookie IPC cannot make progress.
-    view_->GetSettings()->SetCookieEnabled(false);
+    // The UEFI cookie bridge resolves document access on the renderer task sequence.
+    view_->GetSettings()->SetCookieEnabled(true);
+    view_->GetSettings()->SetLocalStorageEnabled(true);
     // Software input scrolling must not wait for main-thread animation frames.
     view_->GetSettings()->SetEnableScrollAnimator(false);
     view_->GetSettings()->SetImagesEnabled(true);
@@ -226,6 +242,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         view_, this, nullptr, broker_.Bind(), blink::LocalFrameToken(),
         blink::DocumentToken(), blink::InitiatorStateToken(), nullptr);
     CHECK(frame);
+    broker_.SetFrameToken(frame->GetLocalFrameToken());
     CHECK(navigation_);
     mojo::PendingAssociatedRemote<blink::mojom::FrameWidgetHost> frame_host;
     auto frame_receiver = frame_host.InitWithNewEndpointAndPassReceiver();
@@ -259,8 +276,11 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         static_cast<long long>(maximum_input_dispatch_));
     navigation_request_.reset();
     loop_.reset();
-    if (view_)
+    if (view_) {
+      std::string storage_namespace = view_->GetSessionStorageNamespaceId();
       std::exchange(view_, nullptr)->Close();
+      blink::ReleaseFirmwareStorageNamespace(storage_namespace);
+    }
     UninstallResourceLoader();
   }
   const ScrollSnapshot& Snapshot() const { return loop_->Snapshot(); }
@@ -271,7 +291,10 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     loop_->Stop(); loop_->AcknowledgeScroll(sequence); loop_->Start();
   }
   void ScrollTo(uint64_t element, int x, int y, uint64_t sequence) {
-    if (view_) ApplyScrollOffset(*view_,element,x,y);
+    if (view_) {
+      const auto& scene=loop_->Snapshot().scene;
+      ApplyScrollOffset(*view_,element,x,y,scene && !scene->queries.empty());
+    }
     // A pre-scroll raster cannot acknowledge this offset and would delay the next scroll event.
     loop_->Stop();
     loop_->AcknowledgeScroll(sequence); loop_->Start();
@@ -290,6 +313,17 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   std::optional<blink::UserAgentMetadata> UserAgentMetadataOverride() override {
     return BrowserUserAgentMetadata(GoogleCompatibility(GURL(CurrentUrl())));
+  }
+  scoped_refptr<blink::WebWorkerFetchContext> CreateWorkerFetchContext(
+      blink::WebDedicatedWorkerHostFactoryClient*) override {
+    return uefi_browser::CreateWorkerFetchContext(table_, frame_);
+  }
+  std::unique_ptr<blink::WebMediaPlayer> CreateMediaPlayer(
+      const blink::WebMediaPlayerSource&, blink::WebMediaPlayerClient* client,
+      blink::MediaInspectorContext*, blink::WebMediaPlayerEncryptedMediaClient*,
+      blink::WebContentDecryptionModule*, const blink::WebString&,
+      const cc::LayerTreeSettings*, scoped_refptr<base::TaskRunner>) override {
+    return uefi_browser::CreateMediaPlayer(frame_, client);
   }
   void BindToFrame(blink::WebNavigationControl* frame) override {
     CHECK(!navigation_);
@@ -425,9 +459,9 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     message.generation = input_generation_;
     message.sequence = ++input_sequence_;
     input_messages_.push_back({message, base::TimeTicks::Now()});
-    // The current in-process adapter consumes immediately to avoid another task hop.
-    // Nested delivery stays queued so DOM dispatch cannot recursively enter itself.
-    if (!input_dispatching_) DrainInput();
+    // DOM event handlers require a scheduler task so Canvas observers and microtasks
+    // complete before the next event is dispatched.
+    ScheduleInput();
   }
   void ScheduleInput() {
     if (!frame_ || input_scheduled_ || input_messages_.empty()) return;
@@ -608,7 +642,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         weak_factory_.GetWeakPtr()),scope,std::move(bind),finish);
   }
   void BeginNavigation(std::unique_ptr<blink::WebNavigationInfo> info) override {
-    if (info->url_request.HttpMethod().Utf8() != "GET") {
+    if (info->url_request.HttpMethod().Utf8() != "GET" && info->url_request.HttpMethod().Utf8() != "POST") {
       std::puts("BLINK: unsupported navigation method");
       return;
     }
@@ -624,7 +658,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
           info->navigation_policy == blink::kWebNavigationPolicyNewPopup;
       std::printf("TABS: navigation policy=%d activation=%d\n",
           static_cast<int>(info->navigation_policy),info->has_transient_user_activation);
-      if (new_tab && info->has_transient_user_activation)
+      if (new_tab && info->has_transient_user_activation && info->url_request.HttpMethod().Utf8() == "GET")
         OpenTabQueued(info->url_request.Url().GetString().Utf8());
       return;
     }
@@ -645,7 +679,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         return;
       }
     }
-    if (target.has_ref() && target.EqualsIgnoringRef(current) &&
+    if (info->url_request.HttpMethod().Utf8() == "GET" && target.has_ref() && target.EqualsIgnoringRef(current) &&
         (info->frame_load_type == blink::WebFrameLoadType::kStandard ||
          info->frame_load_type == blink::WebFrameLoadType::kReplaceCurrentItem)) {
       auto result = navigation_->CommitSameDocumentNavigation(
@@ -657,7 +691,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
         return;
       }
     }
-    Status status = NavigateInternal(target.spec().c_str(), info->frame_load_type, {});
+    Status status = NavigateInternal(target.spec().c_str(), info->frame_load_type, {}, blink::WebNavigationParams::CreateFromInfo(*info));
     if (status) std::printf("BLINK: navigation failed status=%llx\n", static_cast<unsigned long long>(status));
   }
   blink::WebView* CreateNewWindow(const blink::WebURLRequest& request,
@@ -780,7 +814,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     return NavigateInternal(url, blink::WebFrameLoadType::kStandard, {});
   }
   Status NavigateInternal(const char* url, blink::WebFrameLoadType load_type,
-                          blink::WebHistoryItem history_item) {
+                          blink::WebHistoryItem history_item,
+                          std::unique_ptr<blink::WebNavigationParams> parameters = {}) {
     CHECK(navigation_);
     ++input_generation_;
     input_messages_.clear();
@@ -803,7 +838,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     auto policy = std::make_unique<blink::WebPolicyContainer>(
         blink::WebPolicyContainerPolicies{}, std::move(remote));
     navigation_request_ = LoadNavigation(table_, *navigation_, url, std::move(policy), load_type, history_item,
-        base::BindOnce(&State::NavigationFinished, weak_factory_.GetWeakPtr()));
+        base::BindOnce(&State::NavigationFinished, weak_factory_.GetWeakPtr()), std::move(parameters));
     return 0;
   }
   bool NavigationPending() const { return navigation_pending_; }

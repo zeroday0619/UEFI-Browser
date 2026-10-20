@@ -1,7 +1,11 @@
+#include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
+#include "blink/blob_service.h"
+#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <cstdio>
+#include <limits>
 #include "process/process.h"
 #include <cmath>
 #include <cstring>
@@ -31,10 +35,12 @@
 #include "blink/browser_frame.h"
 #include "blink/remote_frame.h"
 #include "renderer_runtime.h"
+#include "blink/workers.h"
 #include "blink/scheduler.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/public/cpp/bindings/binder_map.h"
 #include "third_party/blink/public/platform/platform.h"
+#include "third_party/blink/public/platform/web_network_state_notifier.h"
 #include "third_party/blink/public/web/blink.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkColor.h"
@@ -607,8 +613,35 @@ struct BrowserContext {
     return handled;
   }
 };
+class FirmwareProcessBroker final : public blink::ThreadSafeBrowserInterfaceBrokerProxy {
+ public:
+  void GetInterfaceImpl(mojo::GenericPendingReceiver receiver) override {
+    if (auto blob = receiver.As<blink::mojom::BlobRegistry>()) {
+      uefi_browser::BindBlobRegistry(std::move(blob));
+      return;
+    }
+    if (receiver.interface_name()) std::printf("PROCESS BROKER: unsupported interface %s\n", receiver.interface_name()->c_str());
+  }
+};
 class FirmwarePlatform final : public blink::Platform {
  public:
+  blink::ThreadSafeBrowserInterfaceBrokerProxy* GetBrowserInterfaceBroker() override {
+    static scoped_refptr<FirmwareProcessBroker> broker = base::MakeRefCounted<FirmwareProcessBroker>();
+    return broker.get();
+  }
+  std::unique_ptr<blink::WebDedicatedWorkerHostFactoryClient>
+  CreateDedicatedWorkerHostFactoryClient(blink::WebDedicatedWorker* worker,
+      const blink::BrowserInterfaceBrokerProxy&) override {
+    return uefi_browser::CreateWorkerHost(worker);
+  }
+  void CreateWebGPUGraphicsContext3DProviderAsync(
+      const blink::WebURL&, WebGPUReplyThread,
+      base::OnceCallback<void(std::unique_ptr<blink::WebGraphicsContext3DProvider>)> callback) override {
+    // A missing device must complete the request so pages can choose a CPU fallback.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(std::move(callback),
+            std::unique_ptr<blink::WebGraphicsContext3DProvider>()));
+  }
   scoped_refptr<base::SingleThreadTaskRunner> GetIOTaskRunner() const override {
     // Firmware I/O and renderer work share the single main-thread event loop.
     return base::SingleThreadTaskRunner::GetCurrentDefault();
@@ -664,6 +697,14 @@ class FirmwarePlatform final : public blink::Platform {
 };
 }
 
+static void InitializeNetworkState() {
+  // Firmware does not report link changes; unknown connectivity must still initialize Blink's state.
+  blink::WebNetworkStateNotifier::SetOnLine(true);
+  blink::WebNetworkStateNotifier::SetWebConnection(
+      blink::kWebConnectionTypeUnknown, std::numeric_limits<double>::infinity());
+  blink::WebNetworkStateNotifier::SetSaveDataEnabled(false);
+}
+
 extern "C" int run_blink_browser(SystemTable* table) {
   setvbuf(stdout, nullptr, _IONBF, 0);
   auto discardable_allocator = uefi_browser::CreateDiscardableAllocator();
@@ -709,6 +750,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
     blink::Platform::InitializeBlink();
     auto scheduler=uefi_browser::CreateScheduler(table,uefi_browser::PollRenderer,nullptr);
     blink::Initialize(&platform,&binders,scheduler.get());
+    InitializeNetworkState();
     int result=uefi_browser::RunRenderer(table,*scheduler);
     scheduler->Shutdown();
     return result;
@@ -745,6 +787,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
   context.run_loop = &run_loop;
   std::puts("BLINK: initialize");
   blink::Initialize(&platform, &binders, scheduler.get());
+  InitializeNetworkState();
   int navigation_result = 0;
   {
     context.scheduler = scheduler.get();

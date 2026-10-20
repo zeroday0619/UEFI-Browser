@@ -1,0 +1,78 @@
+<!doctype html><meta charset="utf-8"><title>IndexedDB integration</title>
+<style>body{font:18px sans-serif;background:#10202b;color:#dcefff;padding:24px}pre{white-space:pre-wrap}</style>
+<h1>IndexedDB integration</h1><pre id="results"></pre>
+<script>
+(async()=>{
+ let checks=0;const output=document.querySelector('#results');
+ function check(condition,name){if(!condition)throw Error(name);++checks;console.log('IDB CHECK '+name);output.textContent+=name+'\n'}
+ function request(operation){return new Promise((resolve,reject)=>{operation.onsuccess=()=>resolve(operation.result);operation.onerror=()=>reject(operation.error)})}
+ function completed(transaction){return new Promise((resolve,reject)=>{transaction.oncomplete=resolve;transaction.onabort=()=>reject(transaction.error||Error('abort'))})}
+ function open(name,version,upgrade){return new Promise((resolve,reject)=>{const operation=indexedDB.open(name,version);operation.onupgradeneeded=()=>upgrade?.(operation.result,operation.transaction);operation.onsuccess=()=>resolve(operation.result);operation.onerror=()=>reject(operation.error)})}
+ async function read(database,store,key){const transaction=database.transaction(store);const done=completed(transaction);const value=await request(transaction.objectStore(store).get(key));await done;return value}
+ async function write(database,store,value,key){const transaction=database.transaction(store,'readwrite');const done=completed(transaction);const result=await request(transaction.objectStore(store).put(value,key));await done;return result}
+ const retained=await open('retained',1,database=>database.createObjectStore('counter'));
+ const generation=(await read(retained,'counter','boot')||0)+1;await write(retained,'counter',generation,'boot');const previousBlob=await read(retained,'counter','blob');
+ if(generation>1)check(previousBlob instanceof Blob&&await previousBlob.text()==='persisted across boots','persistent Blob');else check(previousBlob===undefined,'new profile');
+ await write(retained,'counter',new Blob(['persisted across boots'],{type:'text/plain'}),'blob');retained.close();console.log('IDB GENERATION '+generation);
+ await request(indexedDB.deleteDatabase('integration'));
+ let database=await open('integration',1,database=>{const store=database.createObjectStore('items',{keyPath:'id',autoIncrement:true});store.createIndex('name','name',{unique:true});store.createIndex('tags','tags',{multiEntry:true});database.createObjectStore('raw')});
+ check(database.version===1&&database.objectStoreNames.length===2,'schema upgrade');
+ const first=await write(database,'items',{name:'alpha',tags:['x','y','x'],text:'한글 日本語 العربية'});
+ const second=await write(database,'items',{name:'beta',tags:['y']});check(first===1&&second===2,'generated keys');
+ const value=await read(database,'items',1);check(value.id===1&&value.text==='한글 日本語 العربية','inline generated key and Unicode');
+ let transaction=database.transaction('items');let done=completed(transaction);let store=transaction.objectStore('items');
+ const indexed=request(store.index('name').get('beta')),keys=request(store.index('tags').getAllKeys('y')),count=request(store.index('tags').count('x'));await done;
+ check((await indexed).id===2,'unique index lookup');check(JSON.stringify(await keys)==='[1,2]','multiEntry index keys');check(await count===1,'multiEntry deduplication');
+ transaction=database.transaction('items','readwrite');done=completed(transaction);store=transaction.objectStore('items');
+ let duplicate=false;const failure=store.add({name:'alpha'});failure.onerror=event=>{event.preventDefault();event.stopPropagation();duplicate=failure.error.name==='ConstraintError'};store.put({name:'gamma',tags:['z']});await done;check(duplicate,'handled constraint error');check((await read(database,'items',3)).name==='gamma','key generator rolls back failed request');
+ transaction=database.transaction('items','readwrite');const aborted=new Promise(resolve=>transaction.onabort=resolve);store=transaction.objectStore('items');store.put({name:'rollback'}).onsuccess=()=>transaction.abort();await aborted;check(await read(database,'items',4)===undefined,'transaction abort rollback');
+ check(await write(database,'items',{name:'delta'})===4,'generator rollback on abort');
+ const cursorKeys=[];transaction=database.transaction('items');done=completed(transaction);const cursorRequest=transaction.objectStore('items').openCursor(IDBKeyRange.bound(2,4));cursorRequest.onsuccess=()=>{const cursor=cursorRequest.result;if(cursor){cursorKeys.push(cursor.key);cursor.continue()}};await done;check(JSON.stringify(cursorKeys)==='[2,3,4]','bounded forward cursor');
+ const reverse=[];transaction=database.transaction('items');done=completed(transaction);const reverseRequest=transaction.objectStore('items').openKeyCursor(null,'prev');reverseRequest.onsuccess=()=>{const cursor=reverseRequest.result;if(cursor){reverse.push(cursor.key);cursor.advance(2)}};await done;check(JSON.stringify(reverse)==='[4,2]','reverse cursor advance');
+ const blob=new Blob(['persistent blob 日本語'],{type:'text/plain'}),file=new File(['file contents'],'sample.txt',{type:'text/plain',lastModified:123456});
+ const entropy=new Uint8Array(90000);let randomState=0x12345678;for(let index=0;index<entropy.length;++index){randomState^=randomState<<13;randomState^=randomState>>>17;randomState^=randomState<<5;entropy[index]=randomState>>>24}
+ await write(database,'raw',{blob,file,entropy,large:'x'.repeat(90000),array:new Uint8Array([1,2,255]),date:new Date(1700000000000)},'complex');
+ const complex=await read(database,'raw','complex');check(await complex.blob.text()==='persistent blob 日本語'&&complex.blob.type==='text/plain','Blob round trip');check(await complex.file.text()==='file contents'&&complex.file.name==='sample.txt'&&complex.file.lastModified===123456,'File round trip');check(complex.large.length===90000&&complex.entropy.length===90000&&complex.entropy.every((value,index)=>value===entropy[index])&&complex.array[2]===255&&complex.date.getTime()===1700000000000,'wrapped structured value');
+ database.close();database=await open('integration',2,(database,transaction)=>{transaction.objectStore('items').createIndex('text','text');transaction.objectStore('raw').name='values'});
+ check(database.version===2&&database.objectStoreNames.contains('values'),'schema rename and version');
+ transaction=database.transaction('items');done=completed(transaction);const populated=request(transaction.objectStore('items').index('text').get('한글 日本語 العربية'));await done;check((await populated).id===1,'populate index from existing records');
+ transaction=database.transaction('items','readwrite');done=completed(transaction);store=transaction.objectStore('items');store.delete(IDBKeyRange.bound(2,3));await done;check(await read(database,'items',2)===undefined&&await read(database,'items',4)!==undefined,'range deletion');
+ const list=await indexedDB.databases();check(list.some(item=>item.name==='integration'&&item.version===2),'database enumeration');
+ transaction=database.transaction('items','readwrite');done=completed(transaction);transaction.objectStore('items').clear();await done;check(await read(database,'items',1)===undefined,'clear');
+ database.close();await request(indexedDB.deleteDatabase('integration'));check(!(await indexedDB.databases()).some(item=>item.name==='integration'),'delete database');
+
+ await request(indexedDB.deleteDatabase('bulk'));
+ database=await open('bulk',1,database=>{database.createObjectStore('records');database.createObjectStore('indexes',{keyPath:'id'}).createIndex('group','group')});
+ transaction=database.transaction(['records','indexes'],'readwrite');done=completed(transaction);store=transaction.objectStore('records');store.clear();
+ for(let index=0;index<1010;++index)store.put({index},index);
+ const groups=transaction.objectStore('indexes');groups.clear();groups.put({id:1,group:'a'});groups.put({id:2,group:'a'});groups.put({id:3,group:'b'});await done;
+ transaction=database.transaction('records');done=completed(transaction);const bulk=request(transaction.objectStore('records').getAll());await done;const bulkValues=await bulk;check(bulkValues.length===1010&&bulkValues[1009].index===1009,'chunked getAll');
+ const traversed=[];transaction=database.transaction('records');done=completed(transaction);const prefetched=transaction.objectStore('records').openCursor();prefetched.onsuccess=()=>{const cursor=prefetched.result;if(cursor){traversed.push(cursor.key);if(cursor.key===30)cursor.continue(999);else cursor.continue()}};await done;check(traversed.length===42&&traversed[31]===999&&traversed[41]===1009,'cursor prefetch reset and seek');
+ const unique=[];transaction=database.transaction('indexes');done=completed(transaction);const uniqueCursor=transaction.objectStore('indexes').index('group').openKeyCursor(null,'prevunique');uniqueCursor.onsuccess=()=>{const cursor=uniqueCursor.result;if(cursor){unique.push(cursor.primaryKey);cursor.continue()}};await done;check(JSON.stringify(unique)==='[3,1]','reverse unique selects first primary key');
+ const writer=database.transaction('records','readwrite'),writerDone=completed(writer);writer.objectStore('records').put('serialized','ordering');
+ const reader=database.transaction('records'),readerDone=completed(reader),ordered=request(reader.objectStore('records').get('ordering'));await writerDone;await readerDone;check(await ordered==='serialized','overlapping transactions serialize');
+ database.close();
+ const upgrading=await open('bulk',2,(database,transaction)=>{const store=transaction.objectStore('records');store.createIndex('index','index');const lookup=store.index('index').get(1009);lookup.onsuccess=()=>check(lookup.result.index===1009,'index population precedes upgrade reads')});
+ let blocked=false,changed=false;const upgraded=new Promise((resolve,reject)=>{const operation=indexedDB.open('bulk',3);operation.onblocked=()=>{blocked=true;upgrading.close()};upgrading.onversionchange=()=>{changed=true};operation.onsuccess=()=>resolve(operation.result);operation.onerror=()=>reject(operation.error)});
+ database=await upgraded;check(blocked&&changed&&database.version===3,'blocked version upgrade resumes');database.close();
+ let rejected=false;try{await open('bulk',2)}catch(error){rejected=error.name==='VersionError'}check(rejected,'older version rejected');
+ try{await open('bulk',4,(database,transaction)=>{database.createObjectStore('rolledBack');transaction.abort()})}catch(error){check(error.name==='AbortError','upgrade abort reports error')}
+ database=await open('bulk',3);check(!database.objectStoreNames.contains('rolledBack'),'upgrade metadata rollback');database.close();await request(indexedDB.deleteDatabase('bulk'));
+
+ const isolated=await new Promise((resolve,reject)=>{const frame=document.createElement('iframe');frame.src='https://10.0.2.2:8768/indexeddb-frame.html';const timer=setTimeout(()=>reject(Error('origin check timeout')),10000);function receive(event){if(event.source!==frame.contentWindow||event.origin!=='https://10.0.2.2:8768')return;clearTimeout(timer);window.removeEventListener('message',receive);frame.remove();resolve(event.data.empty)}window.addEventListener('message',receive);document.body.append(frame)});check(isolated,'cross-origin storage isolation');
+ database=await open('key-types',1,database=>database.createObjectStore('values'));
+ const typedKeys=[new Date(1700000000000),new Uint8Array([0,255]).buffer,['array',2],-Infinity,Infinity];
+ transaction=database.transaction('values','readwrite');done=completed(transaction);store=transaction.objectStore('values');for(let index=0;index<typedKeys.length;++index)store.put(index,typedKeys[index]);await done;
+ const typedResults=[];for(const key of typedKeys)typedResults.push(await read(database,'values',key));check(JSON.stringify(typedResults)==='[0,1,2,3,4]','date binary array and infinite keys');database.close();await request(indexedDB.deleteDatabase('key-types'));
+
+ await request(indexedDB.deleteDatabase('quota'));
+ database=await open('quota',1,database=>database.createObjectStore('values'));
+ transaction=database.transaction('values','readwrite');done=completed(transaction);const oversized=transaction.objectStore('values').put(new Blob(['data'],{type:'x'.repeat(4097)}),'oversized');let quota=false;oversized.onerror=event=>{event.preventDefault();event.stopPropagation();quota=oversized.error.name==='QuotaExceededError'};await done;check(quota&&await read(database,'values','oversized')===undefined,'Blob metadata quota rollback');
+ await write(database,'values',{tags:Array.from({length:4097},(_,index)=>index)},'index-source');database.close();
+ let indexQuota=false;try{await open('quota',2,(database,transaction)=>{transaction.onabort=()=>{indexQuota=transaction.error?.name==='QuotaExceededError'};transaction.objectStore('values').createIndex('tags','tags',{multiEntry:true})});throw Error('expected index quota')}catch(error){check(error.name==='AbortError'&&indexQuota,'index population quota')}
+ database=await open('quota',1);check(database.transaction('values').objectStore('values').indexNames.length===0&&(await read(database,'values','index-source')).tags.length===4097,'index quota preserves committed data');
+ database.onversionchange=()=>database.close();let unnecessarilyBlocked=false;const cooperative=indexedDB.open('quota',2);cooperative.onblocked=()=>{unnecessarilyBlocked=true};const reopened=await request(cooperative);check(!unnecessarilyBlocked&&reopened.version===2,'cooperative close avoids blocked event');reopened.close();await request(indexedDB.deleteDatabase('quota'));
+ document.querySelector('h1').textContent='IndexedDB: '+checks+' checks passed';
+ console.log('IDB PASS checks='+checks);output.textContent+='PASS checks='+checks;
+})().catch(error=>{console.error('IDB FAIL '+error.name+': '+error.message+' '+(error.stack||''));document.querySelector('#results').textContent+='FAIL '+error.stack});
+</script>

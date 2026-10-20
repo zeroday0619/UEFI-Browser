@@ -76,10 +76,14 @@ browser_call_on_stack:
     retq
 
 /* The interrupt return clears NMI blocking before the supervisor abandons the payload stack. */
-.globl renderer_trap_nmi,renderer_trap_invalid,renderer_trap_page,renderer_trap_general,renderer_trap_divide
+.globl renderer_trap_breakpoint,renderer_trap_nmi,renderer_trap_invalid,renderer_trap_page,renderer_trap_general,renderer_trap_divide
 renderer_trap_nmi:
     pushq $0
     pushq $2
+    jmp renderer_trap_common
+renderer_trap_breakpoint:
+    pushq $0
+    pushq $3
     jmp renderer_trap_common
 renderer_trap_invalid:
     pushq $0

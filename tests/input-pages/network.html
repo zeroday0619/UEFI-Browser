@@ -1,0 +1,61 @@
+<!doctype html><meta charset="utf-8"><title>Network integration</title>
+<h1>Network integration</h1><pre id="result">Running</pre>
+<form method="post" action="/network/redirect?code=307&amp;to=/network/form">
+<input name="message" value="hello world"><input name="unicode" value="한글">
+<button id="submit" type="submit" style="position:fixed;left:30px;top:140px;width:220px;height:60px">Submit POST</button>
+</form>
+<script>
+(async()=>{
+ let checks=0;
+ const remote=location.protocol+'//10.0.2.2:'+ (location.protocol==='https:'?'8768':'8766');
+ function check(value,name){if(!value)throw Error(name);checks++;console.log('NETWORK CHECK '+checks+' '+name)}
+ async function denied(url,options,name){let rejected=false;try{await fetch(url,options)}catch{rejected=true}check(rejected,name)}
+ check(navigator.onLine===true && typeof navigator.connection.downlink==='number','initialized network state');
+ for(const method of ['GET','POST','PUT','PATCH','DELETE','OPTIONS']){
+   const options={method};if(!['GET','OPTIONS'].includes(method))options.body='hello 한글';
+   const response=await fetch('/network/echo',options);const echo=await response.json();
+   check(echo.method===method && echo.body===(options.body||''),'method '+method);
+ }
+ let response=await fetch('/network/echo',{method:'HEAD'});
+ check(response.status===200 && await response.text()==='' && Number(response.headers.get('content-length'))>0,'HEAD no response body');
+ let echo=await (await fetch('/network/echo',{method:'POST',body:new Uint8Array([0,1,255,13,10])})).json();
+ check(echo.hex==='0001ff0d0a','binary body');
+ echo=await (await fetch('/network/echo',{method:'POST',body:new URLSearchParams({a:'one two',b:'한글'})})).json();
+ check(echo.body==='a=one+two&b=%ED%95%9C%EA%B8%80','urlencoded body');
+ const form=new FormData();form.append('key','formvalue');
+ echo=await (await fetch('/network/echo',{method:'POST',body:form})).json();
+ check(echo.body.includes('formvalue') && Object.values(echo.headers).some(x=>x.startsWith('multipart/form-data; boundary=')),'multipart text body');
+ response=await fetch(remote+'/network/echo');echo=await response.json();
+ check(response.type==='cors' && echo.headers.Origin===location.origin,'CORS origin and response type');
+ check(response.headers.get('x-visible')==='visible' && response.headers.get('x-hidden')===null,'CORS exposed headers');
+ echo=await (await fetch(remote+'/network/echo',{method:'PATCH',headers:{'Content-Type':'application/json','X-Probe':'ok'},body:'{"value":42}'})).json();
+ check(echo.method==='PATCH' && echo.body==='{"value":42}' && echo.headers['X-Probe']==='ok','CORS preflight and body');
+ await denied(remote+'/network/denied-method',{method:'DELETE'},'preflight denied method');
+ await denied(remote+'/network/denied-header',{headers:{'X-Probe':'blocked'}},'preflight denied header');
+ const count=async(path,method)=>(await (await fetch(remote+'/network/count?path='+path+'&method='+method)).json()).count;
+ check(await count('/network/denied-method','DELETE')===0,'denied method never sent');
+ check(await count('/network/denied-header','GET')===0,'denied header request never sent');
+ await denied(remote+'/network/no-cors',{},'missing ACAO');
+ await denied(remote+'/network/duplicate',{},'duplicate ACAO');
+ await denied(remote+'/network/wildcard',{credentials:'include'},'credentialed wildcard');
+ await denied(remote+'/network/echo',{mode:'same-origin'},'same-origin mode');
+ response=await fetch(remote+'/network/no-cors',{mode:'no-cors'});
+ check(response.type==='opaque' && response.status===0 && await response.text()==='','opaque response');
+ for(const code of [301,302,303,307,308]){
+   response=await fetch('/network/redirect?code='+code+'&to=/network/echo',{method:'POST',body:'redirect-body'});
+   echo=await response.json();
+   check(echo.method===(code<307?'GET':'POST') && echo.body===(code<307?'':'redirect-body') && response.redirected,'redirect '+code);
+ }
+ response=await fetch('/network/redirect?to=/network/echo',{redirect:'manual'});
+ check(response.type==='opaqueredirect' && response.status===0,'manual redirect');
+ await denied('/network/redirect?to=/network/echo',{redirect:'error'},'redirect error mode');
+ response=await fetch('/network/redirect?to='+encodeURIComponent(remote+'/network/echo'));
+ echo=await response.json();check(echo.headers.Origin===location.origin && response.type==='cors','cross-origin redirect');
+ const returned=remote+'/network/redirect?to='+encodeURIComponent(location.origin+'/network/echo');
+ echo=await (await fetch(returned)).json();check(echo.headers.Origin==='null','redirect origin taint');
+ await new Promise((resolve,reject)=>{const request=new XMLHttpRequest();request.open('POST',remote+'/network/echo');request.setRequestHeader('X-Probe','xhr');request.onload=()=>{try{check(JSON.parse(request.responseText).body==='xhr-body','XHR POST');resolve()}catch(error){reject(error)}};request.onerror=()=>reject(Error('XHR network'));request.send('xhr-body')});
+ const controller=new AbortController();controller.abort();
+ await denied('/network/echo',{signal:controller.signal},'abort before dispatch');
+ result.textContent='PASS '+checks+' checks';console.log('NETWORK PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('NETWORK FAIL '+error.message)});
+</script>

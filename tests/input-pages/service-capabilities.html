@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>Native service probes</title>
+<style>body{font:18px sans-serif;background:#10202b;color:#dcefff;padding:24px}pre{white-space:pre-wrap}</style>
+<h1>Native service probes</h1><pre id="results"></pre>
+<script>
+(async()=>{
+ const results=[];
+ async function probe(name,run){
+  let timer;
+  try{const details=await Promise.race([run(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),5000)})]);results.push({name,status:'working',details})}
+  catch(error){results.push({name,status:'unavailable',details:String(error)})}
+  finally{clearTimeout(timer)}
+  const record=JSON.stringify(results[results.length-1]);console.log('SERVICE RESULT '+record);document.getElementById('results').textContent+=record+'\n';
+ }
+ await probe('indexeddb',()=>new Promise((resolve,reject)=>{
+  const request=indexedDB.open('service-probe',1);
+  request.onupgradeneeded=()=>request.result.createObjectStore('values');
+  request.onerror=()=>reject(request.error);
+  request.onsuccess=()=>{const database=request.result;const transaction=database.transaction('values','readwrite');transaction.objectStore('values').put('retained','key');transaction.onabort=()=>reject(transaction.error);transaction.oncomplete=()=>{const get=database.transaction('values').objectStore('values').get('key');get.onsuccess=()=>{database.close();get.result==='retained'?resolve('transaction write/read'):reject(Error('mismatched value'))};get.onerror=()=>reject(get.error)}};
+ }));
+ await probe('webgl',async()=>{
+  const canvas=document.createElement('canvas'),context=canvas.getContext('webgl');if(!context)throw Error('no context provider');
+  context.clearColor(1,0,0,1);context.clear(context.COLOR_BUFFER_BIT);const pixel=new Uint8Array(4);context.readPixels(0,0,1,1,context.RGBA,context.UNSIGNED_BYTE,pixel);
+  if(pixel[0]!==255||pixel[1]!==0||pixel[2]!==0)throw Error('incorrect GPU readback');return 'clear/readPixels';
+ });
+ await probe('webgpu',async()=>{if(!navigator.gpu)throw Error('API absent');const adapter=await navigator.gpu.requestAdapter();if(!adapter)throw Error('no adapter');const device=await adapter.requestDevice();device.destroy();return 'adapter/device'});
+ await probe('video-webm',()=>new Promise((resolve,reject)=>{
+  const video=document.createElement('video');video.preload='auto';video.muted=true;video.src='/media-vp8.webm';document.body.append(video);
+  video.onloadeddata=()=>{try{const canvas=document.createElement('canvas');canvas.width=160;canvas.height=120;const context=canvas.getContext('2d');context.drawImage(video,0,0);const pixel=context.getImageData(80,60,1,1).data;if(pixel[0]<180||pixel[1]>60||pixel[2]>60)throw Error('incorrect decoded pixels');resolve('VP8 decoded frame readback')}catch(error){reject(error)}finally{video.remove()}};
+  video.onerror=()=>{video.remove();reject(Error('video error '+video.error?.code))};video.load();
+ }));
+ await probe('media',()=>new Promise((resolve,reject)=>{
+  const audio=document.createElement('audio');audio.preload='auto';audio.muted=true;audio.src='/service-tone.wav';document.body.append(audio);
+  audio.onloadeddata=()=>{audio.remove();resolve('PCM WAV decoded')};audio.onerror=()=>{audio.remove();reject(Error('media error '+audio.error?.code))};audio.load();
+ }));
+ await probe('dedicated-worker',()=>new Promise((resolve,reject)=>{
+  const worker=new Worker('/service-worker-echo.js');
+  worker.onmessage=event=>{worker.terminate();event.data===42?resolve('worker message round trip'):reject(Error('mismatched message'))};
+  worker.onerror=event=>{worker.terminate();reject(Error(event.message||'worker startup error'))};worker.postMessage(41);
+  setTimeout(()=>worker.terminate(),5000);
+ }));
+ console.log('SERVICE PROBES COMPLETE '+JSON.stringify(results));
+})().catch(error=>console.error('SERVICE PROBE ERROR '+error.stack));
+</script>

@@ -7,7 +7,7 @@ extern void renderer_runtime_log(const char *);
 #include <string.h>
 
 static SystemTable *firmware;
-static void *thread_keys[PTHREAD_KEYS_MAX];
+static _Thread_local void *thread_keys[PTHREAD_KEYS_MAX];
 static size_t auxiliary[] = {6, 4096, 0, 0};
 _Static_assert(sizeof(struct pthread) <= 4096,
                "The EFI loader reserves one page for the thread structure.");
@@ -48,14 +48,6 @@ _Noreturn void abort(void) {
   for (;;)
     __asm__ volatile("hlt");
 }
-int pthread_create(pthread_t *thread, const pthread_attr_t *attribute,
-                   void *(*entry)(void *), void *argument) {
-  (void)thread;
-  (void)attribute;
-  (void)entry;
-  (void)argument;
-  return ENOTSUP;
-}
 long __syscall_cp_c(long number, long first, long second, long third,
                     long fourth, long fifth, long sixth) {
   return firmware_syscall(number, first, second, third, fourth, fifth, sixth);
@@ -63,11 +55,11 @@ long __syscall_cp_c(long number, long first, long second, long third,
 
 void *__dso_handle;
 
-static struct {
+static _Thread_local struct {
   void (*callback)(void *);
   void *argument;
 } thread_destructors[1024];
-static size_t thread_destructor_count;
+static _Thread_local size_t thread_destructor_count;
 int __cxa_thread_atexit_impl(void (*callback)(void *), void *argument,
                              void *handle) {
   (void)handle;
@@ -78,7 +70,7 @@ int __cxa_thread_atexit_impl(void (*callback)(void *), void *argument,
   return 0;
 }
 void runtime_finalize_threads(void) {
-  /* The only execution thread exits before global C++ objects are destroyed. */
+  /* Each execution context owns its C++ thread-local destructors. */
   while (thread_destructor_count) {
     size_t index = --thread_destructor_count;
     thread_destructors[index].callback(thread_destructors[index].argument);

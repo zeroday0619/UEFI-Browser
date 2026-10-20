@@ -3,6 +3,9 @@
 // found in the LICENSE file.
 #include "blink/message_pump.h"
 #include "renderer_runtime.h"
+#if defined(UEFI_RUNTIME)
+#include "firmware_threads.h"
+#endif
 #include <algorithm>
 #include <cstdio>
 #include "base/check.h"
@@ -18,6 +21,9 @@ void MessagePump::Run(Delegate* delegate) {
   CHECK(delegate);
   base::TimeTicks last_poll;
   loop_.Run(*delegate, [this, delegate, &last_poll] {
+#if defined(UEFI_RUNTIME)
+    firmware_threads_yield();
+#endif
     auto now = base::TimeTicks::Now();
     if (!last_poll.is_null() && now - last_poll > base::Milliseconds(50))
       std::printf(renderer_runtime_is_child() ? "PERF: renderer_task_gap_us=%lld\n" : "PERF: input_poll_gap_us=%lld\n", static_cast<long long>((now - last_poll).InMicroseconds()));

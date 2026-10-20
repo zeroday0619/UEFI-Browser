@@ -6,7 +6,7 @@ import time
 def run(execute, build, log):
     def healthy():
         text = log.read_text(errors='replace')
-        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type')):
+        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type', 'IDB FAIL', 'MEDIA FAILURE', 'AUDIO FAILURE', 'WORKERS FAILURE', 'RENDERER: runtime abort')):
             raise RuntimeError(text)
         return text
     def snapshot(name):
@@ -41,8 +41,8 @@ def run(execute, build, log):
     def key(*keys):
         execute('send-key', {'keys':[{'type':'qcode','data':name} for name in keys]})
         time.sleep(.3)
-    def wait_marker(marker):
-        deadline = time.monotonic() + 30
+    def wait_marker(marker, timeout=30):
+        deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if marker in healthy(): return
             time.sleep(.2)
@@ -61,6 +61,162 @@ def run(execute, build, log):
             elif character == '_': key('shift','minus')
             elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'workers-limits':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/workers-limits.html'); key('ret')
+        wait_marker('WORKERS LIMIT PASS checks=3', timeout=90)
+        snapshot('workers-limits')
+        print('PASS: worker capacity, recovery and early termination')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'workers':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/workers.html'); key('ret')
+        wait_marker('WORKERS PASS checks=15', timeout=90)
+        snapshot('workers')
+        print('PASS: dedicated worker execution, transfers, fetch, timer, close and recreation')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'audio-limits':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/audio-limits.html'); key('ret')
+        wait_marker('AUDIO LIMIT PASS checks=11', timeout=120)
+        snapshot('audio-limits')
+        print('PASS: bounded audio resources, malformed input and cleanup recovery')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'audio':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/audio.html'); key('ret')
+        wait_marker('AUDIO READY', timeout=90)
+        click(480, 220)
+        wait_marker('AUDIO PASS checks=15', timeout=60)
+        snapshot('audio-complete')
+        print('PASS: audio DMA playback, pause, seek, volume, end and reload; waveform validation follows QEMU shutdown')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'media-boundaries':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/media-boundaries.html'); key('ret')
+        wait_marker('MEDIA BOUNDARIES PASS checks=14', timeout=120)
+        snapshot('media-boundaries')
+        print('PASS: media capability reporting, load failures, origin checks, quota and recovery')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'media':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/media.html'); key('ret')
+        wait_marker('MEDIA READY', timeout=90)
+        def video_pixels(name, channel):
+            width, height, pixels = snapshot(name)
+            for x, y in ((80, 260), (190, 330), (300, 400)):
+                offset = (y * width + x) * 3
+                color = pixels[offset:offset + 3]
+                assert color[channel] > 180 and all(color[index] < 60 for index in range(3) if index != channel), (name, x, y, list(color))
+        video_pixels('media-red', 0)
+        click(480, 220)
+        wait_marker('MEDIA GREEN', timeout=30)
+        video_pixels('media-green', 1)
+        wait_marker('MEDIA BLUE', timeout=30)
+        video_pixels('media-blue', 2)
+        wait_marker('MEDIA PASS checks=20', timeout=40)
+        assert 'MEDIA FAILURE' not in healthy()
+        snapshot('media-complete')
+        print('PASS: VP8/VP9 decode, playback, pause, seek, rate and canvas pixel readback')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'service-capabilities':
+        import json
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/service-capabilities.html'); key('ret')
+        wait_marker('SERVICE PROBES COMPLETE', timeout=80)
+        records = re.findall(r'SERVICE RESULT (\{[^\n]+\})', healthy())
+        assert len(records) == 6, records
+        assert all('timeout' not in json.loads(record)['details'] for record in records), records
+        assert any(json.loads(record)['name'] == 'indexeddb' and json.loads(record)['status'] == 'working' for record in records), records
+        assert any(json.loads(record)['name'] == 'video-webm' and json.loads(record)['status'] == 'working' for record in records), records
+        assert any(json.loads(record)['name'] == 'media' and json.loads(record)['status'] == 'working' for record in records), records
+        assert any(json.loads(record)['name'] == 'dedicated-worker' and json.loads(record)['status'] == 'working' for record in records), records
+        (build / 'service-capabilities-results.json').write_text(json.dumps([json.loads(record) for record in records], indent=2) + '\n')
+        snapshot('service-capabilities')
+        print('Service probes completed; per-API results record availability, not overall support.')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'indexeddb':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/indexeddb.html'); key('ret')
+        wait_marker('IDB PASS checks=37', timeout=160)
+        assert 'IDB FAIL' not in healthy()
+        snapshot('indexeddb-checks')
+        print('PASS: IndexedDB transactions, indexes, cursors and Blob values')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'cache':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/cache.html'); key('ret')
+        wait_marker('CACHE PASS checks=35', timeout=120)
+        snapshot('cache-checks')
+        print('PASS: Cache Storage response bodies, matching, batches, origins and Blob transfer')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'storage-lifecycle':
+        def wait_storage(count, session):
+            deadline = time.monotonic() + 40
+            while time.monotonic() < deadline:
+                content = healthy()
+                assert 'STORAGE FAIL' not in content
+                records = re.findall(r'STORAGE GENERATION local=(\d+) session=(\d+)', content)
+                if content.count('STORAGE PASS checks=14') >= count:
+                    assert len(records) == count and int(records[-1][1]) == session, records
+                    return int(records[-1][0])
+                time.sleep(.2)
+            raise AssertionError('Storage lifecycle timed out')
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/storage.html'); key('ret')
+        first = wait_storage(1, 1)
+        click(260,24,False); assert wait_storage(2, 2) == first + 1
+        key('ctrl','t'); key('ctrl','l'); type_address('http://10.0.2.2:8765/storage.html'); key('ret')
+        assert wait_storage(3, 1) == first + 2
+        key('ctrl','w'); click(260,24,False); assert wait_storage(4, 3) == first + 3
+        snapshot('storage-lifecycle')
+        print('PASS: reload retains session storage; new tabs isolate sessions and share local storage')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'websocket':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/websocket.html'); key('ret')
+        wait_marker('WEBSOCKET PASS checks=17', 100)
+        assert 'WEBSOCKET FAIL' not in healthy()
+        snapshot('websocket-checks')
+        print('PASS: WebSocket text, binary, fragmentation, ping, close, TLS and protocol rejection')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'storage':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/storage.html'); key('ret')
+        wait_marker('STORAGE PASS checks=14')
+        assert 'STORAGE FAIL' not in healthy()
+        snapshot('storage-checks')
+        print('PASS: local/session storage, events, origins, Unicode and quota')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('network', 'network-secure'):
+        secure = os.environ['INPUT_SCENARIO'] == 'network-secure'
+        key('ctrl','l'); type_address(('https://10.0.2.2:8767' if secure else 'http://10.0.2.2:8765') + '/network.html'); key('ret')
+        wait_marker('NETWORK PASS checks=34')
+        assert 'NETWORK FAIL' not in healthy()
+        snapshot('network-checks')
+        click(120,170)
+        wait_marker('NETWORK FORM ')
+        import json
+        record = json.loads(healthy().split('NETWORK FORM ')[-1].splitlines()[0])
+        assert record['method'] == 'POST', record
+        assert record['body'] == 'message=hello+world&unicode=%ED%95%9C%EA%B8%80', record
+        snapshot('network-form')
+        print('PASS: network methods, request bodies, CORS, redirects, XHR and POST form')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'cookies-secure':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/cookie-secure'); key('ret')
+        wait_marker('COOKIE SECURE PASS checks=8')
+        assert 'COOKIE FAIL' not in healthy()
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/cookie-navigation-check'); key('ret')
+        wait_marker('COOKIE navigation=')
+        line=healthy().split('COOKIE navigation=')[-1].splitlines()[0]
+        assert 'secureServer=' not in line and '__Host-secure=' not in line, line
+        print('PASS: HTTPS Secure, HttpOnly, prefixes and plaintext exclusion')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'cookies':
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/cookie-test'); key('ret')
+        wait_marker('COOKIE PASS checks=15')
+        assert 'COOKIE FAIL' not in healthy()
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/cookie-navigation-check'); key('ret')
+        wait_marker('COOKIE navigation=')
+        line=healthy().split('COOKIE navigation=')[-1].splitlines()[0]
+        assert 'server=private' in line and 'public=visible' in line, line
+        assert 'script=hello' not in line, 'Conservative top-level Lax context sent a Strict cookie'
+        print('PASS: cookie script, HTTP, credentials, scope and navigation integration')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-state','scroll-stuck','scroll-state-iframe'):
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-state.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
     if os.environ.get('INPUT_SCENARIO') == 'frame-policy':
         import runpy
         runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'frame-policy.py'))['run'](key,wait_marker,type_address)
@@ -70,7 +226,7 @@ def run(execute, build, log):
         runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-gutter-fallback.py'))['run'](
             execute,build,healthy,move,click,key,wait_marker,type_address)
         return
-    if os.environ.get('INPUT_SCENARIO') in ('scroll-gutter', 'scroll-gutter-root', 'scroll-gutter-horizontal', 'scroll-gutter-container', 'scroll-gutter-iframe', 'scroll-gutter-srcdoc', 'scroll-gutter-nested-frame', 'scroll-gutter-parent-frame'):
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-gutter-state', 'scroll-gutter-topology', 'scroll-gutter-replacement', 'scroll-gutter', 'scroll-gutter-root', 'scroll-gutter-horizontal', 'scroll-gutter-container', 'scroll-gutter-iframe', 'scroll-gutter-srcdoc', 'scroll-gutter-nested-frame', 'scroll-gutter-parent-frame'):
         import runpy
         runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-gutter.py'))['run'](
             execute,build,healthy,move,click,key,wait_marker,type_address)
@@ -412,12 +568,28 @@ def run(execute, build, log):
             assert 'ISOLATION ready' in healthy()[offset:]
             time.sleep(1); click(280,50)
             assert 'ISOLATION click' in healthy()[offset:]
+            disassembly=subprocess.check_output(['llvm-objdump','-d','--disassemble-symbols=_ZN5angle13BreakDebuggerEv',str(build/'payload.elf')],text=True)
+            breakpoint=re.search(r'^\s*([0-9a-f]+):.*\bint3\b',disassembly,re.M)
+            assert breakpoint, disassembly
+            offset=len(healthy())
+            subprocess.run(['gdb','-q','-batch','-ex','target remote 127.0.0.1:'+os.environ['QEMU_TEST_GDB_PORT'],
+                '-ex','thread 2','-ex','set $rip = 0x'+breakpoint.group(1),'-ex','detach'],check=True)
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy()[offset:]: time.sleep(.02)
+            assert 'vector=3' in healthy()[offset:]
+            assert 'RENDERER: recovery launched' in healthy()[offset:]
+            click(260,24,False)
+            deadline=time.monotonic()+20
+            while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
+            assert 'ISOLATION ready' in healthy()[offset:]
+            time.sleep(1); click(280,50)
+            assert 'ISOLATION click' in healthy()[offset:]
         tracked=re.findall(r'reclaimed broker allocations=([0-9]+) tracked=([0-9]+)',healthy())
-        assert len(tracked)==4 and all(freed==owned for freed,owned in tracked), tracked
+        assert len(tracked)==(5 if os.environ.get('QEMU_TEST_GDB_PORT') else 2) and all(freed==owned for freed,owned in tracked), tracked
         selection_start=len(healthy()); key('ctrl','2')
         assert 'TABS: selected id=2 count=2' in healthy()[selection_start:]
         key('ctrl','1'); snapshot('renderer-recovered')
-        print('PASS: infinite JavaScript termination, monitor button, page fault, invalid opcode and renderer recovery')
+        print('PASS: infinite JavaScript termination, monitor button, page fault, invalid opcode, breakpoint and renderer recovery')
         return
     if os.environ.get('INPUT_SCENARIO') == 'renderer-blocking':
         import json
@@ -1033,7 +1205,7 @@ def run(execute, build, log):
         assert expect_url('/second.html')[1] == count
         loads = healthy().count('INPUT_TEST second document loaded')
         button(2)
-        deadline = time.monotonic() + 30
+        deadline = time.monotonic() + timeout
         while healthy().count('INPUT_TEST second document loaded') <= loads and time.monotonic() < deadline: time.sleep(.2)
         assert healthy().count('INPUT_TEST second document loaded') > loads, 'Reload did not load the document again'
         assert history()[1] == count, 'Reload appended a history entry'

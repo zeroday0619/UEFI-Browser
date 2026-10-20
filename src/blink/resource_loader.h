@@ -7,7 +7,7 @@
 #include "base/memory/scoped_refptr.h"
 #include "network/resource.h"
 #include "url/origin.h"
-namespace base { class SingleThreadTaskRunner; }
+namespace base { class SingleThreadTaskRunner; class WaitableEvent; }
 namespace blink { class URLLoader; }
 namespace uefi_browser {
 #if defined(UEFI_RUNTIME)
@@ -18,6 +18,7 @@ void UninstallResourceLoader();
 // The document origin is supplied by the embedder, not by the request.
 std::unique_ptr<blink::URLLoader> CreateResourceLoader(
     SystemTable* table, const url::Origin& document_origin,
-    scoped_refptr<base::SingleThreadTaskRunner> task_runner);
+    scoped_refptr<base::SingleThreadTaskRunner> task_runner,
+    base::WaitableEvent* termination_event = nullptr);
 }
 #endif

@@ -27,7 +27,8 @@ std::unique_ptr<NavigationRequest> LoadNavigation(SystemTable *table, blink::Web
                       blink::WebFrameLoadType load_type = blink::WebFrameLoadType::kStandard,
                       blink::WebHistoryItem history_item = {},
                       base::OnceCallback<void(Status)> completion = {},
-                      std::unique_ptr<blink::WebNavigationParams> parameters = {});
+                      std::unique_ptr<blink::WebNavigationParams> parameters = {},
+                      bool allow_cookies = true);
 void PaintFrame(blink::WebView &view, blink::WebFrameWidget &widget,
                 SkCanvas &canvas, const gfx::Rect &viewport);
 } // namespace uefi_browser

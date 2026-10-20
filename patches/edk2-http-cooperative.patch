@@ -4,20 +4,20 @@ index 13cbde0..6c08b27 100644
 +++ b/NetworkPkg/HttpDxe/HttpDns.c
 @@ -151,6 +151,7 @@ HttpDns4 (
    }
- 
+
    while (!IsDone) {
 +    BrowserYield ();
      Dns4->Poll (Dns4);
    }
- 
+
 @@ -353,6 +354,7 @@ HttpDns6 (
    }
- 
+
    while (!IsDone) {
 +    BrowserYield ();
      Dns6->Poll (Dns6);
    }
- 
+
 diff --git a/NetworkPkg/HttpDxe/HttpDriver.c b/NetworkPkg/HttpDxe/HttpDriver.c
 index f6d1263..69e6aaa 100644
 --- a/NetworkPkg/HttpDxe/HttpDriver.c
@@ -50,7 +50,7 @@ index f6d1263..69e6aaa 100644
                      NULL
                      );
 @@ -534,7 +534,7 @@ HttpDxeStop (
- 
+
    Status = gBS->OpenProtocol (
                    NicHandle,
 -                  &gEfiHttpServiceBindingProtocolGuid,
@@ -90,29 +90,41 @@ index 21d0f33..af34464 100644
 +  if (!EFI_ERROR (gBS->LocateProtocol (&Identifier, NULL, (VOID **)&Protocol))) Protocol->Yield ();
 +}
 +#endif
+diff --git a/NetworkPkg/HttpDxe/HttpImpl.c b/NetworkPkg/HttpDxe/HttpImpl.c
+index 7ce6882..0bd4b67 100644
+--- a/NetworkPkg/HttpDxe/HttpImpl.c
++++ b/NetworkPkg/HttpDxe/HttpImpl.c
+@@ -298,6 +298,7 @@ EfiHttpRequest (
+       case HttpMethodPut:
+       case HttpMethodPost:
+       case HttpMethodPatch:
++      case HttpMethodOptions:
+         break;
+       case HttpMethodConnect:
+         ConnRequest = (EFI_HTTP_CONNECT_REQUEST_DATA *)Request;
 diff --git a/NetworkPkg/HttpDxe/HttpProto.c b/NetworkPkg/HttpDxe/HttpProto.c
 index 9fac19a..0306855 100644
 --- a/NetworkPkg/HttpDxe/HttpProto.c
 +++ b/NetworkPkg/HttpDxe/HttpProto.c
 @@ -974,6 +974,7 @@ HttpCreateConnection (
      }
- 
+
      while (!HttpInstance->IsTcp4ConnDone) {
 +      BrowserYield ();
        HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
      }
- 
+
 @@ -989,6 +990,7 @@ HttpCreateConnection (
      }
- 
+
      while (!HttpInstance->IsTcp6ConnDone) {
 +      BrowserYield ();
        HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
      }
- 
+
 @@ -1028,6 +1030,7 @@ HttpCloseConnection (
        }
- 
+
        while (!HttpInstance->IsTcp6CloseDone) {
 +        BrowserYield ();
          HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
@@ -120,7 +132,7 @@ index 9fac19a..0306855 100644
      } else {
 @@ -1039,6 +1042,7 @@ HttpCloseConnection (
        }
- 
+
        while (!HttpInstance->IsTcp4CloseDone) {
 +        BrowserYield ();
          HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
@@ -128,40 +140,40 @@ index 9fac19a..0306855 100644
      }
 @@ -1907,6 +1911,7 @@ HttpTcpReceiveHeader (
          }
- 
+
          while (!HttpInstance->IsRxDone && ((Timeout == NULL) || EFI_ERROR (gBS->CheckEvent (Timeout)))) {
 +          BrowserYield ();
            Tcp4->Poll (Tcp4);
          }
- 
+
 @@ -2007,6 +2012,7 @@ HttpTcpReceiveHeader (
          }
- 
+
          while (!HttpInstance->IsRxDone && ((Timeout == NULL) || EFI_ERROR (gBS->CheckEvent (Timeout)))) {
 +          BrowserYield ();
            Tcp6->Poll (Tcp6);
          }
- 
+
 diff --git a/NetworkPkg/HttpDxe/HttpsSupport.c b/NetworkPkg/HttpDxe/HttpsSupport.c
 index 4527cc6..504985b 100644
 --- a/NetworkPkg/HttpDxe/HttpsSupport.c
 +++ b/NetworkPkg/HttpDxe/HttpsSupport.c
 @@ -827,6 +827,7 @@ TlsCommonTransmit (
      }
- 
+
      while (!HttpInstance->TlsIsTxDone) {
 +      BrowserYield ();
        HttpInstance->Tcp4->Poll (HttpInstance->Tcp4);
      }
- 
+
 @@ -859,6 +860,7 @@ TlsCommonTransmit (
      }
- 
+
      while (!HttpInstance->TlsIsTxDone) {
 +      BrowserYield ();
        HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
      }
- 
+
 @@ -961,8 +963,10 @@ TlsCommonReceive (
        // Poll until some data is received or an error occurs.
        //
@@ -173,3 +185,19 @@ index 4527cc6..504985b 100644
          HttpInstance->Tcp6->Poll (HttpInstance->Tcp6);
        }
      }
+diff --git a/NetworkPkg/Library/DxeHttpLib/DxeHttpLib.c b/NetworkPkg/Library/DxeHttpLib/DxeHttpLib.c
+index 58bcf07..c32928c 100644
+--- a/NetworkPkg/Library/DxeHttpLib/DxeHttpLib.c
++++ b/NetworkPkg/Library/DxeHttpLib/DxeHttpLib.c
+@@ -1907,6 +1907,11 @@ HttpGenRequestMessage (
+         CopyMem (RequestPtr, HTTP_METHOD_PUT, StrLength);
+         RequestPtr += StrLength;
+         break;
++      case HttpMethodOptions:
++        StrLength = sizeof ("OPTIONS") - 1;
++        CopyMem (RequestPtr, "OPTIONS", StrLength);
++        RequestPtr += StrLength;
++        break;
+       case HttpMethodPatch:
+         StrLength = sizeof (HTTP_METHOD_PATCH) - 1;
+         CopyMem (RequestPtr, HTTP_METHOD_PATCH, StrLength);

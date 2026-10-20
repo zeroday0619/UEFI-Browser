@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Scrollable query snapshots</title>
+<style>
+body{margin:0;background:#eeeeee;font:20px sans-serif}button{position:fixed;left:30px;top:20px;width:220px;height:44px}
+#box{position:absolute;left:60px;top:120px;width:500px;height:540px;overflow:auto;container-type:scroll-state;background:white;overflow-anchor:none}
+#status{position:sticky;top:0;display:flex;height:40px;z-index:2}#top,#bottom{width:160px;height:40px}
+#top{background:#ee2244}#bottom{background:#2255cc}
+#text{font:24px/32px monospace}#marker{height:12px;background:#ff0088}
+@container scroll-state(scrollable:top){#top{background:#22cc66}#text{font-size:28px;line-height:36px}}
+@container not scroll-state(scrollable:bottom){#bottom{background:#eebb22}}
+</style>
+<button id="start">Block JavaScript 25s</button>
+<div id="box" tabindex="0"><div id="status"><div id="top"></div><div id="bottom"></div></div><p id="text"></p><div id="marker"></div></div>
+<script>
+text.textContent='alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma. '.repeat(12);
+start.onclick=()=>setTimeout(()=>{console.log('STATE begin');let end=performance.now()+25000;while(performance.now()<end){}console.log('STATE end')},1500);
+box.onscroll=()=>console.log('STATE offset='+box.scrollTop+' height='+box.scrollHeight);
+console.log('STATE ready');
+</script>

@@ -10,6 +10,8 @@ This document records the current licensing inventory for publication preparatio
 | Blink | File-specific terms, including BSD and GNU Library General Public License version 2 or later | [LGPL v2 text](licenses/LGPL-2.0.txt); upstream file headers determine scope; full binary inventory pending |
 | V8 | BSD-style license and separately licensed external components | [V8](licenses/v8.txt) |
 | Skia and skcms | BSD-style licenses; linked dependencies retain their own terms | [Skia](licenses/skia.txt), [skcms](licenses/skcms.txt) |
+| libvpx | BSD-style license and separate patent grant for the bundled VP8/VP9 decoder; additional third-party files retain their own terms | [License](licenses/libvpx-LICENSE), [patent grant](licenses/libvpx-PATENTS) |
+| libyuv | BSD-style license and separate patent grant for pixel conversion | [License](licenses/libyuv-LICENSE), [patent grant](licenses/libyuv-PATENTS) |
 | musl 1.2.5 | MIT overall, with exceptions identified in COPYRIGHT | [musl](licenses/musl-COPYRIGHT) |
 | LLVM libc++, libc++abi and libc | Apache-2.0 with LLVM exceptions; preserve complete bundled notices | [libc++](licenses/libc++-LICENSE.TXT), [libc++abi](licenses/libc++abi-LICENSE.TXT), [libc](licenses/llvm-libc.txt) |
 | EDK II | BSD-2-Clause-Patent for covered code; package-specific exceptions require inventory | [EDK II](licenses/EDK-II.txt) |

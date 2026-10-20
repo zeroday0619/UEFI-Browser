@@ -1179,6 +1179,94 @@ diff --git a/third_party/blink/renderer/core/dom/document.cc b/third_party/blink
 +#endif
    if (!dom_window_)
      return false;
+diff --git a/third_party/blink/renderer/core/loader/cookie_jar.cc b/third_party/blink/renderer/core/loader/cookie_jar.cc
+index d876cba3ba..9c70f9dd83 100644
+--- a/third_party/blink/renderer/core/loader/cookie_jar.cc
++++ b/third_party/blink/renderer/core/loader/cookie_jar.cc
+@@ -5,2 +5,5 @@
+ #include "third_party/blink/renderer/core/loader/cookie_jar.h"
++#if defined(UEFI_RUNTIME)
++#include "third_party/blink/uefi/src/blink/cookies.h"
++#endif
+
+@@ -79,2 +82,6 @@ void CookieJar::Trace(Visitor* visitor) const {
+ bool CookieJar::SetCookie(const String& value) {
++#if defined(UEFI_RUNTIME)
++  if (!CookiesEnabled()) return false;
++  return uefi_browser::StoreCookie(GURL(document_->CookieURL()),value.Utf8(),true);
++#endif
+   TRACE_EVENT("blink", "CookieJar::SetCookie");
+@@ -122,2 +129,6 @@ void CookieJar::OnBackendDisconnect() {
+ String CookieJar::Cookies() {
++#if defined(UEFI_RUNTIME)
++  if (!CookiesEnabled()) return String();
++  return String::FromUtf8(uefi_browser::CookieHeader(GURL(document_->CookieURL()),true));
++#endif
+   TRACE_EVENT("blink", "CookieJar::Cookies");
+@@ -224,2 +235,7 @@ String CookieJar::Cookies() {
+ bool CookieJar::CookiesEnabled() {
++#if defined(UEFI_RUNTIME)
++  return !document_->GetExecutionContext()->GetSecurityOrigin()->IsOpaque() &&
++      GURL(document_->CookieURL()).SchemeIsHTTPOrHTTPS() &&
++      document_->SiteForCookies().IsFirstParty(GURL(document_->CookieURL()));
++#endif
+   KURL cookie_url = document_->CookieURL();
+diff --git a/third_party/blink/renderer/core/css/container_query_evaluator.h b/third_party/blink/renderer/core/css/container_query_evaluator.h
+index a5f0d2a485..55de42ff06 100644
+--- a/third_party/blink/renderer/core/css/container_query_evaluator.h
++++ b/third_party/blink/renderer/core/css/container_query_evaluator.h
+@@ -69,2 +69,5 @@ class CORE_EXPORT ContainerQueryEvaluator final
+   bool DependsOnScrollable() const { return depends_on_scrollable_; }
++#if defined(UEFI_RUNTIME)
++  ScrollStateQuerySnapshot* UefiScrollStateSnapshot() const { return scroll_state_snapshot_.Get(); }
++#endif
+   bool DependsOnScrolled() const { return depends_on_scrolled_; }
+diff --git a/third_party/blink/renderer/core/css/scroll_state_query_snapshot.h b/third_party/blink/renderer/core/css/scroll_state_query_snapshot.h
+index b44e6c9a4f..7e8edde867 100644
+--- a/third_party/blink/renderer/core/css/scroll_state_query_snapshot.h
++++ b/third_party/blink/renderer/core/css/scroll_state_query_snapshot.h
+@@ -42,2 +42,15 @@ class ScrollStateQuerySnapshot
+
++#if defined(UEFI_RUNTIME)
++  // Speculative reflows evaluate finite scrollable states without scrolling the live DOM.
++  void OverrideStuckForUefi(int horizontal, int vertical) {
++    uefi_stuck_horizontal_ = horizontal;
++    uefi_stuck_vertical_ = vertical;
++    UpdateSnapshot();
++  }
++  void OverrideForUefi(int horizontal, int vertical) {
++    uefi_horizontal_ = horizontal;
++    uefi_vertical_ = vertical;
++    UpdateSnapshot();
++  }
++#endif
+   // PostLayoutSnapshotClient:
+@@ -51,2 +64,8 @@ class ScrollStateQuerySnapshot
+
++#if defined(UEFI_RUNTIME)
++  int uefi_stuck_horizontal_ = -1;
++  int uefi_stuck_vertical_ = -1;
++  int uefi_horizontal_ = -1;
++  int uefi_vertical_ = -1;
++#endif
+   Member<Element> container_;
+diff --git a/third_party/blink/renderer/core/css/scroll_state_query_snapshot.cc b/third_party/blink/renderer/core/css/scroll_state_query_snapshot.cc
+index 8fe275edc8..8ceafa6b50 100644
+--- a/third_party/blink/renderer/core/css/scroll_state_query_snapshot.cc
++++ b/third_party/blink/renderer/core/css/scroll_state_query_snapshot.cc
+@@ -80,2 +80,12 @@ bool ScrollStateQuerySnapshot::UpdateSnapshot() {
+   }
++#if defined(UEFI_RUNTIME)
++  if (uefi_stuck_horizontal_ >= 0) {
++    stuck_horizontal = static_cast<ContainerStuckPhysical>(uefi_stuck_horizontal_);
++    stuck_vertical = static_cast<ContainerStuckPhysical>(uefi_stuck_vertical_);
++  }
++  if (uefi_horizontal_ >= 0) {
++    scrollable_horizontal = static_cast<ContainerScrollableFlags>(uefi_horizontal_);
++    scrollable_vertical = static_cast<ContainerScrollableFlags>(uefi_vertical_);
++  }
++#endif
+   std::swap(stuck_horizontal_, stuck_horizontal);
 diff --git a/third_party/blink/renderer/core/layout/custom_scrollbar.cc b/third_party/blink/renderer/core/layout/custom_scrollbar.cc
 index 6c99a3ad6b..6f06a2fe0e 100644
 --- a/third_party/blink/renderer/core/layout/custom_scrollbar.cc
@@ -1462,3 +1550,164 @@ index d7f8d22de5..aee99a02f1 100644
 +    return;
 +#endif
    if (queued_) {
+diff --git a/base/files/scoped_file_linux.cc b/base/files/scoped_file_linux.cc
+index f911af6b45..73dd031abb 100644
+--- a/base/files/scoped_file_linux.cc
++++ b/base/files/scoped_file_linux.cc
+@@ -5,6 +5,10 @@
+ #include "base/files/scoped_file.h"
+
+ #include <dlfcn.h>
++#if defined(UEFI_RUNTIME)
++#include <sys/syscall.h>
++#include <unistd.h>
++#endif
+
+ #include <algorithm>
+ #include <array>
+@@ -86,8 +90,16 @@ bool IsFDOwned(int fd) {
+ using LibcCloseFuncPtr = int (*)(int);
+
+ // Load the libc close symbol to forward to from the close wrapper.
++#if defined(UEFI_RUNTIME)
++int FirmwareClose(int descriptor) {
++  return static_cast<int>(syscall(SYS_close, descriptor));
++}
++#endif
+ LibcCloseFuncPtr LoadCloseSymbol() {
+-#if defined(THREAD_SANITIZER)
++#if defined(UEFI_RUNTIME)
++  // The static EFI image has no next dynamic libc object to resolve.
++  return FirmwareClose;
++#elif defined(THREAD_SANITIZER)
+   // If TSAN is enabled use __interceptor___close first to make sure the TSAN
+   // wrapper gets called.
+   return reinterpret_cast<LibcCloseFuncPtr>(
+diff --git a/third_party/blink/renderer/modules/storage/storage_controller.cc b/third_party/blink/renderer/modules/storage/storage_controller.cc
+index 17045a9ece..dd04cbbb81 100644
+--- a/third_party/blink/renderer/modules/storage/storage_controller.cc
++++ b/third_party/blink/renderer/modules/storage/storage_controller.cc
+@@ -27,6 +27,10 @@ const size_t kStorageControllerTotalCacheLimitInBytes = 5 * 1024 * 1024;
+
+ StorageController::DomStorageConnection GetDomStorageConnection() {
+   StorageController::DomStorageConnection connection;
++#if defined(UEFI_RUNTIME)
++  // Firmware binds areas synchronously before the first blocking GetAll call.
++  return connection;
++#endif
+   mojo::Remote<mojom::blink::DomStorageProvider> provider;
+   Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
+       provider.BindNewPipeAndPassReceiver());
+diff --git a/third_party/blink/renderer/modules/storage/storage_namespace.cc b/third_party/blink/renderer/modules/storage/storage_namespace.cc
+index f097dc8491..b62ce4e10c 100644
+--- a/third_party/blink/renderer/modules/storage/storage_namespace.cc
++++ b/third_party/blink/renderer/modules/storage/storage_namespace.cc
+@@ -42,6 +42,10 @@
+ #include "third_party/blink/renderer/modules/storage/storage_controller.h"
+ #include "third_party/blink/renderer/platform/weborigin/security_origin.h"
+
++#if defined(UEFI_RUNTIME)
++#include "third_party/blink/uefi/src/blink/web_storage.h"
++#endif
++
+ namespace blink {
+
+ const char StorageNamespace::kSupplementName[] = "SessionStorageNamespace";
+@@ -229,6 +233,10 @@ void StorageNamespace::BindStorageArea(
+     const BlinkStorageKey& storage_key,
+     const LocalFrameToken& local_frame_token,
+     mojo::PendingReceiver<mojom::blink::StorageArea> receiver) {
++#if defined(UEFI_RUNTIME)
++  BindFirmwareStorageArea(storage_key, local_frame_token, namespace_id_, std::move(receiver));
++  return;
++#endif
+   if (IsSessionStorage()) {
+     controller_->dom_storage()->BindSessionStorageArea(
+         storage_key, local_frame_token, namespace_id_, std::move(receiver));
+@@ -248,6 +256,10 @@ void StorageNamespace::EnsureConnected() {
+   DCHECK(IsSessionStorage());
+   if (namespace_.is_bound())
+     return;
++#if defined(UEFI_RUNTIME)
++  BindFirmwareStorageNamespace(namespace_id_, namespace_.BindNewPipeAndPassReceiver(task_runner_));
++  return;
++#endif
+   controller_->dom_storage()->BindSessionStorageNamespace(
+       namespace_id_, namespace_.BindNewPipeAndPassReceiver(task_runner_));
+ }
+diff --git a/third_party/blink/renderer/platform/blob/blob_bytes_provider.cc b/third_party/blink/renderer/platform/blob/blob_bytes_provider.cc
+--- a/third_party/blink/renderer/platform/blob/blob_bytes_provider.cc
++++ b/third_party/blink/renderer/platform/blob/blob_bytes_provider.cc
+@@ -139,6 +139,11 @@
+   DCHECK_CALLED_ON_VALID_SEQUENCE(provider->sequence_checker_);
+   DETACH_FROM_SEQUENCE(provider->sequence_checker_);
+
++#if defined(UEFI_RUNTIME)
++  // Firmware byte transfers use the renderer sequence until native worker threads are available.
++  mojo::MakeSelfOwnedReceiver(std::move(provider), std::move(receiver));
++  return;
++#endif
+   auto task_runner = base::ThreadPool::CreateSequencedTaskRunner(
+       {base::MayBlock(), base::TaskPriority::USER_VISIBLE});
+   // TODO(mek): Consider binding BytesProvider on the IPC thread instead, only
+diff --git a/third_party/blink/renderer/core/workers/dedicated_worker.cc b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+--- a/third_party/blink/renderer/core/workers/dedicated_worker.cc
++++ b/third_party/blink/renderer/core/workers/dedicated_worker.cc
+@@ -292,6 +292,16 @@
+     return;
+   }
+
++#if defined(UEFI_RUNTIME)
++  if (!factory_client_) {
++    // Report unavailable worker hosts asynchronously so callers can install an error handler.
++    GetExecutionContext()->GetTaskRunner(TaskType::kInternalLoading)->PostTask(
++        FROM_HERE, BindOnce(&DedicatedWorker::OnScriptLoadStartFailed,
++                            WrapWeakPersistent(this)));
++    return;
++  }
++#endif
++
+   start_time_ = base::TimeTicks::Now();
+
+   // Capture the initiator URL and propagate it to DedicatedWorkerGlobalScope
+
+diff --git a/third_party/blink/renderer/core/paint/video_painter.cc b/third_party/blink/renderer/core/paint/video_painter.cc
+--- a/third_party/blink/renderer/core/paint/video_painter.cc
++++ b/third_party/blink/renderer/core/paint/video_painter.cc
+@@ -76,6 +76,10 @@
+   // images via web APIs.
+   bool force_software_video_paint =
+       paint_info.ShouldOmitCompositingInfo() && !force_video_poster;
++#if defined(UEFI_RUNTIME)
++  // The firmware renderer records software paint without a compositor layer.
++  force_software_video_paint = !force_video_poster;
++#endif
+
+   bool paint_with_foreign_layer = paint_info.phase == PaintPhase::kForeground &&
+                                   !should_display_poster &&
+
+diff --git a/third_party/blink/renderer/core/html/media/html_media_element.cc b/third_party/blink/renderer/core/html/media/html_media_element.cc
+index 551e24456e..47381e0a33 100644
+--- a/third_party/blink/renderer/core/html/media/html_media_element.cc
++++ b/third_party/blink/renderer/core/html/media/html_media_element.cc
+@@ -385,6 +385,20 @@ MIMETypeRegistry::SupportsType HTMLMediaElement::GetSupportsType(
+   // The codecs string is not lower-cased because MP4 values are case sensitive
+   // per http://tools.ietf.org/html/rfc4281#page-7.
+   String type_codecs = content_type.Parameter("codecs");
++#if defined(UEFI_RUNTIME)
++  // PCM WAV uses the firmware audio device; WebM remains video-only.
++  if (type == "audio/wav" || type == "audio/x-wav" || type == "audio/wave")
++    return type_codecs.empty() || type_codecs == "1"
++               ? MIMETypeRegistry::kMaybeSupported : MIMETypeRegistry::kNotSupported;
++  if (type != "video/webm")
++    return MIMETypeRegistry::kNotSupported;
++  if (type_codecs.empty())
++    return MIMETypeRegistry::kMaybeSupported;
++  if (type_codecs == "vp8" || type_codecs == "vp8.0" ||
++      type_codecs == "vp9" || type_codecs == "vp9.0")
++    return MIMETypeRegistry::kSupported;
++  return MIMETypeRegistry::kNotSupported;
++#endif
+
+   if (type.empty())
+     return MIMETypeRegistry::kNotSupported;

@@ -189,7 +189,29 @@ Status resource_get(SystemTable *table, const char *url,
 Status resource_get_with_headers(SystemTable *table, const char *url,
                                  const Header *extra_headers, size_t extra_count,
                                  ResourceResponse *response) {
+  ResourceRequestSpec request = {url, "GET", extra_headers, extra_count, NULL, 0};
+  return resource_request(table, &request, response);
+}
+
+static int method_index(const char *method) {
+  static const char *methods[] = {"GET", "POST", "PATCH", "OPTIONS", NULL, "HEAD", "PUT", "DELETE"};
+  if (!method) return -1;
+  for (size_t index = 0; index < sizeof(methods) / sizeof(methods[0]); ++index)
+    if (methods[index] && !strcmp(method, methods[index])) return (int)index;
+  return -1;
+}
+int resource_method_supported(const char *method) { return method_index(method) >= 0; }
+
+Status resource_request(SystemTable *table, const ResourceRequestSpec *spec,
+                        ResourceResponse *response) {
   memset(response, 0, sizeof(*response));
+  if (!spec || !spec->url || method_index(spec->method) < 0 ||
+      spec->body_length > RESOURCE_BODY_LIMIT || (spec->body_length && !spec->body) ||
+      (spec->body_length && (!strcmp(spec->method, "GET") || !strcmp(spec->method, "HEAD"))))
+    return ERROR(2);
+  const char *url = spec->url;
+  const Header *extra_headers = spec->headers;
+  size_t extra_count = spec->header_count;
   if (extra_count > 64 || (extra_count && !extra_headers))
     return ERROR(2);
   size_t header_bytes = 0;
@@ -285,7 +307,7 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
   result = http->configure(http, &config);
   if (result)
     goto finish;
-  Header headers[69] = {{"Host", host},
+  Header headers[70] = {{"Host", host},
                       {"User-Agent", (char *)firmware_browser_user_agent_for_url(url)},
                       {"Accept", "*/*"},
                       {"Accept-Encoding", "identity"},
@@ -306,8 +328,14 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
     else
       headers[request_header_count++] = extra_headers[index];
   }
-  Request request = {0, wide_url};
-  Message message = {&request, request_header_count, headers, 0, NULL};
+  char content_length[32];
+  if (spec->body || !strcmp(spec->method, "POST") || !strcmp(spec->method, "PUT") ||
+      !strcmp(spec->method, "PATCH")) {
+    snprintf(content_length, sizeof(content_length), "%zu", spec->body_length);
+    headers[request_header_count++] = (Header){"Content-Length", content_length};
+  }
+  Request request = {(uint32_t)method_index(spec->method), wide_url};
+  Message message = {&request, request_header_count, headers, spec->body_length, (void *)spec->body};
   result = transfer(table, http, &message, 0);
   if (result)
     goto finish;
@@ -322,6 +350,7 @@ Status resource_get_with_headers(SystemTable *table, const char *url,
   release_headers(table, &message);
   if (result)
     goto finish;
+  if (!strcmp(spec->method, "HEAD")) goto finish;
   size_t expected = 0;
   int known = 0, chunked = 0;
   for (size_t index = 0; index < response->header_count; index++) {

@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "blink/navigation.h"
+#include "blink/cookies.h"
 #include "blink/browser_settings.h"
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include "base/time/time.h"
 #include "cc/paint/skia_paint_canvas.h"
 #include "net/http/http_util.h"
+#include "net/base/port_util.h"
 #include "base/check.h"
 #include "services/network/public/cpp/web_sandbox_flags.h"
 #include "content/renderer/content_security_policy_util.h"
@@ -107,6 +109,8 @@ blink::WebURLResponse ConvertResponse(const GURL &url,
                                       const ResourceResponse &resource) {
   blink::WebURLResponse response{blink::WebURL(blink::KURL(url))};
   response.SetHttpStatusCode(resource.status_code);
+  // The firmware response does not expose a reason phrase; Mojo requires a non-null string.
+  response.SetHttpStatusText(blink::WebString::FromUtf8(""));
   response.SetExpectedContentLength(resource.length);
   std::string mime_type;
   std::string charset;
@@ -131,14 +135,25 @@ class AsyncNavigation final : public NavigationRequest {
   AsyncNavigation(SystemTable* system, blink::WebNavigationControl& navigation,
       const char* address, std::unique_ptr<blink::WebPolicyContainer> container,
       blink::WebFrameLoadType load_type, blink::WebHistoryItem item,
-      base::OnceCallback<void(Status)> callback, std::unique_ptr<blink::WebNavigationParams> initial)
+      base::OnceCallback<void(Status)> callback, std::unique_ptr<blink::WebNavigationParams> initial, bool allow_cookies)
       : table(system), frame(navigation), url(address), policy(std::move(container)),
-        parameters(initial ? std::move(initial) : std::make_unique<blink::WebNavigationParams>()), completion(std::move(callback)) {
+        cookies_allowed(allow_cookies), parameters(initial ? std::move(initial) : std::make_unique<blink::WebNavigationParams>()), completion(std::move(callback)) {
     parameters->navigation_timings.navigation_start = base::TimeTicks::Now();
     parameters->frame_load_type = load_type;
     parameters->history_item = item;
     parameters->url = blink::WebURL(blink::KURL(url));
-    parameters->http_method = blink::WebString::FromAscii("GET");
+    if (parameters->http_method.IsEmpty()) parameters->http_method = blink::WebString::FromAscii("GET");
+    if (!parameters->http_body.IsNull()) {
+      for (size_t index = 0; index < parameters->http_body.ElementCount(); ++index) {
+        blink::WebHTTPBody::Element element;
+        if (!parameters->http_body.ElementAt(index, element) || element.type != blink::HTTPBodyElementType::kTypeData ||
+            element.data.size() > RESOURCE_BODY_LIMIT - body.size()) { invalid_body = true; break; }
+        element.data.ForEachSegment([&](base::span<const uint8_t> segment, size_t) {
+          body.insert(body.end(), segment.begin(), segment.end());
+          return true;
+        });
+      }
+    }
     Schedule();
   }
   ~AsyncNavigation() override { resource_async_release(job); }
@@ -152,6 +167,10 @@ class AsyncNavigation final : public NavigationRequest {
   }
   void Run() {
     auto& timings = parameters->navigation_timings;
+    const std::string method = parameters->http_method.Utf8();
+    if (invalid_body || (method != "GET" && method != "POST") || (method == "GET" && !body.empty())) {
+      Finish(ERROR(3)); return;
+    }
   if (url.spec() == "about:blank" || IsBrowserPage(url)) {
     parameters->policy_container = std::move(policy);
     const std::string blank = IsBrowserPage(url) ? BrowserPage(url) : "<!doctype html><title>UEFI BROWSER</title>";
@@ -165,7 +184,7 @@ class AsyncNavigation final : public NavigationRequest {
   }
   {
     if (!url.is_valid() || !url.SchemeIsHTTPOrHTTPS() || url.has_username() ||
-        url.has_password())
+        url.has_password() || !net::IsPortAllowedForScheme(url.EffectiveIntPort(), url.scheme()))
       { Finish(ERROR(2)); return; }
     GURL::Replacements replacements;
     replacements.ClearRef();
@@ -174,7 +193,12 @@ class AsyncNavigation final : public NavigationRequest {
     if (!job) {
       timings.fetch_start = base::TimeTicks::Now();
       // Main document navigation bypasses Blink's subresource hint generation.
-      Header hints[3];
+      // Child navigation lacks a trusted top-level cookie context and excludes credentials.
+      const bool same_origin = !parameters->requestor_origin.IsNull() &&
+          parameters->requestor_origin.IsSameOriginWith(blink::WebSecurityOrigin::Create(blink::WebURL(blink::KURL(request_url))));
+      std::string cookie_line = cookies_allowed && (method == "GET" || same_origin) ?
+          CookieHeader(request_url, false, method == "GET") : std::string();
+      Header hints[6];
       size_t hint_count = 0;
       if (request_url.SchemeIs("https")) {
         for (const char* name : {"Sec-CH-UA", "Sec-CH-UA-Mobile", "Sec-CH-UA-Platform"}) {
@@ -182,7 +206,15 @@ class AsyncNavigation final : public NavigationRequest {
           if (value) hints[hint_count++] = {const_cast<char*>(name), const_cast<char*>(value)};
         }
       }
-      job = resource_async_start_priority(table, request_url.spec().c_str(), hints, hint_count, 4);
+      if (!cookie_line.empty()) hints[hint_count++]={const_cast<char*>("Cookie"),cookie_line.data()};
+      const std::string content_type = parameters->http_content_type.Utf8();
+      std::string origin = parameters->requestor_origin.IsNull() || origin_tainted ? "null" : parameters->requestor_origin.ToString().Utf8();
+      if (method == "POST") {
+        if (!content_type.empty()) hints[hint_count++] = {const_cast<char*>("Content-Type"), const_cast<char*>(content_type.c_str())};
+        hints[hint_count++] = {const_cast<char*>("Origin"), origin.data()};
+      }
+      ResourceRequestSpec spec{request_url.spec().c_str(), method.c_str(), hints, hint_count, body.data(), body.size()};
+      job = resource_async_request(table, &spec, 4);
       if (!job) { Finish(ERROR(9)); return; }
     }
     Status result;
@@ -190,6 +222,7 @@ class AsyncNavigation final : public NavigationRequest {
     resource_async_release(job); job = nullptr;
     if (result) { Finish(result); return; }
     const ResourceResponse &resource = owner.response;
+    if (cookies_allowed) StoreResponseCookies(request_url,resource);
     std::printf("BLINK: navigation HTTP status=%u bytes=%zu\n",
                 resource.status_code, resource.length);
     auto response = ConvertResponse(url, resource);
@@ -206,6 +239,13 @@ class AsyncNavigation final : public NavigationRequest {
       timings.redirect_end = base::TimeTicks::Now();
       blink::WebNavigationParams::RedirectInfo redirect{};
       redirect.new_url = blink::WebURL(blink::KURL(next));
+      if (!url::Origin::Create(url).IsSameOriginWith(next)) origin_tainted = true;
+      if (method == "POST" && (resource.status_code == 301 || resource.status_code == 302 || resource.status_code == 303)) {
+        parameters->http_method = blink::WebString::FromAscii("GET");
+        parameters->http_body.Reset();
+        parameters->http_content_type = blink::WebString();
+        body.clear();
+      }
       redirect.new_http_method = parameters->http_method;
       redirect.redirect_response = response;
       parameters->redirects.push_back(std::move(redirect));
@@ -253,10 +293,13 @@ class AsyncNavigation final : public NavigationRequest {
   blink::WebNavigationControl& frame;
   GURL url;
   std::unique_ptr<blink::WebPolicyContainer> policy;
+  bool cookies_allowed;
   std::unique_ptr<blink::WebNavigationParams> parameters;
   base::OnceCallback<void(Status)> completion;
   ResourceJob* job = nullptr;
   unsigned redirects = 0;
+  std::vector<char> body;
+  bool invalid_body = false, origin_tainted = false;
   base::WeakPtrFactory<AsyncNavigation> weak{this};
 };
 }
@@ -264,9 +307,9 @@ std::unique_ptr<NavigationRequest> LoadNavigation(SystemTable* table,
     blink::WebNavigationControl& frame, const char* address,
     std::unique_ptr<blink::WebPolicyContainer> policy, blink::WebFrameLoadType type,
     blink::WebHistoryItem item, base::OnceCallback<void(Status)> completion,
-    std::unique_ptr<blink::WebNavigationParams> parameters) {
+    std::unique_ptr<blink::WebNavigationParams> parameters, bool allow_cookies) {
   return std::make_unique<AsyncNavigation>(table, frame, address, std::move(policy),
-      type, item, std::move(completion), std::move(parameters));
+      type, item, std::move(completion), std::move(parameters), allow_cookies);
 }
 
 void PaintFrame(blink::WebView &view, blink::WebFrameWidget &widget,

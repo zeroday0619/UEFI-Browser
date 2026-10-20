@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>WebSocket firmware integration</title>
+<style>body{font:20px sans-serif;background:#eef4ff;padding:30px}pre{white-space:pre-wrap}</style>
+<h1>WebSocket integration</h1><pre id="result">Running</pre>
+<script>
+(async()=>{
+ let checks=0;const result=document.getElementById('result');
+ function check(value,name){if(!value)throw Error(name);console.log('WEBSOCKET CHECK '+(++checks)+' '+name);result.textContent+='\n'+name;}
+ function open(path='/echo',port=8870,host='10.0.2.2'){return new Promise((resolve,reject)=>{const socket=new WebSocket((port===8870?'ws':'wss')+'://'+host+':'+port+path,['chat']);socket.binaryType='arraybuffer';socket.onopen=()=>resolve(socket);socket.onerror=()=>reject(Error('opening '+path+' port='+port));});}
+ function next(socket){return new Promise((resolve,reject)=>{socket.onmessage=event=>resolve(event.data);socket.onerror=()=>reject(Error('message failed'));});}
+ function close(socket){return new Promise(resolve=>{socket.onclose=resolve;socket.close(3001,'done 한글');});}
+ async function rejected(path,port=8870,established=false,host='10.0.2.2'){return new Promise((resolve,reject)=>{const socket=new WebSocket((port===8870?'ws':'wss')+'://'+host+':'+port+path,['chat']);let opened=false;socket.onopen=()=>opened=true;socket.onclose=event=>resolve(!event.wasClean && event.code===1006 && opened===established);setTimeout(()=>reject(Error('rejection timeout '+path)),10000);});}
+ try{
+  let socket=await open();check(socket.protocol==='chat','selected subprotocol');
+  let received=next(socket);socket.send('UEFI 한글 😀');check(await received==='UEFI 한글 😀','text Unicode echo');
+  let bytes=new Uint8Array(131073);for(let index=0;index<bytes.length;index++)bytes[index]=index%251;
+  received=next(socket);socket.send(bytes);let echoed=new Uint8Array(await received);check(echoed.length===bytes.length&&echoed.every((value,index)=>value===bytes[index]),'binary echo with data pipe backpressure');
+  received=next(socket);socket.send('');check(await received==='','empty message');
+  let event=await close(socket);check(event.wasClean&&event.code===3001&&event.reason==='done 한글','clean close and reason');
+  socket=await open('/fragment');let messages=[];await new Promise((resolve,reject)=>{socket.onmessage=event=>{messages.push(event.data);if(messages.length===2)resolve();};setTimeout(()=>reject(Error('fragment timeout')),10000);});
+  check(messages[0]==='fragment 한글','fragmented UTF-8');check(messages[1]==='pong-verified','ping pong mask verified by server');await close(socket);
+  check(await rejected('/bad-accept'),'reject invalid handshake accept');check(await rejected('/bad-protocol'),'reject unsolicited protocol');
+  check(await rejected('/masked',8870,true),'reject masked server frame');check(await rejected('/bad-utf8',8870,true),'reject invalid UTF-8');check(await rejected('/bad-continuation',8870,true),'reject unexpected continuation');
+  socket=await open('/echo',8871);received=next(socket);socket.send('verified TLS');check(await received==='verified TLS','trusted TLS echo');event=await close(socket);check(event.wasClean,'TLS clean close');
+  check(await rejected('/echo',8872),'reject untrusted TLS certificate');
+  socket=await open('/echo',8870,'10.0.2.2.nip.io');received=next(socket);socket.send('resolved DNS');check(await received==='resolved DNS','firmware DNS hostname echo');await close(socket);
+  check(await rejected('/echo',8871,false,'10.0.2.2.nip.io'),'reject TLS hostname mismatch');
+  console.log('WEBSOCKET PASS checks='+checks);result.textContent='PASS '+checks+' checks\n'+result.textContent;
+ }catch(error){console.log('WEBSOCKET FAIL '+error.stack);result.textContent='FAIL '+error.stack;}
+})();
+</script>

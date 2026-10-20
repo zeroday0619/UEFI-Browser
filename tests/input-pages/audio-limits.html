@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Audio resource lifetime</title>
+<style>body{font:18px sans-serif;padding:24px}pre{white-space:pre-wrap}</style>
+<h1>Audio resource lifetime</h1><pre></pre>
+<script>
+(async()=>{
+ let checks=0;const clips=[],output=document.querySelector('pre');
+ function check(condition,name){if(!condition)throw Error(name);++checks;output.textContent+=name+'\n';console.log('AUDIO LIMIT CHECK '+name)}
+ async function load(url,expectError=false){const audio=document.createElement('audio');audio.preload='auto';document.body.append(audio);clips.push(audio);await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('audio load timeout')),12000);audio.onloadeddata=()=>{clearTimeout(timer);expectError?reject(Error('unexpected success')):resolve()};audio.onerror=()=>{clearTimeout(timer);expectError?resolve():reject(Error(audio.error?.message))};audio.src=url;audio.load()});return audio}
+ for(let index=0;index<8;index++){const clip=await load('/service-tone.wav');check(clip.readyState>=2,'loaded slot '+index)}
+ const full=await load('/service-tone.wav',true);check(full.error!==null,'ninth clip exceeds resource limit');
+ for(const clip of clips){clip.removeAttribute('src');clip.load();clip.remove()}
+ await new Promise(resolve=>setTimeout(resolve,100));
+ const invalid=await load('/audio-invalid.wav',true);check(invalid.error!==null,'malformed audio fails');invalid.removeAttribute('src');invalid.load();invalid.remove();
+ const recovered=await load('/service-tone.wav');check(recovered.readyState>=2&&recovered.error===null,'load recovers after cleanup');
+ recovered.removeAttribute('src');recovered.load();recovered.remove();
+ document.querySelector('h1').textContent='Audio resources: '+checks+' checks passed';console.log('AUDIO LIMIT PASS checks='+checks);
+})().catch(error=>console.error('AUDIO FAILURE '+error.stack));
+</script>

@@ -23,14 +23,22 @@ if not os.environ.get('QEMU_TEST_KEEP_VARIABLES') or not variables.exists():
     shutil.copy('/usr/share/OVMF/OVMF_VARS_4M.fd', variables)
 log = build / 'browser-serial.log'
 log.write_text('')
+disk = os.environ.get('QEMU_TEST_DISK_IMAGE')
+drive = f'format=raw,file={Path(disk).resolve()}' if disk else f'format=raw,file=fat:rw:{build / "esp"}'
 command = ['qemu-system-x86_64', '-machine', 'q35,accel=' + os.environ.get('QEMU_TEST_ACCEL', 'tcg'), '-m', '4096', '-smp', os.environ.get('QEMU_TEST_CPUS', '1'),
     '-drive', 'if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd',
     '-drive', f'if=pflash,format=raw,file={variables}',
-    '-drive', f'format=raw,file=fat:rw:{build / "esp"}',
+    '-drive', drive,
     '-netdev', 'user,id=network', '-device', 'virtio-net-pci,netdev=network,romfile=',
     '-device', 'virtio-mouse-pci', '-device', 'virtio-rng-pci', '-display', 'none', '-serial', f'file:{log}',
     '-qmp', f'unix:{monitor},server=on,wait=off', '-no-reboot',
     '-fw_cfg', f'name=etc/edk2/https/cacerts,file={os.environ.get("TEST_CA_FILE", project / "build/ca.esl")}']
+audio_capture = os.environ.get('QEMU_TEST_AUDIO_CAPTURE')
+if audio_capture:
+    command += ['-audiodev', f'wav,id=audio,path={audio_capture},out.frequency=48000,out.channels=2']
+else:
+    command += ['-audiodev', 'none,id=audio']
+command += ['-device', 'AC97,audiodev=audio']
 if os.environ.get('QEMU_TEST_GDB_PORT'):
     port = int(os.environ['QEMU_TEST_GDB_PORT'])
     if not 1 <= port <= 65535:
@@ -101,7 +109,25 @@ try:
     print('Captured Blink framebuffer: ' + str(screenshot))
     print('Visual inspection is required to confirm the site content and rendering fidelity.')
 finally:
-    process.terminate()
+    if audio_capture and process.poll() is None:
+        # Request a normal emulator shutdown before analyzing the captured PCM.
+        try:
+            with socket.socket(socket.AF_UNIX) as cleanup:
+                cleanup.settimeout(3)
+                cleanup.connect(str(monitor))
+                connection = cleanup.makefile('rwb', buffering=0)
+                connection.readline()
+                connection.write(b'{"execute":"qmp_capabilities"}\n')
+                for attempt in range(32):
+                    reply = connection.readline()
+                    if not reply: raise EOFError('QMP closed before capabilities response')
+                    if b'"return"' in reply: break
+                else: raise OSError('QMP capabilities response missing')
+                connection.write(b'{"execute":"quit"}\n')
+                process.wait(timeout=5)
+        except (OSError, EOFError, subprocess.TimeoutExpired):
+            pass
+    if process.poll() is None: process.terminate()
     try:
         process.wait(timeout=5)
     except subprocess.TimeoutExpired:

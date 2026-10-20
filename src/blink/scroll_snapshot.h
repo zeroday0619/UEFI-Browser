@@ -48,10 +48,14 @@ struct ScrollbarScene {
   SkRect back_start=SkRect::MakeEmpty(), back_end=SkRect::MakeEmpty(), forward_start=SkRect::MakeEmpty(), forward_end=SkRect::MakeEmpty();
   SkRect frame, track, thumb;
 };
+struct ScrollQuery { uint64_t element; unsigned horizontal, vertical; bool stuck=false; };
+struct ScrollGutter { uint64_t element; bool horizontal; int thickness; std::array<int,4> states; };
 struct ScrollImage { int width=0, height=0; sk_sp<SkData> pixels; };
 // Shared publications contain values and immutable bytes; Skia objects are rebuilt by the consumer.
 struct ScrollScene {
   std::vector<std::shared_ptr<ScrollScene>> reflows;
+  std::vector<ScrollGutter> gutters;
+  std::vector<ScrollQuery> queries;
   bool wheel_listeners=false, wheel_blocked=false;
   std::vector<ScrollRegion> wheel_regions;
   std::vector<ScrollbarScene> scrollbars;

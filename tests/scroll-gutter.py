@@ -12,6 +12,7 @@ def run(execute, build, healthy, move, click, key, wait_marker, type_address):
     if os.environ.get('INPUT_SCENARIO') == 'scroll-gutter-container': page = 'scroll-gutter-container.html'
     if os.environ.get('INPUT_SCENARIO') in ('scroll-gutter-iframe', 'scroll-gutter-srcdoc', 'scroll-gutter-nested-frame'): page = os.environ['INPUT_SCENARIO'] + '.html'
     if os.environ.get('INPUT_SCENARIO') == 'scroll-gutter-parent-frame': page = 'scroll-gutter-parent-frame.html'
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-gutter-state', 'scroll-gutter-topology', 'scroll-gutter-replacement'): page = os.environ['INPUT_SCENARIO'] + '.html'
     if horizontal: page = 'scroll-gutter-horizontal.html'
     normal_size, hover_size, pressed_size = (16, 48, 80) if horizontal else (24, 80, 120)
     left_edge, right_edge = (0, 1280) if root else (60, 560)
@@ -31,6 +32,9 @@ def run(execute, build, healthy, move, click, key, wait_marker, type_address):
 
     def geometry(name, thickness, busy=True):
         width, pixels = capture(name)
+        if os.environ.get('INPUT_SCENARIO') == 'scroll-gutter-topology':
+            scrollbar_pixels = sum(pixels[index:index+3] == bytes((17,119,170)) for index in range(0,len(pixels),3))
+            assert (scrollbar_pixels > 10) == (thickness == hover_size), (name, 'dependent scrollbar visibility', scrollbar_pixels)
         points = [(x, y) for y in range(205, 735) for x in range(left_edge, right_edge)
                   if pixels[(y * width + x) * 3:(y * width + x) * 3 + 3] == bytes((255, 0, 136))]
         assert points, (name, 'missing text end marker')

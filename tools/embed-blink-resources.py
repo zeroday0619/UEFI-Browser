@@ -11,9 +11,11 @@ options = parser.parse_args()
 sys.path.insert(0, str(options.chromium / 'tools/grit'))
 from grit.format import data_pack
 
-resource_directory = options.chromium / 'out/uefi-blink-native/gen/third_party/blink/public/resources'
+resource_directory = options.chromium / 'out/uefi-blink-native/gen/third_party/blink'
 resources = {}
-for name in ('blink_resources.pak', 'blink_image_resources_100_percent.pak'):
+for name in ('public/resources/blink_resources.pak',
+             'public/resources/blink_image_resources_100_percent.pak',
+             'renderer/modules/media_controls/resources/media_controls_resources_100_percent.pak'):
     contents = data_pack.ReadDataPack(str(resource_directory / name))
     overlap = resources.keys() & contents.resources.keys()
     if overlap:

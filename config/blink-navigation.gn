@@ -4,7 +4,19 @@
 source_set("navigation") {
   sources = [
     "src/blink/navigation.cc",
+    "src/blink/cookies.cc",
+    "src/blink/web_storage.cc",
+    "src/blink/blob_service.cc",
+    "src/blink/cache_storage.cc",
+    "src/blink/indexed_db.cc",
+    "src/blink/media_player.cc",
+    "src/blink/web_socket.cc",
+    "src/blink/web_socket.h",
+    "src/blink/web_storage.h",
+    "src/blink/cookies.h",
     "//content/renderer/content_security_policy_util.cc",
+    "//services/network/cors/preflight_result.cc",
+    "//services/network/cors/cors_util.cc",
     "src/blink/navigation.h",
     "src/blink/resource_loader.cc",
     "src/blink/resource_loader.h",
@@ -24,11 +36,14 @@ source_set("navigation") {
     "src/network/chunks.c",
   ]
   if (use_uefi_runtime && current_toolchain == default_toolchain) {
-    sources += [ "src/blink/browser_frame.cc", "src/blink/browser_frame.h", "src/blink/remote_frame.cc", "src/blink/remote_frame.h" ]
+    sources += [ "src/blink/workers.cc", "src/blink/browser_frame.cc", "src/blink/browser_frame.h", "src/blink/remote_frame.cc", "src/blink/remote_frame.h" ]
   }
   include_dirs = [ "src", "runtime" ]
   deps = [
     "//base",
+    "//media",
+    "//third_party/libvpx",
+    "//third_party/libyuv",
     "//cc/paint",
     "//net",
     "//third_party/blink/renderer/core",

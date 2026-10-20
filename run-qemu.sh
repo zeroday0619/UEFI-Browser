@@ -35,9 +35,18 @@ case "${QEMU_ACCEL:-auto}" in
  kvm|tcg) acceleration_arguments=(-accel "$QEMU_ACCEL") ;;
  *) printf '%s\n' 'QEMU_ACCEL must be auto, kvm or tcg.' >&2; exit 1 ;;
 esac
+disk_arguments=(-drive "format=raw,file=fat:rw:$build/esp")
+if [[ -n ${QEMU_DISK_IMAGE:-} ]]; then
+ if [[ ! -f "$QEMU_DISK_IMAGE" ]]; then
+  printf '%s\n' "Missing disk image: $QEMU_DISK_IMAGE" >&2
+  exit 1
+ fi
+ disk_arguments=(-drive "format=raw,file=$QEMU_DISK_IMAGE")
+fi
 qemu-system-x86_64 -name "UEFI BROWSER" -machine q35 "${acceleration_arguments[@]}" -m "${QEMU_MEMORY:-$default_memory}" -smp "${QEMU_CPUS:-4}" \
  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
  -drive "if=pflash,format=raw,file=$variables" \
- -drive "format=raw,file=fat:rw:$build/esp" \
+ "${disk_arguments[@]}" \
  -device virtio-mouse-pci -device virtio-rng-pci "${network_arguments[@]}" "${display_arguments[@]}" \
+ -audiodev "${QEMU_AUDIO_DRIVER:-pipewire},id=audio" -device AC97,audiodev=audio \
  -serial stdio -no-reboot

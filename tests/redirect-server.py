@@ -5,12 +5,54 @@ from pathlib import Path
 import json
 import time
 import os
+import runpy
+
+network_fixture = runpy.run_path(str(Path(__file__).with_name("network-fixture.py")))["handle"]
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *arguments, **keywords):
         super().__init__(*arguments, directory=str(Path(__file__).parent / 'input-pages'), **keywords)
 
+    def do_POST(self):
+        if not network_fixture(self): self.send_error(405)
+
+    do_PUT = do_POST
+    do_PATCH = do_POST
+    do_DELETE = do_POST
+    do_OPTIONS = do_POST
+
+    def do_HEAD(self):
+        if not network_fixture(self): super().do_HEAD()
+
     def do_GET(self):
+        if network_fixture(self): return
+        if self.path in ('/cookie-secure', '/cookie-test', '/cookie-echo', '/cookie-path/echo', '/cookie-set-omit', '/cookie-navigation-check'):
+            cookie = self.headers.get('Cookie', '')
+            print('COOKIE_REQUEST ' + self.path + ' ' + json.dumps(cookie), flush=True)
+            if self.path in ('/cookie-test', '/cookie-secure'):
+                filename = 'cookies-secure.html' if self.path == '/cookie-secure' else 'cookies.html'
+                body = (Path(__file__).parent / 'input-pages' / filename).read_bytes()
+                content_type = 'text/html'
+            elif self.path == '/cookie-navigation-check':
+                body = ('<!doctype html><script>console.log("COOKIE navigation="+' + json.dumps(cookie) + ')</script>').encode()
+                content_type = 'text/html'
+            else:
+                body = json.dumps({'cookie': cookie}).encode()
+                content_type = 'application/json'
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Cache-Control', 'no-store')
+            if self.path == '/cookie-test':
+                self.send_header('Set-Cookie', 'server=private; HttpOnly; Path=/; SameSite=Lax')
+                self.send_header('Set-Cookie', 'public=visible; Path=/; SameSite=Lax')
+            if self.path == '/cookie-secure':
+                self.send_header('Set-Cookie', 'secureServer=private; Secure; HttpOnly; Path=/; SameSite=Lax')
+            if self.path == '/cookie-set-omit':
+                self.send_header('Set-Cookie', 'omitted=blocked; Path=/')
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in ('/chrome-identity', '/chrome-identity.js'):
             identity = {name: self.headers.get_all(name, []) for name in
                         ('User-Agent', 'Sec-CH-UA', 'Sec-CH-UA-Platform', 'Sec-CH-UA-Mobile')}

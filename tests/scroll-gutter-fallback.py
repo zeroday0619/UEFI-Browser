@@ -1,4 +1,4 @@
-"""Verify that scrollbar topology changes waits for the live renderer."""
+"""Verify that unsupported filtered reflows wait for the live renderer."""
 import json
 import time
 
@@ -18,7 +18,7 @@ def run(execute, build, healthy, move, click, key, wait_marker, type_address):
         return max(columns) - min(columns) + 1
 
     assert width('before') == 476
-    assert 'COMPOSITOR: gutter snapshots=0' in healthy(), 'Changed scrollbar topology was not rejected'
+    assert 'COMPOSITOR: gutter snapshots=0' in healthy(), 'Unsupported filtered reflow was not rejected'
     click(130, 42); wait_marker('GUTTER begin')
     publication_count = healthy().count('COMPOSITOR: scene pictures=')
     move(548, 160); time.sleep(.3)
@@ -29,7 +29,7 @@ def run(execute, build, healthy, move, click, key, wait_marker, type_address):
     wait_marker('GUTTER end'); wait_marker('GUTTER size=420'); time.sleep(3)
     assert width('resumed') == 420
     assert 'GUTTER end width=476 extra=40' in healthy(), 'Speculation changed the live nested scroll offset'
-    result = {'scrollbar_topology_fallback': True, 'javascript_block_ms': 25000,
+    result = {'unsupported_paint_fallback': True, 'javascript_block_ms': 25000,
               'busy_content_width': 476, 'resumed_content_width': 420}
     (build / 'scroll-gutter-fallback-results.json').write_text(json.dumps(result, indent=2) + '\n')
     print('PASS: scrollbar topology renderer fallback', json.dumps(result))

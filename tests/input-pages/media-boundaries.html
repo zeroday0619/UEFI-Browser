@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>Media load boundaries</title>
+<style>body{font:18px sans-serif;padding:24px}pre{white-space:pre-wrap}</style>
+<h1>Media load boundaries</h1><video muted preload="auto"></video><pre></pre>
+<script>
+(async()=>{
+ const video=document.querySelector('video'),results=document.querySelector('pre');let checks=0;
+ function check(condition,name){if(!condition)throw Error(name);++checks;results.textContent+=name+'\n';console.log('MEDIA BOUNDARY CHECK '+name)}
+ for(const [type,expected] of [['video/webm','maybe'],['video/webm; codecs="vp8"','probably'],['video/webm; codecs="vp9"','probably'],['audio/webm',''],['video/mp4',''],['video/webm; codecs="vp9,opus"','']])check(video.canPlayType(type)===expected,'type '+type);
+ function load(url,cors,expectError){return new Promise((resolve,reject)=>{
+  const timer=setTimeout(()=>{clean();reject(Error('load timeout '+url))},12000);
+  function clean(){clearTimeout(timer);video.onloadeddata=video.onerror=null}
+  video.onloadeddata=()=>{clean();expectError?reject(Error('unexpected decode '+url)):resolve()};
+  video.onerror=()=>{clean();expectError?resolve():reject(Error('unexpected media error '+url))};
+  if(cors)video.crossOrigin=cors;else video.removeAttribute('crossorigin');video.src=url;video.load();
+ })}
+ for(const [url,cors,name] of [
+  ['/media-missing.webm',null,'HTTP failure'],
+  ['/media-malformed.webm',null,'malformed stream'],
+  ['/audio-invalid.wav',null,'invalid audio format'],
+  ['https://10.0.2.2:8768/media-vp8.webm',null,'cross-origin media without CORS'],
+  ['https://10.0.2.2:8768/media-vp8.webm','anonymous','CORS without permission'],
+  ['/media-quota.webm',null,'decoded frame quota']
+ ]){await load(url,cors,true);check(video.error!==null&&video.readyState===0,name)}
+ await load('/media-vp8.webm',null,false);check(video.error===null&&video.videoWidth===160,'decode after failures');
+ const canvas=document.createElement('canvas');canvas.width=160;canvas.height=120;const context=canvas.getContext('2d');context.drawImage(video,0,0);const pixel=context.getImageData(80,60,1,1).data;check(pixel[0]>180&&pixel[1]<60&&pixel[2]<60,'readable frame after failures');
+ document.querySelector('h1').textContent='Media boundaries: '+checks+' checks passed';console.log('MEDIA BOUNDARIES PASS checks='+checks);
+})().catch(error=>console.error('MEDIA FAILURE '+error.stack));
+</script>

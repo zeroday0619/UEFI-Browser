@@ -12,7 +12,7 @@ int firmware_browser_user_agent_valid(const char *value);
 const char *firmware_browser_client_hint_for_url(const char *name, const char *url);
 const char *firmware_browser_client_hint(const char *name);
 /* Response storage belongs to the caller until resource_release is called. */
-typedef struct {
+typedef struct ResourceResponse {
   unsigned status_code;
   Header *headers;
   size_t header_count;
@@ -21,6 +21,17 @@ typedef struct {
   size_t encoded_body_length;
 } ResourceResponse;
 typedef struct ResourceJob ResourceJob;
+/* The service copies request storage before returning to the renderer. */
+typedef struct {
+  const char *url, *method;
+  const Header *headers;
+  size_t header_count;
+  const void *body;
+  size_t body_length;
+} ResourceRequestSpec;
+int resource_method_supported(const char *method);
+Status resource_request(SystemTable *, const ResourceRequestSpec *, ResourceResponse *);
+ResourceJob *resource_async_request(SystemTable *, const ResourceRequestSpec *, unsigned weight);
 int resource_async_available(void);
 Status resource_async_initialize(SystemTable *table);
 ResourceJob *resource_async_start_priority(SystemTable *, const char *, const Header *, size_t, unsigned);

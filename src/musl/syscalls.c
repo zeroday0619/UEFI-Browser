@@ -1,6 +1,10 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include "renderer_runtime.h"
+#include "firmware_threads.h"
+#include "firmware_io.h"
+#include "firmware_shared.h"
+#include <string.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -41,6 +45,23 @@ long firmware_serial_write(long descriptor, const char *data, size_t length) {
 }
 long firmware_syscall(long number, long first, long second, long third,
                       long fourth, long fifth, long sixth) {
+  if (number == SYS_memfd_create || ((number==SYS_close || number==SYS_dup || number==SYS_fcntl || number==SYS_ftruncate || number==SYS_fstat) && firmware_shared_descriptor(first)))
+    return firmware_shared_syscall(number,first,second,third);
+  if ((number==SYS_open || number==SYS_openat)) {
+    const char *path=(const char *)(number==SYS_open ? first : second);
+    if(path && !strncmp(path,"/proc/self/fd/",14)) return firmware_shared_reopen(path,number==SYS_open ? second : third);
+  }
+  if (number == SYS_socket || number == SYS_connect || number == SYS_sendto ||
+      number == SYS_recvfrom || number == SYS_getsockopt || number == SYS_setsockopt ||
+      number == SYS_getsockname || number == SYS_getpeername || number == SYS_poll ||
+      ((number == SYS_read || number == SYS_write || number == SYS_close || number == SYS_fcntl) &&
+       firmware_socket_descriptor(first)))
+    return firmware_socket_syscall(number,first,second,third,fourth,fifth,sixth);
+  if (number == SYS_open || number == SYS_openat || number == SYS_unlink || number == SYS_mkdir ||
+      ((number == SYS_read || number == SYS_write || number == SYS_close || number == SYS_fcntl ||
+        number == SYS_lseek || number == SYS_fstat || number == SYS_ftruncate || number == SYS_fsync || number == SYS_fdatasync) &&
+       firmware_file_descriptor(first)))
+    return firmware_file_syscall(number,first,second,third,fourth,fifth,sixth);
   switch (number) {
   case SYS_write:
     return firmware_serial_write(first, (void *)second, third);
@@ -54,13 +75,14 @@ long firmware_syscall(long number, long first, long second, long third,
         return -EINVAL;
       total += vectors[index].iov_len;
     }
+    size_t written = 0;
     for (long index = 0; index < third; index++) {
-      long result =
-          firmware_serial_write(first, vectors[index].iov_base, vectors[index].iov_len);
-      if (result < 0)
-        return result;
+      long result = firmware_syscall(SYS_write,first,(long)vectors[index].iov_base,vectors[index].iov_len,0,0,0);
+      if (result < 0) return written ? (long)written : result;
+      written += result;
+      if ((size_t)result != vectors[index].iov_len) return written;
     }
-    return total;
+    return written;
   }
   case SYS_ioctl:
     return -ENOTTY;
@@ -73,9 +95,17 @@ long firmware_syscall(long number, long first, long second, long third,
     return -EBADF;
   case SYS_lseek:
     return first >= 0 && first <= 2 ? -ESPIPE : -EBADF;
+  case SYS_prctl:
+    return firmware_thread_name(first, (char *)second);
   case SYS_getpid:
-  case SYS_gettid:
     return renderer_runtime_is_child() ? 2 : 1;
+  case SYS_gettid:
+    return firmware_thread_identifier();
+  case SYS_sched_yield:
+    firmware_threads_yield();
+    return 0;
+  case SYS_futex:
+    return firmware_threads_futex((int *)first, second, third, (void *)fourth, (int *)fifth, sixth);
   case SYS_clock_gettime:
     return clock_gettime(first, (void *)second) ? -errno : 0;
   case SYS_nanosleep:

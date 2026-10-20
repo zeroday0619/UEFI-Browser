@@ -1,6 +1,7 @@
 #include "uefi.h"
 #include "virtual_memory.h"
 #include "renderer_runtime.h"
+#include "firmware_shared.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,6 +12,8 @@
 #define PAGE_SIZE 4096ULL
 #define ARENA_SIZE (1ULL << 39)
 #define ADDRESS_MASK 0x000ffffffffff000ULL
+#define SHARED_PAGE (1ULL << 9)
+#define SHARED_WRITABLE (1ULL << 10)
 #define EXECUTE_DISABLE (1ULL << 63)
 #define MAX_REGIONS 4096
 extern SystemTable *platform_firmware(void);
@@ -167,7 +170,8 @@ int virtual_memory_protect(void *address, size_t length, int protection) {
       if (!page) return -1;
       *entry = (uintptr_t)page;
     }
-    *entry = (*entry & ADDRESS_MASK) |
+    if ((*entry & SHARED_PAGE) && ((protection & PROT_EXEC) || ((protection & PROT_WRITE) && !(*entry & SHARED_WRITABLE)))) {errno=EACCES;return -1;}
+    *entry = (*entry & (ADDRESS_MASK | SHARED_PAGE | SHARED_WRITABLE)) |
         (protection == PROT_NONE ? 0 : 1) |
         ((protection & PROT_WRITE) ? 2 : 0) |
         ((protection & PROT_EXEC) ? 0 : EXECUTE_DISABLE);
@@ -180,15 +184,20 @@ static void discard_pages(uintptr_t start, size_t length) {
     uint64_t *entry = leaf(position, 0);
     if (!entry || !(*entry & ADDRESS_MASK)) continue;
     uint64_t physical = *entry & ADDRESS_MASK;
+    int shared = !!(*entry & SHARED_PAGE);
     *entry = 0;
     invalidate(position);
-    free_page(physical);
+    if (!shared) free_page(physical);
   }
 }
 int virtual_memory_discard(void *address, size_t length) {
   uintptr_t start = (uintptr_t)address;
   if (!length_valid(start, &length) || containing(start, length) < 0) {
     errno = EINVAL; return -1;
+  }
+  for(uintptr_t position=start;position<start+length;position+=PAGE_SIZE) {
+    uint64_t *entry=leaf(position,0);
+    if(entry && (*entry&SHARED_PAGE)) {errno=ENOTSUP;return -1;}
   }
   /* Without a page-fault handler, readable mappings retain zeroed backing. */
   for (uintptr_t position = start; position < start + length; position += PAGE_SIZE) {
@@ -267,7 +276,20 @@ static void release_tables(uint64_t *table, unsigned level) {
         release_tables((uint64_t *)(table[index] & ADDRESS_MASK), level - 1);
   free_page((uintptr_t)table);
 }
+void *virtual_memory_alias(uintptr_t physical,size_t length,int protection,int writable) {
+  void *address=virtual_memory_map(NULL,length,PROT_NONE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+  if(address==MAP_FAILED) return address;
+  for(size_t offset=0;offset<length;offset+=PAGE_SIZE) {
+    uint64_t *entry=leaf((uintptr_t)address+offset,1);
+    if(!entry) {virtual_memory_unmap(address,length);return MAP_FAILED;}
+    *entry=(physical+offset)|SHARED_PAGE|(writable?SHARED_WRITABLE:0)|EXECUTE_DISABLE|
+        (protection==PROT_NONE?0:1)|((protection&PROT_WRITE)?2:0);
+    invalidate((uintptr_t)address+offset);
+  }
+  return address;
+}
 void virtual_memory_release(void) {
+  firmware_shared_reset();
   if (!arena_start) { renderer_pages_release(); return; }
   for (int index = 0; index < MAX_REGIONS; ++index)
     if (regions[index].start && virtual_memory_unmap((void *)regions[index].start,

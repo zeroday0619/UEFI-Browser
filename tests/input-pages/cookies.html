@@ -1,0 +1,36 @@
+<!doctype html><meta charset="utf-8"><title>Cookie integration</title>
+<h1>Cookie integration</h1><pre id="result">Running</pre>
+<script>
+(async()=>{
+ let checks=0;
+ function check(value,name){if(!value)throw Error(name);checks++}
+ const has=(line,name,value)=>line.split(';').map(x=>x.trim()).includes(name+'='+value);
+ check(has(document.cookie,'public','visible'),'response cookie visibility');
+ check(!document.cookie.includes('server='),'HttpOnly visibility');
+ document.cookie='script=hello; Path=/; SameSite=Strict';
+ document.cookie='server=overwritten; Path=/';
+ document.cookie='secure=blocked; Secure; Path=/';
+ document.cookie='foreign=blocked; Domain=example.com; Path=/';
+ document.cookie='partitioned=blocked; Partitioned; Path=/';
+ document.cookie='pathonly=yes; Path=/cookie-path';
+ document.cookie='removed=yes; Path=/';document.cookie='removed=; Max-Age=0; Path=/';
+ check(has(document.cookie,'script','hello'),'script cookie');
+ check(!document.cookie.includes('secure='),'Secure over HTTP');
+ check(!document.cookie.includes('foreign='),'foreign domain');
+ check(!document.cookie.includes('partitioned='),'partition key required');
+ check(!document.cookie.includes('pathonly='),'path visibility');
+ check(!document.cookie.includes('removed='),'expiry deletion');
+ let response=await fetch('/cookie-echo');let echo=await response.json();
+ check(has(echo.cookie,'server','private'),'HttpOnly network and overwrite protection');
+ check(has(echo.cookie,'script','hello'),'same-origin fetch credentials');
+ check(!echo.cookie.includes('pathonly='),'request path filtering');
+ check(response.headers.get('set-cookie')===null,'forbidden response header');
+ echo=await (await fetch('/cookie-path/echo')).json();
+ check(has(echo.cookie,'pathonly','yes'),'path cookie delivery');
+ echo=await (await fetch('/cookie-echo',{credentials:'omit'})).json();
+ check(echo.cookie==='','omit request credentials');
+ await fetch('/cookie-set-omit',{credentials:'omit'});
+ check(!document.cookie.includes('omitted='),'omit response credentials');
+ result.textContent='PASS '+checks+' cookie checks';console.log('COOKIE PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('COOKIE FAIL '+error.message)});
+</script>

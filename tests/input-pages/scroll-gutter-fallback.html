@@ -15,7 +15,7 @@ button{position:fixed;left:30px;top:20px;width:220px;height:44px}
 #box::-webkit-scrollbar-corner{background:#555555}
 #box{container-type:inline-size}
 #extra{display:block;height:40px;width:200px;overflow:scroll}
-@container (max-width:450px){#text{color:#aa2244}#extra{display:flex}}
+@container (max-width:450px){#text{color:#aa2244}#extra{display:flex;filter:blur(1px)}}
 </style>
 <button id="start">Block JavaScript 25s</button>
 <div id="box" tabindex="0"><div id="content"><div id="extra"><div style="height:200px">Additional scroll area</div></div><div id="sticky"></div><p id="text">alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega. alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi omicron pi rho sigma tau upsilon phi chi psi omega.</p><div id="marker"></div><div id="grid"><div></div><div></div></div></div><p id="tail"></p></div>

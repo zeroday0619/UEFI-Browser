@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>Worker lifecycle checks</title>
+<style>body { background:#10212c; color:#d7ebfa; font:24px sans-serif; padding:24px; }</style>
+<h1 id="status">Worker lifecycle checks</h1><pre id="results"></pre>
+<script>
+(async () => {
+  let checks = 0;
+  const check = (value, label) => { if (!value) throw Error(label); ++checks; results.textContent += label + '\n'; };
+  const workers = [];
+  let succeeded = 0, rejected = 0;
+  await Promise.all(Array.from({length:20}, (_, index) => new Promise((resolve, reject) => {
+    const worker = new Worker('worker-runtime.js'); workers.push(worker);
+    const timer = setTimeout(() => reject(Error('capacity timeout ' + index)), 20000);
+    worker.onmessage = () => { clearTimeout(timer); ++succeeded; resolve(); };
+    worker.onerror = event => { clearTimeout(timer); event.preventDefault(); ++rejected; resolve(); };
+    worker.postMessage({operation:'timer'});
+  })));
+  check(succeeded > 0 && rejected > 0 && succeeded + rejected === 20, 'capacity returns worker errors without crashing');
+  workers.forEach(worker => worker.terminate());
+  await new Promise(resolve => setTimeout(resolve, 250));
+  const recovered = new Worker('worker-runtime.js');
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('recovery timeout')), 12000);
+    recovered.onmessage = () => { clearTimeout(timer); recovered.terminate(); resolve(); };
+    recovered.onerror = () => reject(Error('recovery error'));
+    recovered.postMessage({operation:'timer'});
+  });
+  check(true, 'capacity recovered after termination');
+  const terminated = new Worker('worker-runtime.js');
+  let lateMessage = false;
+  terminated.onmessage = () => { lateMessage = true; };
+  terminated.postMessage({operation:'timer'});
+  terminated.terminate();
+  await new Promise(resolve => setTimeout(resolve, 150));
+  check(!lateMessage, 'terminate before startup suppresses delivery');
+  document.getElementById('status').textContent = 'Worker lifecycle: ' + checks + ' checks passed';
+  console.log('WORKERS LIMIT PASS checks=' + checks + ' started=' + succeeded + ' rejected=' + rejected);
+})().catch(error => { document.getElementById('status').textContent = String(error); console.log('WORKERS FAILURE ' + error.stack); });
+</script>

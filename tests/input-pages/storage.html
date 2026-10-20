@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Storage integration</title>
+<h1>Web storage integration</h1><pre id="result">Running</pre>
+<script>
+(async()=>{
+ let checks=0;const check=(value,name)=>{if(!value)throw Error(name);checks++;console.log('STORAGE CHECK '+checks+' '+name)};
+ const previous=Number(localStorage.getItem('generation')||0),session=Number(sessionStorage.getItem('sessionGeneration')||0);
+ localStorage.setItem('generation',String(previous+1));sessionStorage.setItem('sessionGeneration',String(session+1));
+ console.log('STORAGE GENERATION local='+(previous+1)+' session='+(session+1));
+ check(localStorage.getItem('missing-key')===null,'missing value');
+ const value='한글 العربية 😀\u0000tail';localStorage.setItem('unicode',value);check(localStorage.getItem('unicode')===value,'Unicode and NUL round trip');
+ localStorage.setItem('number',42);check(localStorage.getItem('number')==='42','value conversion');
+ localStorage.removeItem('number');check(localStorage.getItem('number')===null,'remove');
+ check(Array.from({length:localStorage.length},(_,index)=>localStorage.key(index)).includes('unicode'),'key enumeration');
+ let quota=false;try{localStorage.setItem('too-large','x'.repeat(11*1024*1024))}catch(error){quota=error.name==='QuotaExceededError'}check(quota,'quota exception');
+ sessionStorage.setItem('sessionValue','private');check(sessionStorage.getItem('sessionValue')==='private','session round trip');
+ localStorage.removeItem('fromFrame');sessionStorage.removeItem('sessionFromFrame');
+ const events=[];addEventListener('storage',event=>events.push(event));
+ const frame=document.createElement('iframe');frame.src='/storage-frame.html';document.body.append(frame);
+ const messages=[];addEventListener('message',event=>{if(event.source===frame.contentWindow)messages.push(event.data)});
+ await new Promise((resolve,reject)=>{let attempts=0;const timer=setInterval(()=>{if(messages.length){clearInterval(timer);resolve()}else if(++attempts>100){clearInterval(timer);reject(Error('iframe timeout'))}},50)});
+ check(messages[0].local===value && messages[0].session==='private','same-origin iframe shares both stores');
+ await new Promise(resolve=>setTimeout(resolve,300));
+ check(events.some(event=>event.key==='fromFrame' && event.newValue==='child' && event.storageArea===localStorage),'local storage event');
+ check(events.some(event=>event.key==='sessionFromFrame' && event.newValue==='child' && event.storageArea===sessionStorage),'session storage event');
+ check(!events.some(event=>event.key==='unicode'),'source document excluded from event');
+ const cross=document.createElement('iframe');cross.src='http://10.0.2.2:8766/storage-frame.html';document.body.append(cross);
+ const remote=await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('cross-origin timeout')),5000);addEventListener('message',function listener(event){if(event.source===cross.contentWindow){removeEventListener('message',listener);clearTimeout(timer);resolve(event.data)}})});
+ check(remote.local===null && remote.session===null,'origin isolation by port');
+ const sandbox=document.createElement('iframe');sandbox.sandbox='allow-scripts';sandbox.srcdoc='<script>try{localStorage.getItem("x");parent.postMessage("unsafe","*")}catch(e){parent.postMessage(e.name,"*")}<\/script>';document.body.append(sandbox);
+ const blocked=await new Promise(resolve=>{addEventListener('message',function listener(event){if(event.source===sandbox.contentWindow){removeEventListener('message',listener);resolve(event.data)}})});check(blocked==='SecurityError','opaque sandbox storage denied');
+ check(localStorage.getItem('generation')===String(previous+1),'generation retained');
+ result.textContent='PASS '+checks+' checks';console.log('STORAGE PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('STORAGE FAIL '+error.message)});
+</script>

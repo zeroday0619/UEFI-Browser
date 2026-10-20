@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Worker execution checks</title>
+<style>body { background:#10212c; color:#d7ebfa; font:24px sans-serif; padding:24px; }</style>
+<h1 id="status">Workers running</h1><pre id="results"></pre>
+<script>
+(async () => {
+  let checks = 0;
+  const check = (value, label) => {
+    if (!value) throw Error(label);
+    ++checks;
+    results.textContent += label + '\n';
+  };
+  const worker = new Worker('worker-runtime.js');
+  function reply(message, transfer = []) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('worker timeout')), 12000);
+      worker.onmessage = event => { clearTimeout(timer); resolve(event.data); };
+      worker.onerror = event => { clearTimeout(timer); reject(Error(event.message || 'worker error')); };
+      worker.postMessage(message, transfer);
+    });
+  }
+  const buffer = new Uint8Array([1, 2, 3, 255]).buffer;
+  const pending = reply({operation:'compute', left:19, right:23, buffer}, [buffer]);
+  check(buffer.byteLength === 0, 'transfer detaches sender buffer');
+  const computed = await pending;
+  check(computed.sum === 42, 'worker script executes');
+  check(computed.isolated, 'worker has no document');
+  check(Array.from(new Uint8Array(computed.buffer)).join(',') === '91,88,89,165', 'binary transfer round trip');
+  const fetched = await reply({operation:'fetch'});
+  check(fetched.text.trim() === 'worker-network-response', 'fetch in worker');
+  check((await reply({operation:'timer'})).operation === 'timer', 'worker timer');
+  check((await reply({operation:'import'})).value === 47, 'importScripts executes');
+  check((await reply({operation:'nested'})).value === 'timer', 'nested worker executes');
+  check((await reply({operation:'close'})).operation === 'closing', 'worker close');
+  worker.terminate();
+  for (let index = 0; index < 3; ++index) {
+    const child = new Worker('worker-runtime.js');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(Error('recreate timeout')), 12000);
+      child.onmessage = event => {
+        clearTimeout(timer);
+        check(event.data.operation === 'timer', 'recreated worker ' + index);
+        child.terminate(); resolve();
+      };
+      child.onerror = event => { clearTimeout(timer); reject(Error(event.message)); };
+      child.postMessage({operation:'timer'});
+    });
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  const moduleWorker = new Worker('worker-module.js', {type:'module'});
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('module timeout')), 12000);
+    moduleWorker.onmessage = event => {
+      clearTimeout(timer); check(event.data === 53, 'module worker imports');
+      moduleWorker.terminate(); resolve();
+    };
+    moduleWorker.onerror = event => { clearTimeout(timer); reject(Error(event.message)); };
+    moduleWorker.postMessage('run');
+  });
+  let crossOriginBlocked = false;
+  try { new Worker('https://example.com/worker.js'); }
+  catch (error) { crossOriginBlocked = error.name === 'SecurityError'; }
+  check(crossOriginBlocked, 'cross-origin worker constructor rejected');
+  const invalid = new Worker('worker-payload.txt');
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error('MIME timeout')), 12000);
+    invalid.onmessage = () => reject(Error('invalid MIME executed'));
+    invalid.onerror = event => {
+      clearTimeout(timer); event.preventDefault(); invalid.terminate();
+      check(true, 'invalid script MIME rejected'); resolve();
+    };
+  });
+  document.getElementById('status').textContent = 'Workers: ' + checks + ' checks passed';
+  console.log('WORKERS PASS checks=' + checks);
+})().catch(error => { document.getElementById('status').textContent = 'Worker failure: ' + error; console.log('WORKERS FAILURE ' + error.stack); });
+</script>

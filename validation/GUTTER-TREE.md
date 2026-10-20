@@ -1,5 +1,7 @@
 # Container-query and iframe gutter reflow
 
+This report describes the earlier image identified below. Scroll-state and dependent-scrollbar topology support added afterward is documented in [SCROLL-STATE.md](SCROLL-STATE.md).
+
 ## Implementation
 
 The compositor can select cached Blink reflows that include size-container-query results and local iframe content while the renderer executes an uninterrupted script. The renderer captures the local frame tree as one scene. Scroll-area lookup, custom scrollbar identification, paint properties, clips, wheel-handler regions and acknowledged scroll commands now cover descendant frames. Input coordinates remain in the root widget coordinate system; Blink's existing property tree supplies iframe translations and clipping.

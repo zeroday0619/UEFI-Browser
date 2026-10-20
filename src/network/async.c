@@ -2,6 +2,7 @@
 #include "resource.h"
 #ifdef UEFI_RUNTIME
 #include "renderer_runtime.h"
+#include "firmware_io.h"
 static SystemTable *service_table;
 #endif
 #include "eevdf.h"
@@ -35,6 +36,9 @@ struct ResourceJob {
   unsigned char *stack;
   SystemTable *table;
   char *url;
+  char *method;
+  unsigned char *body;
+  size_t body_length;
   Header *headers;
   size_t header_count;
   ResourceResponse response;
@@ -113,14 +117,15 @@ static void release_job(ResourceJob *job) {
   for (size_t index = 0; index < job->header_count; ++index) {
     free(job->headers[index].name); free(job->headers[index].value);
   }
-  free(job->headers); free(job->url);
+  free(job->headers); free(job->url); free(job->method); free(job->body);
   if (job->stack) munmap(job->stack - 4096, 512 * 1024 + 8192);
   free(job);
   --job_count;
 }
 void resource_async_execute(ResourceJob *job) {
-  job->status = resource_get_with_headers(job->table, job->url,
-      job->headers, job->header_count, &job->response);
+  ResourceRequestSpec request = {job->url, job->method, job->headers,
+      job->header_count, job->body, job->body_length};
+  job->status = resource_request(job->table, &request, &job->response);
   job->finished = 1;
 #ifdef UEFI_RUNTIME
   if (job->remote) printf("NETWORK_SERVICE: completed status=%llx bytes=%zu\n",
@@ -131,10 +136,22 @@ void resource_async_execute(ResourceJob *job) {
 }
 ResourceJob *resource_async_start_priority(SystemTable *table, const char *url,
                                 const Header *headers, size_t count, unsigned weight) {
+  ResourceRequestSpec request = {url, "GET", headers, count, NULL, 0};
+  return resource_async_request(table, &request, weight);
+}
+ResourceJob *resource_async_request(SystemTable *table, const ResourceRequestSpec *request,
+                                  unsigned weight) {
 #ifdef UEFI_RUNTIME
   if (renderer_runtime_is_child()) return (ResourceJob*)renderer_runtime_request(
-      RENDERER_NETWORK_START,(uintptr_t)url,(uintptr_t)headers,count,weight,0);
+      RENDERER_NETWORK_REQUEST,(uintptr_t)request,weight,0,0,0);
 #endif
+  if (!request || !request->url || !resource_method_supported(request->method) ||
+      request->body_length > RESOURCE_BODY_LIMIT ||
+      (request->body_length && !request->body) ||
+      (request->header_count && !request->headers)) return NULL;
+  const char *url = request->url;
+  const Header *headers = request->headers;
+  size_t count = request->header_count;
   if (weight != 1 && weight != 4) return NULL;
   if (count > 64 || job_count >= 128) return NULL;
   ResourceJob *job = calloc(1, sizeof(*job));
@@ -142,6 +159,12 @@ ResourceJob *resource_async_start_priority(SystemTable *table, const char *url,
   ++job_count;
   job->table = table;
   job->url = strdup(url);
+  job->method = strdup(request->method);
+  if (request->body_length) {
+    job->body = malloc(request->body_length);
+    if (job->body) memcpy(job->body, request->body, request->body_length);
+  }
+  job->body_length = request->body_length;
   void *mapping = mmap(NULL, 512 * 1024 + 8192, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (mapping != MAP_FAILED) {
     job->stack = (unsigned char*)mapping + 4096;
@@ -150,7 +173,8 @@ ResourceJob *resource_async_start_priority(SystemTable *table, const char *url,
     }
   }
   job->headers = calloc(count ? count : 1, sizeof(Header));
-  if (!job->url || !job->stack || !job->headers) { release_job(job); return NULL; }
+  if (!job->url || !job->method || !job->stack || !job->headers ||
+      (job->body_length && !job->body)) { release_job(job); return NULL; }
   for (size_t index = 0; index < count; ++index) {
     job->headers[index].name = strdup(headers[index].name);
     job->headers[index].value = strdup(headers[index].value);
@@ -248,6 +272,8 @@ void resource_async_shutdown(SystemTable *table) {
 
 #ifdef UEFI_RUNTIME
 void renderer_network_reset(void) {
+  firmware_socket_reset(1);
+  firmware_file_reset(1);
   size_t jobs=0, responses=0;
   while (remote_jobs) {
     ResourceJob *job=remote_jobs; remote_jobs=job->remote_next;
@@ -264,6 +290,11 @@ uint64_t renderer_network_service(unsigned operation, uint64_t first, uint64_t s
     uint64_t third, uint64_t fourth, uint64_t fifth) {
   (void)fifth;
   switch (operation) {
+    case RENDERER_NETWORK_REQUEST: {
+      ResourceJob *job = resource_async_request(service_table, (const ResourceRequestSpec *)first, second);
+      if (job) { job->remote=1; job->remote_next=remote_jobs; remote_jobs=job; }
+      return (uintptr_t)job;
+    }
     case RENDERER_NETWORK_START: {
       ResourceJob *job=resource_async_start_priority(service_table,(const char*)first,(const Header*)second,third,fourth);
       if (job) { job->remote=1; job->remote_next=remote_jobs; remote_jobs=job; }

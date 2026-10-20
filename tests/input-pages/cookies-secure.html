@@ -1,0 +1,24 @@
+<!doctype html><meta charset="utf-8"><title>Secure cookie integration</title><h1>Secure cookie integration</h1><pre id="result"></pre>
+<script>
+(async()=>{
+ let checks=0;
+ function check(value,name){if(!value)throw Error(name);checks++}
+ const has=(line,name,value)=>line.split(';').map(x=>x.trim()).includes(name+'='+value);
+ check(!document.cookie.includes('secureServer='),'HttpOnly secure visibility');
+ document.cookie='__Host-secure=valid; Secure; Path=/; SameSite=None';
+ document.cookie='__Host-invalid=blocked; Secure; Path=/other';
+ document.cookie='__Secure-invalid=blocked; Path=/';
+ document.cookie='__Http-invalid=blocked; Secure; Path=/';
+ document.cookie='noneInvalid=blocked; SameSite=None; Path=/';
+ document.cookie='secureServer=overwrite; Secure; Path=/';
+ check(has(document.cookie,'__Host-secure','valid'),'valid host prefix');
+ check(!document.cookie.includes('__Host-invalid='),'invalid host prefix');
+ check(!document.cookie.includes('__Secure-invalid='),'invalid secure prefix');
+ check(!document.cookie.includes('__Http-invalid='),'HTTP prefix script rejection');
+ check(!document.cookie.includes('noneInvalid='),'SameSite None requires Secure');
+ const echo=await (await fetch('/cookie-echo')).json();
+ check(has(echo.cookie,'secureServer','private'),'secure HttpOnly send');
+ check(has(echo.cookie,'__Host-secure','valid'),'secure host prefix send');
+ result.textContent='PASS '+checks;console.log('COOKIE SECURE PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('COOKIE FAIL '+error.message)});
+</script>

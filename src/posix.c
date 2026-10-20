@@ -2,6 +2,7 @@
 #include "uefi.h"
 #ifdef USE_MUSL
 #include "virtual_memory.h"
+#include "firmware_shared.h"
 #include "renderer_runtime.h"
 extern int renderer_runtime_entropy(void *, size_t);
 extern int renderer_runtime_protect(void *, size_t, int);
@@ -111,6 +112,10 @@ int platform_memory_is_read_only(const void *address) {
 void *mmap(void *hint, size_t length, int protection, int flags, int descriptor,
            off_t offset) {
 #ifdef USE_MUSL
+  if (firmware_shared_descriptor(descriptor)) {
+    if(hint) {errno=ENOTSUP;return MAP_FAILED;}
+    return firmware_shared_map(length,protection,flags,descriptor,offset);
+  }
   return virtual_memory_map(hint, length, protection, flags, descriptor, offset);
 #endif
   if (!length || length > 256u * 1024u * 1024u || !(flags & MAP_ANONYMOUS) ||
@@ -157,6 +162,7 @@ void *mmap(void *hint, size_t length, int protection, int flags, int descriptor,
 }
 int munmap(void *address, size_t length) {
 #ifdef USE_MUSL
+  if (firmware_shared_mapping(address)) return firmware_shared_unmap(address,length);
   if (virtual_memory_contains(address))
     return virtual_memory_unmap(address, length);
 #endif

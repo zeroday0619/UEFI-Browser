@@ -14,6 +14,11 @@ common=(-O2 -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic -fno-pie -f
 includes=(-nostdinc -isystem "$(clang -print-resource-dir)/include" -I"$source_tree/arch/x86_64" -I"$source_tree/arch/generic" -I"$libc_build/obj/src/internal" -I"$libc_build/obj/include" -I"$source_tree/src/include" -I"$source_tree/src/internal" -I"$source_tree/include" -I"$project/runtime")
 engine_flags=()
 engine_objects=()
+if [[ ${ENABLE_SERVICE_PROBE:-0} == 1 ]]; then
+ engine_flags+=(-DENABLE_SERVICE_PROBE)
+ clang "${common[@]}" "${includes[@]}" -c "$project/src/musl/io_probe.c" -o "$build/io-probe.o"
+ engine_objects+=("$build/io-probe.o")
+fi
 if [[ ${ENABLE_BLINK:-0} == 1 ]]; then
  engine_flags+=(-DENABLE_BLINK -DENABLE_CPP)
  root=$(cd "$project/../.." && pwd)
@@ -109,15 +114,19 @@ if [[ ${ENABLE_V8:-0} == 1 || ${ENABLE_CPP:-0} == 1 || ${ENABLE_SKIA:-0} == 1 ]]
  fi
  engine_objects+=("$v8/out/musl/obj/buildtools/third_party/libc++/libc++.a" "$v8/out/musl/obj/buildtools/third_party/libc++abi/libc++abi.a")
 fi
-for name in allocator startup syscalls probe; do
+for name in allocator startup threads syscalls files shared probe; do
  clang "${common[@]}" "${includes[@]}" "${engine_flags[@]}" -c "$project/src/musl/$name.c" -o "$build/$name.o"
 done
 clang "${common[@]}" "${includes[@]}" -DUSE_MUSL -c "$project/src/posix.c" -o "$build/posix.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/virtual_memory.c" -o "$build/virtual_memory.o"
 clang "${common[@]}" "${includes[@]}" -mgeneral-regs-only -c "$project/src/process/process.c" -o "$build/process.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/process/renderer_runtime.c" -o "$build/renderer_runtime.o"
+clang "${common[@]}" "${includes[@]}" -c "$project/src/network/sockets.c" -o "$build/sockets.o"
+clang "${common[@]}" "${includes[@]}" -c "$project/src/network/dns.c" -o "$build/dns.o"
+clang "${common[@]}" "${includes[@]}" -c "$project/src/audio/ac97.c" -o "$build/audio.o"
 clang -c "$project/src/process/entry.S" -o "$build/process-entry.o"
-ld.lld --error-limit=0 --gc-sections -T "$project/src/payload.ld" -o "$build/payload.next.elf" "$build/"{allocator,startup,syscalls,probe,posix,virtual_memory,process,process-entry,renderer_runtime}.o "${engine_objects[@]}" "$libc_build/lib/libc.a" "$(clang -print-libgcc-file-name --rtlib=compiler-rt)"
+clang "${common[@]}" -c "$project/src/musl/thread-switch.S" -o "$build/thread-switch.o"
+ld.lld --error-limit=0 --gc-sections -T "$project/src/payload.ld" -o "$build/payload.next.elf" "$build/"{allocator,startup,threads,thread-switch,syscalls,probe,posix,virtual_memory,process,process-entry,renderer_runtime,sockets,files,shared,dns,audio}.o "${engine_objects[@]}" "$libc_build/lib/libc.a" "$(clang -print-libgcc-file-name --rtlib=compiler-rt)"
 mv -- "$build/payload.next.elf" "$build/payload.elf"
 cat > "$build/embed.S" <<ASM
 .section .rdata,"dr"

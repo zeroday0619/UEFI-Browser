@@ -7,6 +7,8 @@
 #include "third_party/blink/renderer/platform/graphics/paint/drawing_display_item.h"
 #include "third_party/blink/renderer/core/paint/object_paint_properties.h"
 #include "third_party/blink/renderer/core/css/style_request.h"
+#include "third_party/blink/renderer/core/css/container_query_evaluator.h"
+#include "third_party/blink/renderer/core/css/scroll_state_query_snapshot.h"
 #include "third_party/blink/renderer/core/layout/layout_object_inlines.h"
 #include <algorithm>
 #include <cmath>
@@ -66,9 +68,21 @@ std::vector<blink::LocalFrameView*> FrameViews(blink::LocalFrameView* root) {
   }
   return views;
 }
+uint64_t StableScrollId(blink::ScrollableArea* area) {
+  auto* layer=blink::DynamicTo<blink::PaintLayerScrollableArea>(area);
+  auto* node=layer && layer->GetLayoutBox() ? layer->GetLayoutBox()->GetNode() : nullptr;
+  return node ? (uint64_t{1}<<63)|static_cast<uint64_t>(node->GetDomNodeId()) : 0;
+}
 blink::ScrollableArea* FindArea(blink::LocalFrameView* root,uint64_t element) {
-  for (auto* view:FrameViews(root))
-    if (auto* area=view->ScrollableAreaWithElementId(blink::CompositorElementId(element))) return area;
+  if (!element) return nullptr;
+  for (auto* view:FrameViews(root)) {
+    if (!(element&(uint64_t{1}<<63))) {
+      if (auto* area=view->ScrollableAreaWithElementId(blink::CompositorElementId(element))) return area;
+    } else {
+      if (view->LayoutViewport() && StableScrollId(view->LayoutViewport())==element) return view->LayoutViewport();
+      for (const auto& entry:view->ScrollableAreas()) if (StableScrollId(entry.value.Get())==element) return entry.value.Get();
+    }
+  }
   return nullptr;
 }
 // A detached paint proxy avoids input notifications and mutations of the live scrollbar.
@@ -501,13 +515,64 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
   if (!capture.valid) return {};
   if (capture.scene.pictures.empty()) return {};
   capture.scene.wheel_blocked|=blocking && capture.scene.wheel_regions.empty();
+  // DOM identities survive layout-object replacement and scrollbar removal between snapshots.
+  auto stable=[&](uint64_t native) { auto* area=FindArea(view,native); return area ? StableScrollId(area) : uint64_t{0}; };
+  auto stable_element=[&](blink::CompositorElementId id) { uint64_t value=stable(id.GetInternalValue()); return value ? blink::CompositorElementId(value) : blink::CompositorElementId(); };
+  for (auto& transform:capture.scene.transforms) {
+    if (transform.element) transform.element=stable(transform.element);
+    if (transform.scroll_parent) transform.scroll_parent=stable(transform.scroll_parent);
+    if (transform.sticky) {
+      transform.constraint.x_scroll_ancestor_element_id=stable_element(transform.constraint.x_scroll_ancestor_element_id);
+      transform.constraint.y_scroll_ancestor_element_id=stable_element(transform.constraint.y_scroll_ancestor_element_id);
+    }
+  }
+  for (auto& bar:capture.scene.scrollbars) bar.element=stable(bar.element);
   *reason=0;
   return std::make_shared<ScrollScene>(std::move(capture.scene));
 }
-void ApplyScrollOffset(blink::WebView& web_view,uint64_t element,int x,int y) {
+void ApplyScrollOffset(blink::WebView& web_view,uint64_t element,int x,int y,bool synchronize_queries) {
   auto* view=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame())->GetFrame()->View();
-  if (auto* area=FindArea(view,element)) area->SetScrollOffset(blink::ScrollOffset(x,y),
+  auto* area=FindArea(view,element);
+  if (!area) return;
+  if (!synchronize_queries) {
+    area->SetScrollOffset(blink::ScrollOffset(x,y),blink::mojom::blink::ScrollType::kCompositor,cc::ScrollSourceType::kRelativeScroll);
+    return;
+  }
+  auto* layer=blink::DynamicTo<blink::PaintLayerScrollableArea>(area);
+  auto* owner=layer && layer->GetLayoutBox() ? blink::DynamicTo<blink::Element>(layer->GetLayoutBox()->GetNode()) : nullptr;
+  auto* evaluator=owner ? owner->GetContainerQueryEvaluator() : nullptr;
+  blink::Persistent<blink::ScrollStateQuerySnapshot> query(evaluator && evaluator->DependsOnScrollable() ? evaluator->UefiScrollStateSnapshot() : nullptr);
+  if (query) {
+    // Resolve query-dependent ranges before clamping a coordinate produced by the BSP scene.
+    for (unsigned pass=0;pass<4 && area;++pass) {
+      auto minimum=area->MinimumScrollOffset(),maximum=area->MaximumScrollOffset();
+      unsigned horizontal=(x>minimum.x() ? 1 : 0)|(x<maximum.x() ? 2 : 0);
+      unsigned vertical=(y>minimum.y() ? 1 : 0)|(y<maximum.y() ? 2 : 0);
+      query->OverrideForUefi(horizontal,vertical);
+      view->UpdateLifecycleToLayoutClean(blink::DocumentUpdateReason::kInput);
+      area=FindArea(view,element);
+      if (area && minimum==area->MinimumScrollOffset() && maximum==area->MaximumScrollOffset()) break;
+    }
+  }
+  if (area) area->SetScrollOffset(blink::ScrollOffset(x,y),
       blink::mojom::blink::ScrollType::kCompositor,cc::ScrollSourceType::kRelativeScroll);
+  if (query) query->OverrideForUefi(-1,-1);
+  // Sticky query descendants can also change the range after the first offset is applied.
+  for (unsigned pass=0;pass<4;++pass) {
+    view->UpdateLifecycleToLayoutClean(blink::DocumentUpdateReason::kInput);
+    bool changed=false;
+    for (auto* child:FrameViews(view)) {
+      for (auto* object=static_cast<blink::LayoutObject*>(child->GetLayoutView());object;object=object->NextInPreOrder()) {
+        auto* element=blink::DynamicTo<blink::Element>(object->GetNode());
+        auto* evaluator=element ? element->GetContainerQueryEvaluator() : nullptr;
+        if (evaluator && evaluator->UefiScrollStateSnapshot()) changed|=evaluator->UefiScrollStateSnapshot()->UpdateSnapshot();
+      }
+    }
+    if (!changed) break;
+    view->UpdateLifecycleToLayoutClean(blink::DocumentUpdateReason::kInput);
+    if (auto* accepted=FindArea(view,element)) accepted->SetScrollOffset(blink::ScrollOffset(x,y),
+        blink::mojom::blink::ScrollType::kCompositor,cc::ScrollSourceType::kRelativeScroll);
+  }
 }
 void ApplyScrollbarState(blink::WebView& web_view,uint64_t element,bool horizontal,unsigned hover,unsigned press) {
   auto* frame=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame())->GetFrame();
@@ -530,6 +595,14 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
   auto* view=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame())->GetFrame()->View();
   auto views=FrameViews(view);
   if (views.empty()) return;
+  struct QueryCacheGuard {
+    ScrollScene& scene;
+    bool dependent=false, complete=false;
+    ~QueryCacheGuard() { if (dependent && !complete) scene={}; }
+  } query_guard{scene};
+  for (auto* child:views)
+    for (auto* object=static_cast<blink::LayoutObject*>(child->GetLayoutView());object;object=object->NextInPreOrder())
+      if (object->HasStyle()) query_guard.dependent|=object->Style().IsContainerForScrollStateContainerQueries() || object->Style().IsContainerForAnchoredContainerQueries();
   struct Candidate {
     blink::Persistent<blink::CustomScrollbar> bar;
     blink::Persistent<blink::Node> owner;
@@ -545,7 +618,7 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
     std::set<int> sizes(bar.thickness.begin(),bar.thickness.end());
     if (sizes.size()<2) continue;
     // A disappearing scrollbar can destroy its layout object during the speculative pass.
-    if (*sizes.begin()<=0 || *sizes.rbegin()>256 || combinations>16/sizes.size()) return;
+    if (*sizes.begin()<=0 || *sizes.rbegin()>256 || combinations>64/sizes.size()) return;
     auto* area=FindArea(view,bar.element);
     if (!area) return;
     auto* source=bar.horizontal ? area->HorizontalScrollbar() : area->VerticalScrollbar();
@@ -555,12 +628,48 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
         {sizes.begin(),sizes.end()},bar.element,bar.horizontal,bar.painted_hover,bar.painted_press});
     combinations*=sizes.size();
   }
-  if (candidates.empty()) return;
-  // Scroll-state and anchored queries need lifecycle snapshots beyond this size-layout pass.
-  for (auto* child:views)
-    for (auto* object=static_cast<blink::LayoutObject*>(child->GetLayoutView());object;object=object->NextInPreOrder())
-      if (object->HasStyle() && (object->Style().IsContainerForScrollStateContainerQueries() ||
-          object->Style().IsContainerForAnchoredContainerQueries())) return;
+  struct Query {
+    blink::Persistent<blink::Element> owner;
+    blink::Persistent<blink::ScrollStateQuerySnapshot> snapshot;
+    uint64_t element;
+    bool stuck;
+  };
+  std::vector<Query> queries;
+  for (auto* child:views) {
+    for (auto* object=static_cast<blink::LayoutObject*>(child->GetLayoutView());object;object=object->NextInPreOrder()) {
+      if (object->HasStyle() && object->Style().IsContainerForAnchoredContainerQueries()) return;
+      auto* owner=blink::DynamicTo<blink::Element>(object->GetNode());
+      auto* evaluator=owner ? owner->GetContainerQueryEvaluator() : nullptr;
+      if (!evaluator) continue;
+      if (evaluator->DependsOnSnapped() || evaluator->DependsOnScrolled() ||
+          (evaluator->DependsOnStuck() && evaluator->DependsOnScrollable())) { scene={}; return; }
+      if (!evaluator->DependsOnScrollable() && !evaluator->DependsOnStuck()) continue;
+      bool stuck=evaluator->DependsOnStuck();
+      auto* snapshot=evaluator->UefiScrollStateSnapshot();
+      auto* area=owner->GetLayoutBox() ? owner->GetLayoutBox()->GetScrollableArea() : nullptr;
+      if (owner==child->GetFrame().GetDocument()->documentElement()) area=child->LayoutViewport();
+      unsigned states=stuck ? 9 : 16;
+      if (!snapshot || (!stuck && !area) || combinations>64/states) { scene={}; return; }
+      uint64_t element=stuck ? (uint64_t{1}<<63)|static_cast<uint64_t>(owner->GetDomNodeId()) : StableScrollId(area);
+      if (std::any_of(queries.begin(),queries.end(),[&](const auto& query){return query.element==element;})) continue;
+      queries.push_back({blink::Persistent<blink::Element>(owner),blink::Persistent<blink::ScrollStateQuerySnapshot>(snapshot),element,stuck});
+      combinations*=states;
+    }
+  }
+  if (candidates.empty() && queries.empty()) return;
+  auto condition=[&](const Query& query,unsigned horizontal,unsigned vertical) {
+    uint64_t element=query.element;
+    if (query.stuck) {
+      auto* object=query.owner->GetLayoutObject();
+      auto* properties=object ? object->FirstFragment().PaintProperties() : nullptr;
+      auto* translation=properties ? properties->StickyTranslation() : nullptr;
+      element=translation ? translation->GetCompositorElementId().GetInternalValue() : 0;
+    }
+    return ScrollQuery{element,horizontal,vertical,query.stuck};
+  };
+  for (const auto& query:queries) scene.queries.push_back(condition(query,
+      query.stuck ? static_cast<unsigned>(query.snapshot->StuckHorizontal()) : static_cast<unsigned>(query.snapshot->ScrollableHorizontal()),
+      query.stuck ? static_cast<unsigned>(query.snapshot->StuckVertical()) : static_cast<unsigned>(query.snapshot->ScrollableVertical())));
   struct SavedOffset { blink::Persistent<blink::PaintLayerScrollableArea> area; blink::Persistent<blink::Node> owner; blink::ScrollOffset offset; };
   std::vector<SavedOffset> offsets;
   for (auto* child:views) {
@@ -570,10 +679,10 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
   blink::ScriptForbiddenScope forbid_script;
   for (auto* child:views) child->scrollbar_snapshot_mode=true;
   bool valid=true;
-  size_t bytes=0;
+  size_t bytes=candidates.size()*sizeof(ScrollGutter);
   std::set<const SkData*> allocations;
   auto reserve=[&](const ScrollScene& variant) {
-    bytes+=sizeof(ScrollScene)+variant.transforms.size()*sizeof(ScrollTransform)+
+    bytes+=sizeof(ScrollScene)+variant.gutters.size()*sizeof(ScrollGutter)+variant.queries.size()*sizeof(ScrollQuery)+variant.transforms.size()*sizeof(ScrollTransform)+
         variant.clips.size()*sizeof(ScrollClip)+variant.effects.size()*sizeof(ScrollEffect)+
         variant.pictures.size()*sizeof(ScrollPicture)+variant.scrollbars.size()*sizeof(ScrollbarScene);
     for (const auto& bar:variant.scrollbars) bytes+=bar.layouts.size()*sizeof(ScrollbarLayout);
@@ -585,13 +694,27 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
     for (const auto& font:variant.fonts) add(font);
     return bytes<=16*1024*1024;
   };
-  if (!reserve(scene)) { for (auto* child:views) child->scrollbar_snapshot_mode=false; return; }
+  if (!reserve(scene)) {
+    for (auto* child:views) child->scrollbar_snapshot_mode=false;
+    if (!queries.empty()) scene={};
+    return;
+  }
   for (size_t index=0;index<combinations && valid;++index) {
     size_t choice=index;
     std::vector<int> thicknesses;
     for (const auto& candidate:candidates) {
       int size=candidate.sizes[choice%candidate.sizes.size()]; choice/=candidate.sizes.size();
       thicknesses.push_back(size);
+    }
+    std::vector<ScrollQuery> query_states;
+    for (const auto& query:queries) {
+      unsigned count=query.stuck ? 3 : 4;
+      unsigned horizontal=choice%count; choice/=count;
+      unsigned vertical=choice%count; choice/=count;
+      if (query.stuck && vertical) vertical+=2;
+      if (query.stuck) query.snapshot->OverrideStuckForUefi(horizontal,vertical);
+      else query.snapshot->OverrideForUefi(horizontal,vertical);
+      query_states.push_back(condition(query,horizontal,vertical));
     }
     // Capture every tuple, including the current one, so selection never depends on paint state.
     for (size_t item=0;item<candidates.size();++item) candidates[item].bar->OverrideSnapshotThickness(thicknesses[item]);
@@ -600,13 +723,24 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
     if (!valid) break;
     int reason=0;
     auto variant=CaptureScrollScene(web_view,&reason,&scene);
-    if (!variant || !reserve(*variant)) { valid=false; break; }
-    if (variant->scrollbars.size()!=scene.scrollbars.size() ||
-        std::any_of(scene.scrollbars.begin(),scene.scrollbars.end(),[&](const auto& original) {
-          return std::none_of(variant->scrollbars.begin(),variant->scrollbars.end(),[&](const auto& item) {
-            return item.element==original.element && item.horizontal==original.horizontal && item.thickness==original.thickness;
-          });
-        })) { valid=false; break; }
+    if (!variant) { valid=false; break; }
+    for (size_t item=0;item<queries.size();++item) {
+      const auto& state=query_states[item];
+      variant->queries.push_back(condition(queries[item],state.horizontal,state.vertical));
+    }
+    // Only driving scrollbars must remain stable; dependent scrollbars may appear or disappear.
+    for (size_t item=0;item<candidates.size();++item) {
+      const auto& candidate=candidates[item];
+      auto found=std::find_if(variant->scrollbars.begin(),variant->scrollbars.end(),[&](const auto& bar) {
+        return bar.element==candidate.element && bar.horizontal==candidate.horizontal;
+      });
+      auto original=std::find_if(scene.scrollbars.begin(),scene.scrollbars.end(),[&](const auto& bar) {
+        return bar.element==candidate.element && bar.horizontal==candidate.horizontal;
+      });
+      if (found==variant->scrollbars.end() || found->thickness!=original->thickness) { valid=false; break; }
+      variant->gutters.push_back({candidate.element,candidate.horizontal,thicknesses[item],original->thickness});
+    }
+    if (!valid || !reserve(*variant)) { valid=false; break; }
     scene.reflows.push_back(std::move(variant));
   }
   for (const auto& candidate:candidates) candidate.bar->OverrideSnapshotThickness(-1);
@@ -625,7 +759,11 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
   for (const auto& saved:offsets) {
     auto* area=saved.area->GetLayoutBox() ? saved.area.Get() :
         (saved.owner && saved.owner->GetLayoutBox() ? saved.owner->GetLayoutBox()->GetScrollableArea() : nullptr);
-    if (area) area->SetScrollOffset(saved.offset,blink::mojom::blink::ScrollType::kClamping,cc::ScrollSourceType::kNone);
+    if (area) area->SetScrollOffset(saved.offset,blink::mojom::blink::ScrollType::kClamping,cc::ScrollSourceType::kStationaryScroll);
+  }
+  for (const auto& query:queries) {
+    if (query.stuck) query.snapshot->OverrideStuckForUefi(-1,-1);
+    else query.snapshot->OverrideForUefi(-1,-1);
   }
   bool restored_layout=view->UpdateScrollbarSnapshotLayout();
   valid=restored_layout && valid;
@@ -633,8 +771,18 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
     // Recreated layout objects have new scroll IDs; even the restored base scene must be refreshed.
     int reason=0;
     auto restored=restored_layout ? CaptureScrollScene(web_view,&reason,&scene) : nullptr;
-    scene=restored ? std::move(*restored) : ScrollScene{};
+    scene=restored && queries.empty() ? std::move(*restored) : ScrollScene{};
   }
+  if (valid) {
+    for (const auto& candidate:candidates) {
+      auto original=std::find_if(scene.scrollbars.begin(),scene.scrollbars.end(),[&](const auto& bar) {
+        return bar.element==candidate.element && bar.horizontal==candidate.horizontal;
+      });
+      scene.gutters.push_back({candidate.element,candidate.horizontal,
+          static_cast<int>(candidate.horizontal ? original->frame.height() : original->frame.width()),original->thickness});
+    }
+  }
+  query_guard.complete=valid;
   for (auto* child:views) child->scrollbar_snapshot_mode=false;
   std::printf("COMPOSITOR: gutter snapshots=%zu bytes=%zu\n",scene.reflows.size(),bytes);
 }
@@ -661,7 +809,7 @@ uint64_t KeyboardScrollTarget(blink::WebView& web_view) {
   }
   for (blink::Node* node=focused ? focused : document->body();node;node=node->ParentOrShadowHostNode())
     if (handlers(node)) return 0;
-  return area ? area->GetScrollElementId().GetInternalValue() : 0;
+  return area ? StableScrollId(area) : 0;
 }
 SkRect ScrollCompositor::Global(SkRect bounds,int transform) const {
   if (transform>=0) bounds.offset(offsets_[transform].x(),offsets_[transform].y());
@@ -684,7 +832,15 @@ uint64_t ScrollCompositor::Move(uint64_t element,int value,bool absolute,bool ch
     bool propagate=horizontal ? found->chain_x : found->chain;
     int next=allowed ? std::clamp(absolute ? value : current+value,minimum,maximum) : current;
     if (allowed && (next!=current || !chain || !propagate)) {
-      current=next; *position={found->position_x,found->position}; UpdateTransforms(); return element;
+      int previous=current;
+      current=next; UpdateTransforms(); SelectReflow();
+      if (!reflow_valid_) {
+        current=previous; UpdateTransforms();
+        return 0;
+      }
+      auto accepted=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==element;});
+      *position=accepted==scene_.transforms.end() ? ScrollPosition{} : ScrollPosition{accepted->position_x,accepted->position};
+      return element;
     }
     if (!chain || !propagate) return 0;
     element=found->scroll_parent;
@@ -870,7 +1026,7 @@ void ScrollCompositor::SwapScene(ScrollCompositor& other) {
   images_.swap(other.images_); fonts_.swap(other.fonts_); offsets_.swap(other.offsets_); tiles_.swap(other.tiles_);
 }
 bool ScrollCompositor::Install(const ScrollScene& source) {
-  reflows_.clear(); reflow_states_.clear(); selected_reflow_=painted_reflow_=0;
+  reflows_.clear(); reflow_states_.clear(); retained_positions_.clear(); selected_reflow_=painted_reflow_=0;
   if (!InstallScene(source)) return false;
   for (const auto& variant:source.reflows) {
     auto compositor=std::make_unique<ScrollCompositor>();
@@ -889,33 +1045,86 @@ std::vector<ScrollbarState> ScrollCompositor::TakeReflowStates() {
   return std::exchange(reflow_states_,{});
 }
 bool ScrollCompositor::SelectReflow() {
+  reflow_valid_=true;
   if (reflows_.empty()) return false;
   auto matches=[&](const ScrollScene& candidate) {
-    for (const auto& bar:scene_.scrollbars) {
-      if (!bar.custom) continue;
-      unsigned pressed=drag_element_==bar.element && drag_horizontal_==bar.horizontal ? pressed_part_ : 0;
-      int desired=bar.thickness[(bar.hover ? 1 : 0)|(pressed ? 2 : 0)];
-      auto found=std::find_if(candidate.scrollbars.begin(),candidate.scrollbars.end(),[&](const auto& item){return item.element==bar.element && item.horizontal==bar.horizontal;});
-      if (found==candidate.scrollbars.end() || desired!=(bar.horizontal ? found->frame.height() : found->frame.width())) return false;
+    for (const auto& gutter:candidate.gutters) {
+      auto found=std::find_if(scene_.scrollbars.begin(),scene_.scrollbars.end(),[&](const auto& bar) {
+        return bar.element==gutter.element && bar.horizontal==gutter.horizontal;
+      });
+      unsigned hover=found==scene_.scrollbars.end() ? 0 : found->hover;
+      unsigned pressed=drag_element_==gutter.element && drag_horizontal_==gutter.horizontal ? pressed_part_ : 0;
+      if (gutter.thickness!=gutter.states[(hover ? 1 : 0)|(pressed ? 2 : 0)]) return false;
+    }
+    if (candidate.queries.empty()) return true;
+    bool has_stuck=std::any_of(candidate.queries.begin(),candidate.queries.end(),[](const auto& query){return query.stuck;});
+    size_t count=has_stuck ? candidate.transforms.size() : 0;
+    std::vector<gfx::Vector2dF> sticky_offsets(count),box_offsets(count),containing_offsets(count);
+    for (size_t index=0;index<count;++index) {
+      const auto& node=candidate.transforms[index];
+      if (!node.sticky) continue;
+      gfx::PointF position;
+      for (const auto& scroll:candidate.transforms) if (scroll.element) {
+        auto current=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& item){return item.element==scroll.element;});
+        int x=current==scene_.transforms.end() ? scroll.position_x : std::clamp(current->position_x,scroll.minimum_x,scroll.maximum_x);
+        int y=current==scene_.transforms.end() ? scroll.position : std::clamp(current->position,scroll.minimum,scroll.maximum);
+        if (scroll.element==node.constraint.x_scroll_ancestor_element_id.GetInternalValue()) position.set_x(x);
+        if (scroll.element==node.constraint.y_scroll_ancestor_element_id.GetInternalValue()) position.set_y(y);
+      }
+      auto ancestor_offset=[&](cc::ElementId element,const auto& offsets) {
+        gfx::Vector2dF result;
+        for (size_t ancestor=0;ancestor<index;++ancestor) {
+          const auto& previous=candidate.transforms[ancestor];
+          if (!element || previous.sticky_element!=element.GetInternalValue()) continue;
+          if (previous.constraint.x_scroll_ancestor_element_id==node.constraint.x_scroll_ancestor_element_id) result.set_x(offsets[ancestor].x());
+          if (previous.constraint.y_scroll_ancestor_element_id==node.constraint.y_scroll_ancestor_element_id) result.set_y(offsets[ancestor].y());
+        }
+        return result;
+      };
+      auto box=ancestor_offset(node.constraint.nearest_element_shifting_sticky_box,box_offsets);
+      auto containing=ancestor_offset(node.constraint.nearest_element_shifting_containing_block,containing_offsets);
+      sticky_offsets[index]=node.constraint.StickyPositionOffset(position,{},box,containing);
+      box_offsets[index]=box+sticky_offsets[index];
+      containing_offsets[index]=box+containing+sticky_offsets[index];
+    }
+    for (const auto& query:candidate.queries) {
+      if (query.stuck) {
+        auto found=std::find_if(candidate.transforms.begin(),candidate.transforms.end(),[&](const auto& item){return item.sticky && item.sticky_element==query.element;});
+        auto delta=found==candidate.transforms.end() ? gfx::Vector2dF() : sticky_offsets[found-candidate.transforms.begin()];
+        unsigned horizontal=delta.x()>0 ? 1 : delta.x()<0 ? 2 : 0;
+        unsigned vertical=delta.y()>0 ? 3 : delta.y()<0 ? 4 : 0;
+        if (horizontal!=query.horizontal || vertical!=query.vertical) return false;
+        continue;
+      }
+      auto node=std::find_if(candidate.transforms.begin(),candidate.transforms.end(),[&](const auto& item){return item.element==query.element;});
+      auto current=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& item){return item.element==query.element;});
+      int x=current==scene_.transforms.end() ? 0 : current->position_x;
+      int y=current==scene_.transforms.end() ? 0 : current->position;
+      unsigned horizontal=node==candidate.transforms.end() ? 0 : (x>node->minimum_x ? 1 : 0)|(x<node->maximum_x ? 2 : 0);
+      unsigned vertical=node==candidate.transforms.end() ? 0 : (y>node->minimum ? 1 : 0)|(y<node->maximum ? 2 : 0);
+      if (query.horizontal!=horizontal || query.vertical!=vertical) return false;
     }
     return true;
   };
   if (matches(scene_)) return false;
   auto found=std::find_if(reflows_.begin(),reflows_.end(),[&](const auto& item){return matches(item->scene_);});
-  if (found==reflows_.end()) return false;
+  if (found==reflows_.end()) { reflow_valid_=false; return false; }
   auto& other=**found;
   auto old_transforms=scene_.transforms;
   auto old_bars=scene_.scrollbars;
+  for (const auto& node:old_transforms) if (node.element) retained_positions_[node.element]={node.position_x,node.position};
   SwapScene(other);
   // Alternate layouts share one resident tile budget instead of multiplying it by the state count.
   other.tiles_.clear();
   // Each slot holds the scene displaced by the last swap, so its identity moves with it.
   std::swap(selected_reflow_,other.selected_reflow_);
+  for (auto& [element,position]:retained_positions_)
+    if (std::none_of(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==element;})) position={};
   for (auto& node:scene_.transforms) if (node.element) {
-    auto previous=std::find_if(old_transforms.begin(),old_transforms.end(),[&](const auto& item){return item.element==node.element;});
-    if (previous!=old_transforms.end()) {
-      node.position=std::clamp(previous->position,node.minimum,node.maximum);
-      node.position_x=std::clamp(previous->position_x,node.minimum_x,node.maximum_x);
+    auto previous=retained_positions_.find(node.element);
+    if (previous!=retained_positions_.end()) {
+      node.position=std::clamp(previous->second.y,node.minimum,node.maximum);
+      node.position_x=std::clamp(previous->second.x,node.minimum_x,node.maximum_x);
     }
   }
   for (auto& bar:scene_.scrollbars) {
@@ -926,6 +1135,9 @@ bool ScrollCompositor::SelectReflow() {
       reflow_states_.push_back({bar.element,bar.horizontal,bar.hover,pressed});
     }
   }
+  if (drag_element_ && std::none_of(scene_.scrollbars.begin(),scene_.scrollbars.end(),[&](const auto& bar) {
+        return bar.element==drag_element_ && bar.horizontal==drag_horizontal_;
+      })) { drag_element_=0; pressed_part_=0; repeat_at_=0; }
   UpdateTransforms(); UpdateLayouts();
   if (drag_element_ && !drag_part_) for (const auto& bar:scene_.scrollbars) if (bar.element==drag_element_ && bar.horizontal==drag_horizontal_) {
     auto thumb=Global(bar.thumb,bar.thumb_transform);
@@ -936,7 +1148,7 @@ bool ScrollCompositor::SelectReflow() {
   return true;
 }
 void ScrollCompositor::Clear() {
-  reflows_.clear(); reflow_states_.clear(); selected_reflow_=painted_reflow_=0;
+  reflows_.clear(); reflow_states_.clear(); retained_positions_.clear(); selected_reflow_=painted_reflow_=0;
   drag_element_=0; pressed_part_=0;
   pictures_.clear(); appearances_.clear(); images_.clear(); fonts_.clear(); offsets_.clear(); tiles_.clear(); scene_={};
 }
@@ -965,7 +1177,7 @@ bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   }
   scene_.image_keys=source.image_keys; scene_.font_keys=source.font_keys;
   scene_.wheel_listeners=source.wheel_listeners; scene_.wheel_blocked=source.wheel_blocked;
-  scene_.wheel_regions=source.wheel_regions; scene_.scrollbars=source.scrollbars;
+  scene_.wheel_regions=source.wheel_regions; scene_.scrollbars=source.scrollbars; scene_.gutters=source.gutters; scene_.queries=source.queries;
   for (auto& bar:scene_.scrollbars) {
     auto found=std::find_if(hovered_parts.begin(),hovered_parts.end(),[&](const auto& state){return state.element==bar.element && state.horizontal==bar.horizontal;});
     if (found!=hovered_parts.end()) bar.hover=found->part;

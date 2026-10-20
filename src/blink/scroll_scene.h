@@ -6,12 +6,13 @@
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkTypeface.h"
 #include <deque>
+#include <map>
 namespace blink { class WebView; }
 namespace uefi_browser {
 uint64_t KeyboardScrollTarget(blink::WebView&);
 std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView&, int* reason, const ScrollScene* previous);
 void CaptureScrollbarReflows(blink::WebView&, ScrollScene&);
-void ApplyScrollOffset(blink::WebView&, uint64_t element, int x, int y);
+void ApplyScrollOffset(blink::WebView&, uint64_t element, int x, int y, bool synchronize_queries);
 void ApplyScrollbarState(blink::WebView&, uint64_t element, bool horizontal, unsigned hover, unsigned press);
 struct ScrollbarState { uint64_t element; bool horizontal; unsigned hover, press; };
 class ScrollCompositor {
@@ -32,10 +33,12 @@ class ScrollCompositor {
   bool Ready() const { return !pictures_.empty(); }
  private:
   bool SelectReflow();
+  bool reflow_valid_=true;
   void SwapScene(ScrollCompositor&);
   bool InstallScene(const ScrollScene&);
   std::vector<std::unique_ptr<ScrollCompositor>> reflows_;
   std::vector<ScrollbarState> reflow_states_;
+  std::map<uint64_t,ScrollPosition> retained_positions_;
   unsigned selected_reflow_=0, painted_reflow_=0;
   uint64_t Move(uint64_t element, int value, bool absolute, bool chain, ScrollPosition* position, bool horizontal=false);
   SkRect Global(SkRect bounds, int transform) const;

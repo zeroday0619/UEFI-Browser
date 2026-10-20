@@ -1,6 +1,9 @@
 #ifndef UEFI_BROWSER_BROKER_H
 #define UEFI_BROWSER_BROKER_H
 #include <cstdio>
+#include "blink/web_socket.h"
+#include "blink/cache_storage.h"
+#include "blink/indexed_db.h"
 #include <utility>
 #include "mojo/public/cpp/bindings/generic_pending_receiver.h"
 #include "mojo/public/cpp/bindings/receiver.h"
@@ -19,7 +22,20 @@ class BrowserBroker final : public blink::mojom::BrowserInterfaceBroker,
   mojo::PendingRemote<blink::mojom::BrowserInterfaceBroker> Bind() {
     return receiver_.BindNewPipeAndPassRemote();
   }
+  void SetFrameToken(blink::LocalFrameToken token) { token_ = token; sockets_ = CreateWebSocketService(token); }
   void GetInterface(mojo::GenericPendingReceiver receiver) override {
+    if (auto database = receiver.As<blink::mojom::IDBFactory>()) {
+      BindIndexedDB(token_, std::move(database));
+      return;
+    }
+    if (auto cache = receiver.As<blink::mojom::CacheStorage>()) {
+      BindCacheStorage(token_, std::move(cache));
+      return;
+    }
+    if (auto socket = receiver.As<blink::mojom::WebSocketConnector>()) {
+      if (sockets_) sockets_->Bind(std::move(socket));
+      return;
+    }
     if (auto permission = receiver.As<blink::mojom::PermissionService>()) {
       permissions_.Add(this, std::move(permission));
       return;
@@ -71,6 +87,8 @@ class BrowserBroker final : public blink::mojom::BrowserInterfaceBroker,
   void NotifyEventListener(blink::mojom::PermissionDescriptorPtr,
                            const std::string&, bool) override {}
  private:
+  blink::LocalFrameToken token_;
+  std::unique_ptr<WebSocketService> sockets_;
   static blink::mojom::PermissionStatusWithDetailsPtr Denied() {
     return blink::mojom::PermissionStatusWithDetails::New(
         blink::mojom::PermissionStatus::DENIED, nullptr);

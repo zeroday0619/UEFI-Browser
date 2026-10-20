@@ -11,7 +11,7 @@ struct RendererMp {
   Status(UEFI_API *who)(RendererMp*, size_t*);
 };
 extern int UEFI_API browser_setjmp(void*) __attribute__((returns_twice));
-extern void renderer_trap_nmi(void), renderer_trap_invalid(void), renderer_trap_page(void), renderer_trap_general(void), renderer_trap_divide(void);
+extern void renderer_trap_breakpoint(void), renderer_trap_nmi(void), renderer_trap_invalid(void), renderer_trap_page(void), renderer_trap_general(void), renderer_trap_divide(void);
 uint64_t renderer_escape_context[32], renderer_fault[3];
 uint64_t renderer_escape_stack;
 uint32_t renderer_trap_armed, renderer_nmi_seen;
@@ -92,6 +92,7 @@ static void UEFI_API renderer_execute(void *argument) {
   __asm__ volatile("mov %%cr3,%0; pushfq; pop %1; cli; sidt %2" : "=r"(previous_root), "=r"(previous_flags), "=m"(previous_idt) :: "memory");
   copy(renderer.idt,(void*)previous_idt.address,previous_idt.limit+1);
   renderer_gate(0,renderer_trap_divide); renderer_gate(2,renderer_trap_nmi);
+  renderer_gate(3,renderer_trap_breakpoint);
   renderer_gate(6,renderer_trap_invalid); renderer_gate(13,renderer_trap_general);
   renderer_gate(14,renderer_trap_page);
   struct RendererDescriptor descriptor={4095,(uintptr_t)renderer.idt};

@@ -2,29 +2,29 @@
 +++ b/BUILD.gn
 @@ -7867,6 +7867,9 @@
    data_deps = []
- 
+
    defines = []
 +  if (use_uefi_runtime && current_toolchain == default_toolchain) {
 +    defines += [ "V8_UEFI_RUNTIME" ]
 +  }
- 
+
    if (is_component_build) {
      defines = [ "BUILDING_V8_BASE_SHARED" ]
 --- a/src/base/numbers/bignum.cc
 +++ b/src/base/numbers/bignum.cc
 @@ -3,6 +3,7 @@
  // found in the LICENSE file.
- 
+
  #include "src/base/numbers/bignum.h"
 +#include <algorithm>
- 
+
  #include <string_view>
- 
+
 --- a/src/base/platform/platform-posix.cc
 +++ b/src/base/platform/platform-posix.cc
 @@ -704,7 +704,13 @@
  }
- 
+
  // static
 -bool OS::CanReserveAddressSpace() { return true; }
 +bool OS::CanReserveAddressSpace() {
@@ -34,7 +34,7 @@
 +  return true;
 +#endif
 +}
- 
+
  // static
  std::optional<AddressSpaceReservation> OS::CreateAddressSpaceReservation(
 @@ -772,7 +778,9 @@
@@ -53,10 +53,28 @@
 @@ -12,7 +12,8 @@
  #include "src/ic/stub-cache.h"
  #include "src/logging/counters.h"
- 
+
 -#if defined(DEBUG) && defined(V8_OS_LINUX) && !defined(V8_OS_ANDROID)
 +#if defined(DEBUG) && defined(V8_OS_LINUX) && !defined(V8_OS_ANDROID) && \
 +    !defined(UEFI_RUNTIME)
  #define SYMBOLIZE_FUNCTION
  #include <execinfo.h>
- 
+
+--- a/src/heap/code-range.cc
++++ b/src/heap/code-range.cc
+@@ -183,6 +183,15 @@
+         base::PageInitializationMode::kRecommitOnly;
+     params.page_freeing_mode = base::PageFreeingMode::kDiscard;
+   }
++
++#if defined(UEFI_RUNTIME)
++  // Firmware has no demand-fault allocator. Committing an entire code range
++  // would retain 512 MiB of physical memory per isolate after MADV_DONTNEED.
++  // Allocate backing only when individual code pages become accessible.
++  params.page_initialization_mode =
++      base::PageInitializationMode::kAllocatedPagesCanBeUninitialized;
++  params.page_freeing_mode = base::PageFreeingMode::kMakeInaccessible;
++#endif
+
+ #if defined(V8_TARGET_OS_IOS) || defined(V8_TARGET_OS_CHROMEOS)
+   // iOS:
