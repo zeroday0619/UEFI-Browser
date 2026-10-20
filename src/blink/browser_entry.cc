@@ -36,9 +36,13 @@
 #include "blink/remote_frame.h"
 #include "renderer_runtime.h"
 #include "blink/workers.h"
+#include "blink/gpu_context.h"
+#include "blink/webgl_context.h"
 #include "blink/scheduler.h"
 #include "mojo/core/embedder/embedder.h"
 #include "mojo/public/cpp/bindings/binder_map.h"
+#include "mojo/public/cpp/bindings/receiver_set.h"
+#include "third_party/blink/public/mojom/gpu/gpu.mojom.h"
 #include "third_party/blink/public/platform/platform.h"
 #include "third_party/blink/public/platform/web_network_state_notifier.h"
 #include "third_party/blink/public/web/blink.h"
@@ -613,9 +617,26 @@ struct BrowserContext {
     return handled;
   }
 };
+class FirmwareGPUAccess final : public blink::mojom::GpuDataManager {
+ public:
+  void Bind(mojo::PendingReceiver<blink::mojom::GpuDataManager> receiver) {
+    receivers_.Add(this, std::move(receiver));
+  }
+  void Are3DAPIsBlockedForUrl(const GURL& url,
+      Are3DAPIsBlockedForUrlCallback callback) override {
+    std::move(callback).Run(!url.SchemeIsHTTPOrHTTPS());
+  }
+ private:
+  mojo::ReceiverSet<blink::mojom::GpuDataManager> receivers_;
+};
 class FirmwareProcessBroker final : public blink::ThreadSafeBrowserInterfaceBrokerProxy {
  public:
   void GetInterfaceImpl(mojo::GenericPendingReceiver receiver) override {
+    if (auto gpu = receiver.As<blink::mojom::GpuDataManager>()) {
+      static FirmwareGPUAccess access;
+      access.Bind(std::move(gpu));
+      return;
+    }
     if (auto blob = receiver.As<blink::mojom::BlobRegistry>()) {
       uefi_browser::BindBlobRegistry(std::move(blob));
       return;
@@ -625,6 +646,12 @@ class FirmwareProcessBroker final : public blink::ThreadSafeBrowserInterfaceBrok
 };
 class FirmwarePlatform final : public blink::Platform {
  public:
+  std::unique_ptr<blink::WebGraphicsContext3DProvider>
+  CreateWebGLGraphicsContextProvider(bool, bool fail_if_major_performance_caveat,
+      WebGLContextType type, const blink::WebURL&, WebGLContextInfo* information) override {
+    if (fail_if_major_performance_caveat) return nullptr;
+    return uefi_browser::CreateWebGLProvider(type, information);
+  }
   blink::ThreadSafeBrowserInterfaceBrokerProxy* GetBrowserInterfaceBroker() override {
     static scoped_refptr<FirmwareProcessBroker> broker = base::MakeRefCounted<FirmwareProcessBroker>();
     return broker.get();
@@ -637,10 +664,9 @@ class FirmwarePlatform final : public blink::Platform {
   void CreateWebGPUGraphicsContext3DProviderAsync(
       const blink::WebURL&, WebGPUReplyThread,
       base::OnceCallback<void(std::unique_ptr<blink::WebGraphicsContext3DProvider>)> callback) override {
-    // A missing device must complete the request so pages can choose a CPU fallback.
     base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
         FROM_HERE, base::BindOnce(std::move(callback),
-            std::unique_ptr<blink::WebGraphicsContext3DProvider>()));
+            uefi_browser::CreateWebGPUProvider()));
   }
   scoped_refptr<base::SingleThreadTaskRunner> GetIOTaskRunner() const override {
     // Firmware I/O and renderer work share the single main-thread event loop.

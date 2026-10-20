@@ -40,6 +40,16 @@ void musl_initialize(SystemTable *table, void *stack, size_t stack_size) {
 }
 /* A blocked wait cannot make progress without another schedulable thread. */
 _Noreturn void abort(void) {
+#ifdef ENABLE_BLINK_COMPAT
+  extern size_t firmware_collect_stack_trace(const void **, size_t);
+  const void *addresses[24];
+  size_t count = firmware_collect_stack_trace(addresses, 24);
+  for (size_t index = 0; index < count; ++index) {
+    char message[64];
+    snprintf(message, sizeof(message), "RUNTIME: abort frame=%p\n", addresses[index]);
+    graphics_log(message);
+  }
+#endif
   if (renderer_runtime_is_child()) {
     graphics_log("RENDERER: runtime abort\n");
     __builtin_trap();

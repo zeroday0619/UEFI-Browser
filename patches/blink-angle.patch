@@ -1,0 +1,45 @@
+diff --git a/src/libANGLE/Display.cpp b/src/libANGLE/Display.cpp
+index 64071b7..6344a28 100644
+--- a/src/libANGLE/Display.cpp
++++ b/src/libANGLE/Display.cpp
+@@ -1665,8 +1665,13 @@ Error Display::initialize()
+ 
+     mState.singleThreadPool = angle::WorkerThreadPool::Create(angle::ThreadPoolType::Synchronous, 0,
+                                                               ANGLEPlatformCurrent());
++#if defined(UEFI_RUNTIME)
++    // Chromium's desktop pool is not started in firmware; complete link tasks locally.
++    mState.multiThreadPool = mState.singleThreadPool;
++#else
+     mState.multiThreadPool = angle::WorkerThreadPool::Create(angle::ThreadPoolType::Asynchronous, 0,
+                                                              ANGLEPlatformCurrent());
++#endif
+ 
+     if (kIsContextMutexEnabled)
+     {
+diff --git a/src/libANGLE/renderer/vulkan/vk_renderer.cpp b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+index 03d8b5c..a8208a4 100644
+--- a/src/libANGLE/renderer/vulkan/vk_renderer.cpp
++++ b/src/libANGLE/renderer/vulkan/vk_renderer.cpp
+@@ -82,6 +82,10 @@ constexpr bool kUseComputeOnlyQueue = false;
+ 
+ }  // anonymous namespace
+ 
++#if defined(UEFI_RUNTIME)
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_swiftshader_vkGetInstanceProcAddr(VkInstance, const char*);
++#endif
++
+ namespace rx
+ {
+ namespace
+@@ -2504,7 +2508,10 @@ angle::Result Renderer::initialize(vk::ErrorContext *context,
+     }
+ 
+     bool canLoadDebugUtils = true;
+-#if defined(ANGLE_SHARED_LIBVULKAN)
++#if defined(UEFI_RUNTIME)
++    // Firmware has one statically linked Vulkan implementation.
++    VK_CALL(volkInitializeCustom, uefi_swiftshader_vkGetInstanceProcAddr);
++#elif defined(ANGLE_SHARED_LIBVULKAN)
+     {
+         ANGLE_SCOPED_DISABLE_MSAN();
+         mLibVulkanLibrary = angle::vk::OpenLibVulkan();

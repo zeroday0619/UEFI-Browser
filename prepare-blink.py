@@ -131,6 +131,22 @@ if options.resolve_inputs:
         subprocess.run(['/usr/bin/python3', str(root / 'build/util/lastchange.py'), *arguments],
                        cwd=root, check=True)
 
+if options.resolve_inputs:
+    fetch_dependency('third_party/swiftshader')
+    fetch_dependency('third_party/angle')
+for package in ('dawn', 'swiftshader', 'angle'):
+    dependency_patch = project / ('patches/blink-' + package + '.patch')
+    dependency = root / 'third_party' / package
+    if subprocess.run(['patch', '--batch', '--silent', '--dry-run', '--reverse',
+                       '-p1', '-i', str(dependency_patch)], cwd=dependency,
+                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+        subprocess.run(['patch', '--batch', '--forward', '--dry-run', '-p1',
+                        '-i', str(dependency_patch)], cwd=dependency, check=True)
+        subprocess.run(['patch', '--batch', '--forward', '-p1',
+                        '-i', str(dependency_patch)], cwd=dependency, check=True)
+subprocess.run(['python3', str(project / 'tools/prepare-software-gpu.py'),
+                str(root)], check=True)
+
 command = [str(root.parent / 'tools/gn'), 'gen', str(build), '--root=' + str(root),
            '--dotfile=' + str(project / ('config/blink-firmware-dotfile.gn' if options.firmware else 'config/blink-dotfile.gn'))]
 resolved = set()

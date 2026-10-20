@@ -1,5 +1,7 @@
 # WebSocket and Web Storage integration
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 Cache Storage and Blob were added in a later change. See [Cache Storage and service probes](CACHE-STORAGE.md) for current evidence; image hashes below identify the preceding release.
 
 Blink's JavaScript WebSocket, localStorage and sessionStorage APIs now connect to UEFI runtime services. This change also supplies the bounded shared-memory backing needed by Mojo data pipes. It does not complete the Chromium port: worker hosts and threads, IndexedDB/Cache Storage, media backends, GPU providers and a hostile-renderer sandbox remain absent.

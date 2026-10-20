@@ -57,6 +57,12 @@ if (use_uefi_runtime && current_toolchain == default_toolchain) {
     complete_static_lib = true
     sources = [
       "src/blink/browser_entry.cc",
+      "src/blink/gpu_context.cc",
+      "src/blink/webgl_context.cc",
+      "//gpu/ipc/gl_in_process_context.cc",
+      "//gpu/ipc/in_process_command_buffer.cc",
+      "//gpu/ipc/gpu_in_process_thread_service.cc",
+      "//gpu/ipc/in_process_gpu_thread_holder.cc",
       "src/blink/fonts.cc",
       "src/blink/discardable_memory.cc",
       "src/blink/input.cc",
@@ -72,6 +78,17 @@ if (use_uefi_runtime && current_toolchain == default_toolchain) {
       "//third_party/blink/renderer/controller",
       "//third_party/blink/renderer/core",
       "//v8:cppgc_headers",
+      "//third_party/dawn/src/dawn/native",
+      "//third_party/dawn/src/dawn/wire",
+      "//third_party/swiftshader/src/Vulkan:swiftshader_libvulkan_static",
+      "//gpu/command_buffer/service",
+      "//gpu/command_buffer/service:gles2",
+      "//gpu/command_buffer/client:gles2_implementation",
+      "//gpu/ipc/service",
+      "//gpu/ipc/client",
+      "//gpu/ipc/host",
+      "//ui/gl/init",
+      "//ui/ozone",
     ]
   }
 }

@@ -6,7 +6,7 @@ import time
 def run(execute, build, log):
     def healthy():
         text = log.read_text(errors='replace')
-        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type', 'IDB FAIL', 'MEDIA FAILURE', 'AUDIO FAILURE', 'WORKERS FAILURE', 'RENDERER: runtime abort')):
+        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type', 'IDB FAIL', 'MEDIA FAILURE', 'AUDIO FAILURE', 'WORKERS FAILURE', 'WEBGPU FAILURE', 'WEBGL FAILURE', 'WEBGL2 FAILURE', 'RENDERER: runtime abort')):
             raise RuntimeError(text)
         return text
     def snapshot(name):
@@ -44,7 +44,10 @@ def run(execute, build, log):
     def wait_marker(marker, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if marker in healthy(): return
+            content = healthy()
+            if os.environ.get('INPUT_SCENARIO') in ('webgpu', 'webgl', 'webgl2', 'webgpu-canvas') and 'RENDERER: stopped status=' in content:
+                raise AssertionError('GPU execution stopped the renderer:\n' + content)
+            if marker in content: return
             time.sleep(.2)
         raise AssertionError('Missing page result: ' + marker + '\n' + healthy())
     def wheel(direction, ticks=1):
@@ -61,6 +64,52 @@ def run(execute, build, log):
             elif character == '_': key('shift','minus')
             elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'webgpu-canvas':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu-canvas.html'); key('ret')
+        wait_marker('WEBGPU CANVAS PASS checks=11', timeout=150)
+        width, height, pixels = snapshot('webgpu-canvas')
+        offset = (350 * width + 160) * 3
+        assert tuple(pixels[offset:offset + 3]) == (0, 0, 255)
+        print('PASS: WebGPU canvas formats, alpha modes, resize, reconfiguration and presentation')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-lifecycle':
+        for cycle in range(3):
+            for version, marker in (('webgpu', 'WEBGPU PASS checks=13'), ('webgl2', 'WEBGL2 PASS checks=8')):
+                previous = healthy().count(marker)
+                key('ctrl','l'); type_address('https://10.0.2.2:8767/' + version + '.html'); key('ret')
+                deadline = time.monotonic() + 150
+                while healthy().count(marker) <= previous:
+                    assert time.monotonic() < deadline, (version, cycle, healthy())
+                    assert 'RENDERER: stopped status=' not in healthy(), healthy()
+                    time.sleep(.2)
+                width, height, pixels = snapshot('lifecycle-' + str(cycle) + '-' + version)
+                for x, y, expected in ((40, 240, (0, 255, 0)), (160, 350, (255, 0, 0))):
+                    offset = (y * width + x) * 3
+                    assert tuple(pixels[offset:offset + 3]) == expected, (version, cycle, x, y)
+        print('PASS: repeated WebGPU/WebGL2 navigation, device teardown and visible frames')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('webgl', 'webgl2'):
+        version = os.environ['INPUT_SCENARIO']
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/' + version + '.html'); key('ret')
+        wait_marker('WEBGL2 PASS checks=8' if version == 'webgl2' else 'WEBGL PASS checks=6', timeout=150)
+        time.sleep(.5)
+        width, height, pixels = snapshot(version)
+        for x, y, expected in ((40, 240, (0, 255, 0)), (160, 350, (255, 0, 0))):
+            offset = (y * width + x) * 3
+            assert tuple(pixels[offset:offset + 3]) == expected, (x, y, pixels[offset:offset + 3])
+        print('PASS: WebGL clear, GLSL compilation, triangle rasterization, readback and validation')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'webgpu':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu.html'); key('ret')
+        wait_marker('WEBGPU PASS checks=13', timeout=150)
+        assert 'WEBGPU FAILURE' not in healthy()
+        time.sleep(.5)
+        width, height, pixels = snapshot('webgpu')
+        for x, y, expected in ((40, 240, (0, 255, 0)), (160, 350, (255, 0, 0))):
+            offset = (y * width + x) * 3
+            assert tuple(pixels[offset:offset + 3]) == expected, (x, y, pixels[offset:offset + 3])
+        print('PASS: WebGPU compute, shader rasterization, readback, validation and device recreation')
+        return
     if os.environ.get('INPUT_SCENARIO') == 'workers-limits':
         key('ctrl','l'); type_address('https://10.0.2.2:8767/workers-limits.html'); key('ret')
         wait_marker('WORKERS LIMIT PASS checks=3', timeout=90)

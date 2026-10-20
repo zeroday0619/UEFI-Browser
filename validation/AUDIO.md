@@ -1,5 +1,7 @@
 # PCM audio output validation
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 This report describes the audio milestone. [Worker execution validation](WORKERS.md) supersedes its dedicated-worker availability result.
 
 ## Implemented path

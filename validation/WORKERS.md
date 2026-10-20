@@ -1,5 +1,7 @@
 # Dedicated worker execution validation
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 ## Implemented path
 
 Blink creates real DedicatedWorker global scopes and V8 isolates through `src/blink/workers.cc`. The adapter supplies a worker host and per-worker resource-loader factory. The existing HTTP(S) loader applies its request validation, redirect handling and CORS checks to worker requests. Synchronous worker imports use the same loader with a bounded wait and the worker termination event. Normal document synchronous loading remains outside this change.

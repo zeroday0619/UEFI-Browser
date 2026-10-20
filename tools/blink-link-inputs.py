@@ -8,7 +8,8 @@ output = Path(sys.argv[2])
 lines = (build / 'obj/third_party/blink/uefi/browser.ninja').read_text().splitlines()
 edge = next(line for line in lines if line.startswith('build obj/third_party/blink/uefi/libbrowser.a:'))
 archives = [build / 'obj/buildtools/third_party/libc++/libc++.a',
-            build / 'obj/buildtools/third_party/libc++abi/libc++abi.a']
+            build / 'obj/buildtools/third_party/libc++abi/libc++abi.a',
+            build / 'obj/third_party/swiftshader/src/Vulkan/libswiftshader_libvulkan_static.a']
 archives.extend((build / token).resolve() for token in edge.split() if token.endswith('.rlib'))
 for archive in archives:
     if not archive.is_file():

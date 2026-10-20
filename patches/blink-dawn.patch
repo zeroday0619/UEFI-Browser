@@ -1,0 +1,51 @@
+diff --git a/src/dawn/native/vulkan/BackendVk.cpp b/src/dawn/native/vulkan/BackendVk.cpp
+index f55dc878f..34cdd6b8f 100644
+--- a/src/dawn/native/vulkan/BackendVk.cpp
++++ b/src/dawn/native/vulkan/BackendVk.cpp
+@@ -321,6 +321,7 @@ MaybeError VulkanInstance::Initialize(const InstanceBase* instance, ICD icd) {
+         return DAWN_UNRECOVERABLE_ERROR("Couldn't load Vulkan: %s", error.c_str());
+     };
+
++#if !defined(UEFI_RUNTIME)
+     switch (icd) {
+         case ICD::None: {
+             DAWN_TRY(LoadVulkan(kVulkanLibName));
+@@ -337,6 +338,7 @@ MaybeError VulkanInstance::Initialize(const InstanceBase* instance, ICD icd) {
+         }
+     }
+
++#endif
+     if (instance->IsBackendValidationEnabled()) {
+ #if defined(DAWN_ENABLE_VULKAN_VALIDATION_LAYERS)
+         auto execDir = GetExecutableDirectory();
+diff --git a/src/dawn/native/vulkan/VulkanFunctions.cpp b/src/dawn/native/vulkan/VulkanFunctions.cpp
+index 1406c7633..b92ea9a1f 100644
+--- a/src/dawn/native/vulkan/VulkanFunctions.cpp
++++ b/src/dawn/native/vulkan/VulkanFunctions.cpp
+@@ -33,6 +33,10 @@
+ #include "src/dawn/common/DynamicLib.h"
+ #include "src/dawn/native/vulkan/VulkanInfo.h"
+
++#if defined(UEFI_RUNTIME)
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_swiftshader_vkGetInstanceProcAddr(VkInstance, const char*);
++#endif
++
+ namespace dawn::native::vulkan {
+
+ namespace {
+@@ -89,10 +93,15 @@ F AsVkFn(void(VKAPI_PTR* addr)()) {
+     } while (0)
+
+ MaybeError VulkanFunctions::LoadGlobalProcs(const DynamicLib& vulkanLib) {
++#if defined(UEFI_RUNTIME)
++    // Firmware links its sole Vulkan driver statically.
++    GetInstanceProcAddr = &uefi_swiftshader_vkGetInstanceProcAddr;
++#else
+     if (!vulkanLib.GetProc(&GetInstanceProcAddr, "vkGetInstanceProcAddr")) {
+         return DAWN_UNRECOVERABLE_ERROR("Couldn't get vkGetInstanceProcAddr");
+     }
+
++#endif
+     GET_GLOBAL_PROC(CreateInstance);
+     GET_GLOBAL_PROC(EnumerateInstanceExtensionProperties);
+     GET_GLOBAL_PROC(EnumerateInstanceLayerProperties);

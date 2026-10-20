@@ -1711,3 +1711,394 @@ index 551e24456e..47381e0a33 100644
 
    if (type.empty())
      return MIMETypeRegistry::kNotSupported;
+diff --git a/gpu/command_buffer/service/shared_image_interface_in_process_base.h b/gpu/command_buffer/service/shared_image_interface_in_process_base.h
+--- a/gpu/command_buffer/service/shared_image_interface_in_process_base.h
++++ b/gpu/command_buffer/service/shared_image_interface_in_process_base.h
+@@ -34,6 +34,9 @@
+   using SharedImageInterface::CreateSharedImage;
+
+   // SharedImageInterface:
++  void CreateSharedImagePool(const SharedImagePoolId& pool_id,
++      mojo::PendingRemote<mojom::SharedImagePoolClientInterface> client_remote) final;
++  void DestroySharedImagePool(const SharedImagePoolId& pool_id) final;
+   scoped_refptr<ClientSharedImage> CreateSharedImage(
+       const SharedImageInfo& si_info,
+       gpu::SurfaceHandle surface_handle,
+@@ -138,7 +141,8 @@
+  private:
+   void CreateSharedImageOnGpuThread(const Mailbox& mailbox,
+                                     SharedImageInfo si_info,
+-                                    gpu::SurfaceHandle surface_handle);
++                                    gpu::SurfaceHandle surface_handle,
++                                    std::optional<SharedImagePoolId> pool_id);
+
+   void CreateSharedImageWithDataOnGpuThread(const Mailbox& mailbox,
+                                             SharedImageInfo si_info,
+diff --git a/gpu/command_buffer/service/shared_image_interface_in_process_base.cc b/gpu/command_buffer/service/shared_image_interface_in_process_base.cc
+--- a/gpu/command_buffer/service/shared_image_interface_in_process_base.cc
++++ b/gpu/command_buffer/service/shared_image_interface_in_process_base.cc
+@@ -75,6 +75,32 @@
+ SharedImageInterfaceInProcessBase::~SharedImageInterfaceInProcessBase() =
+     default;
+
++void SharedImageInterfaceInProcessBase::CreateSharedImagePool(
++    const SharedImagePoolId& pool_id,
++    mojo::PendingRemote<mojom::SharedImagePoolClientInterface> client_remote) {
++  base::AutoLock lock(lock_);
++  ScheduleGpuTask(base::BindOnce(
++      [](scoped_refptr<SharedImageInterfaceInProcessBase> self,
++         SharedImagePoolId identifier,
++         mojo::PendingRemote<mojom::SharedImagePoolClientInterface> remote) {
++        auto* factory = self->GetSharedImageFactoryOnGpuThread();
++        if (factory && !factory->CreateSharedImagePool(identifier, std::move(remote)))
++          self->MarkContextLostOnGpuThread();
++      }, base::WrapRefCounted(this), pool_id, std::move(client_remote)),
++      {}, GenNextSyncTokenLocked());
++}
++
++void SharedImageInterfaceInProcessBase::DestroySharedImagePool(
++    const SharedImagePoolId& pool_id) {
++  base::AutoLock lock(lock_);
++  ScheduleGpuTask(base::BindOnce(
++      [](scoped_refptr<SharedImageInterfaceInProcessBase> self, SharedImagePoolId identifier) {
++        auto* factory = self->GetSharedImageFactoryOnGpuThread();
++        if (factory && !factory->DestroySharedImagePool(identifier))
++          self->MarkContextLostOnGpuThread();
++      }, base::WrapRefCounted(this), pool_id), {}, GenNextSyncTokenLocked());
++}
++
+ scoped_refptr<ClientSharedImage>
+ SharedImageInterfaceInProcessBase::CreateSharedImage(
+     const SharedImageInfo& si_info,
+@@ -89,7 +115,7 @@
+     ScheduleGpuTask(
+         base::BindOnce(
+             &SharedImageInterfaceInProcessBase::CreateSharedImageOnGpuThread,
+-            this, mailbox, si_info, surface_handle),
++            this, mailbox, si_info, surface_handle, pool_id),
+         /*sync_token_fences=*/{}, GenNextSyncTokenLocked());
+   }
+   return base::MakeRefCounted<ClientSharedImage>(
+@@ -99,7 +125,8 @@
+ void SharedImageInterfaceInProcessBase::CreateSharedImageOnGpuThread(
+     const Mailbox& mailbox,
+     SharedImageInfo si_info,
+-    gpu::SurfaceHandle surface_handle) {
++    gpu::SurfaceHandle surface_handle,
++    std::optional<SharedImagePoolId> pool_id) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(gpu_sequence_checker_);
+   SharedImageFactory* shared_image_factory = GetSharedImageFactoryOnGpuThread();
+   if (!shared_image_factory) {
+@@ -111,7 +138,7 @@
+   }
+
+   if (!shared_image_factory->CreateSharedImage(mailbox, si_info,
+-                                               surface_handle)) {
++                                               surface_handle, pool_id)) {
+     MarkContextLostOnGpuThread();
+   }
+ }
+diff --git a/gpu/ipc/gl_in_process_context.h b/gpu/ipc/gl_in_process_context.h
+--- a/gpu/ipc/gl_in_process_context.h
++++ b/gpu/ipc/gl_in_process_context.h
+@@ -34,7 +34,8 @@
+
+   ~GLInProcessContext();
+
+-  ContextResult Initialize(CommandBufferTaskExecutor* task_executor);
++  ContextResult Initialize(CommandBufferTaskExecutor* task_executor,
++      ContextType context_type = CONTEXT_TYPE_OPENGLES2);
+
+   const Capabilities& GetCapabilities() const;
+   const GpuFeatureInfo& GetGpuFeatureInfo() const;
+diff --git a/gpu/ipc/gl_in_process_context.cc b/gpu/ipc/gl_in_process_context.cc
+--- a/gpu/ipc/gl_in_process_context.cc
++++ b/gpu/ipc/gl_in_process_context.cc
+@@ -54,7 +54,7 @@
+ }
+
+ ContextResult GLInProcessContext::Initialize(
+-    CommandBufferTaskExecutor* task_executor) {
++    CommandBufferTaskExecutor* task_executor, ContextType context_type) {
+   DCHECK(base::SingleThreadTaskRunner::GetCurrentDefault());
+
+   command_buffer_ = std::make_unique<InProcessCommandBuffer>(
+@@ -62,6 +62,7 @@
+
+   auto attribs =
+       mojom::ContextCreationAttribs::NewGles(mojom::GLESCreationAttribs::New());
++  attribs->get_gles()->context_type = context_type;
+
+   auto result = command_buffer_->Initialize(
+       std::move(attribs), base::SingleThreadTaskRunner::GetCurrentDefault(),
+diff --git a/third_party/blink/renderer/core/paint/html_canvas_painter.cc b/third_party/blink/renderer/core/paint/html_canvas_painter.cc
+--- a/third_party/blink/renderer/core/paint/html_canvas_painter.cc
++++ b/third_party/blink/renderer/core/paint/html_canvas_painter.cc
+@@ -66,6 +66,7 @@
+     return;
+   }
+
++#if !defined(UEFI_RUNTIME)
+   if (auto* layer = canvas->ContentsCcLayer()) {
+     // TODO(crbug.com/705019): For a texture layer canvas, setting the layer
+     // background color to an opaque color will cause the layer to be treated as
+@@ -91,6 +92,7 @@
+     }
+   }
+
++#endif
+   if (DrawingRecorder::UseCachedDrawingIfPossible(context, layout_html_canvas_,
+                                                   paint_info.phase)) {
+     return;
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+@@ -714,7 +714,13 @@
+       SourceDrawingBuffer);
+
+   // CanvasRenderingContext implementation.
+-  bool IsComposited() const override { return true; }
++  bool IsComposited() const override {
++#if defined(UEFI_RUNTIME)
++    return false;
++#else
++    return true;
++#endif
++  }
+   void PageVisibilityChanged() override;
+   void SizeChanged() override;
+   scoped_refptr<StaticBitmapImage> PaintRenderingResultsToSnapshot(
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -2071,6 +2071,13 @@
+   }
+
+   bool cleared_content = ClearIfComposited(kClearCallerOther) != kSkipped;
++#if defined(UEFI_RUNTIME)
++  // GOP presentation consumes CPU pixels rather than compositor texture layers.
++  must_paint_to_canvas_ = false;
++  return CopyRenderingResultsToUnacceleratedStaticBitmapImage(
++      kBackBuffer, viz::SharedImageFormat::N32Format(), kPremul_SkAlphaType,
++      kTopLeft_GrSurfaceOrigin);
++#endif
+
+   if (Host()->LowLatencyEnabled() &&
+       GetDrawingBuffer()->SupportsNoCopyExportForLowLatency()) {
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
+--- a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
++++ b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
+@@ -82,7 +82,13 @@
+   void PageVisibilityChanged() override {}
+   void SizeChanged() override;
+   bool isContextLost() const override { return false; }
+-  bool IsComposited() const final { return true; }
++  bool IsComposited() const final {
++#if defined(UEFI_RUNTIME)
++    return false;
++#else
++    return true;
++#endif
++  }
+   bool IsPaintable() const final { return true; }
+   void Stop() final;
+   cc::Layer* CcLayer() const final;
+@@ -147,6 +153,9 @@
+   scoped_refptr<StaticBitmapImage> MakeFallbackStaticBitmapImage(
+       V8GPUCanvasAlphaMode::Enum alpha_mode);
+
++#if defined(UEFI_RUNTIME)
++  scoped_refptr<StaticBitmapImage> firmware_front_buffer_;
++#endif
+   Member<GPUDevice> device_;
+
+   std::unique_ptr<CanvasNon2DResourceProvider> resource_provider_;
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
+--- a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
++++ b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
+@@ -5,6 +5,10 @@
+ #include "third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h"
+
+ #include "base/metrics/histogram_functions.h"
++#if defined(UEFI_RUNTIME)
++#include "base/threading/platform_thread.h"
++#include "base/time/time.h"
++#endif
+ #include "components/viz/common/resources/shared_image_format_utils.h"
+ #include "gpu/command_buffer/client/raster_interface.h"
+ #include "gpu/config/gpu_finch_features.h"
+@@ -191,6 +195,12 @@
+ }
+
+ scoped_refptr<StaticBitmapImage> GPUCanvasContext::GetImage() {
++#if defined(UEFI_RUNTIME)
++  if (!configured_ || !device_) return nullptr;
++  if (texture_ && !texture_->IsDestroyed() && !device_->IsDestroyed())
++    return SnapshotInternal(texture_->GetHandle());
++  return firmware_front_buffer_;
++#endif
+   if (!swap_buffers_) {
+     return nullptr;
+   }
+@@ -249,6 +259,9 @@
+ scoped_refptr<StaticBitmapImage>
+ GPUCanvasContext::PaintRenderingResultsToSnapshot(
+     SourceDrawingBuffer source_buffer) {
++#if defined(UEFI_RUNTIME)
++  return GetImage();
++#endif
+   if (!swap_buffers_) {
+     return resource_provider_ ? resource_provider_->Snapshot() : nullptr;
+   }
+@@ -360,6 +373,11 @@
+ ImageBitmap* GPUCanvasContext::TransferToImageBitmap(
+     ScriptState* script_state,
+     ExceptionState& exception_state) {
++#if defined(UEFI_RUNTIME)
++  auto snapshot = GetImage();
++  ReplaceDrawingBuffer(false);
++  return snapshot ? MakeGarbageCollected<ImageBitmap>(snapshot) : nullptr;
++#endif
+   // If the canvas configuration is invalid, WebGPU requires that we give a
+   // fallback black ImageBitmap if possible.
+   if (!swap_buffers_) {
+@@ -595,6 +613,14 @@
+   }
+
+   ParseCanvasToneMapping(descriptor->toneMapping(), hdr_metadata_);
++#if defined(UEFI_RUNTIME)
++  // GOP consumes CPU pixels, so canvas textures do not require shared mailboxes.
++  copy_to_swap_texture_required_ = false;
++  texture_internal_usage_ = {{.internalUsage = wgpu::TextureUsage::CopySrc}};
++  texture_descriptor_.nextInChain = &texture_internal_usage_;
++  Host()->SetNeedsCompositingUpdate();
++  return;
++#endif
+
+   const wgpu::DawnTextureInternalUsageDescriptor* internal_usage_desc = nullptr;
+   if (const wgpu::ChainedStruct* next_in_chain =
+@@ -699,6 +725,15 @@
+     return texture_.Get();
+   }
+   new_texture_required_ = false;
++#if defined(UEFI_RUNTIME)
++  ReplaceDrawingBuffer(false);
++  new_texture_required_ = false;
++  texture_ = MakeGarbageCollected<GPUTexture>(
++      device_, device_->GetHandle().CreateTexture(&texture_descriptor_), String());
++  DidDraw(CanvasPerformanceMonitor::DrawType::kOther);
++  Host()->UpdateMemoryUsage();
++  return texture_.Get();
++#endif
+
+   if (!swap_buffers_) {
+     device_->InjectError(wgpu::ErrorType::Validation,
+@@ -792,6 +827,13 @@
+ }
+
+ void GPUCanvasContext::ReplaceDrawingBuffer(bool destroy_swap_buffers) {
++#if defined(UEFI_RUNTIME)
++  if (texture_ && !texture_->IsDestroyed()) texture_->destroy();
++  texture_ = nullptr;
++  firmware_front_buffer_ = nullptr;
++  new_texture_required_ = true;
++  return;
++#endif
+   if (!swap_buffers_) {
+     return;
+   }
+@@ -814,6 +856,14 @@
+ }
+
+ void GPUCanvasContext::FinalizeFrame(FlushReason) {
++#if defined(UEFI_RUNTIME)
++  // Retain the presented pixels after the frame's texture expires.
++  if (texture_ && !texture_->IsDestroyed() && !device_->IsDestroyed()) {
++    firmware_front_buffer_ = SnapshotInternal(texture_->GetHandle());
++    texture_->destroy();
++    texture_ = nullptr;
++  }
++#endif
+   // In some cases, such as when a canvas is hidden or offscreen, compositing
+   // will never happen and thus OnTextureTransferred will never be called. In
+   // those cases, getCurrentTexture is still required to return a new texture
+@@ -1020,6 +1070,71 @@
+
+ scoped_refptr<StaticBitmapImage> GPUCanvasContext::SnapshotInternal(
+     const wgpu::Texture& texture) const {
++#if defined(UEFI_RUNTIME)
++  const uint32_t width = texture.GetWidth(), height = texture.GetHeight();
++  const auto format = texture.GetFormat();
++  const bool half_float = format == wgpu::TextureFormat::RGBA16Float;
++  const uint32_t pixel_bytes = half_float ? 8 : 4;
++  // Bound both the wire transfer and the raster allocation before multiplying.
++  if (!width || !height || width > 8192 || height > 8192) return nullptr;
++  const uint32_t row_bytes = (width * pixel_bytes + 255) & ~255u;
++  const uint64_t length = uint64_t(row_bytes) * height;
++  if (length > 32 * 1024 * 1024) return nullptr;
++  wgpu::BufferDescriptor buffer_descriptor = {
++      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
++      .size = length};
++  auto buffer = device_->GetHandle().CreateBuffer(&buffer_descriptor);
++  wgpu::DawnEncoderInternalUsageDescriptor internal = {{.useInternalUsages = true}};
++  wgpu::CommandEncoderDescriptor descriptor = {.nextInChain = &internal};
++  auto encoder = device_->GetHandle().CreateCommandEncoder(&descriptor);
++  wgpu::TexelCopyTextureInfo source = {.texture = texture};
++  wgpu::TexelCopyBufferInfo destination = {
++      .layout = {.bytesPerRow = row_bytes, .rowsPerImage = height}, .buffer = buffer};
++  wgpu::Extent3D extent = {width, height, 1};
++  encoder.CopyTextureToBuffer(&source, &destination, &extent);
++  auto command = encoder.Finish();
++  device_->queue()->GetHandle().Submit(1, &command);
++  auto status = std::make_shared<wgpu::MapAsyncStatus>(wgpu::MapAsyncStatus::Error);
++  auto future = buffer.MapAsync(wgpu::MapMode::Read, 0, length,
++      wgpu::CallbackMode::WaitAnyOnly,
++      [status](wgpu::MapAsyncStatus result, wgpu::StringView) { *status = result; });
++  const auto deadline = base::TimeTicks::Now() + base::Seconds(5);
++  wgpu::WaitStatus waited;
++  do {
++    device_->FlushNow();
++    // Wait only for this readback so painting cannot reenter JavaScript callbacks.
++    waited = device_->GetInstance().WaitAny(future, 0);
++    if (waited != wgpu::WaitStatus::TimedOut) break;
++    base::PlatformThread::YieldCurrentThread();
++  } while (base::TimeTicks::Now() < deadline);
++  if (waited != wgpu::WaitStatus::Success || *status != wgpu::MapAsyncStatus::Success) {
++    buffer.Destroy();
++    return nullptr;
++  }
++  auto* pixels = static_cast<const uint8_t*>(buffer.GetConstMappedRange(0, length));
++  SkBitmap bitmap;
++  SkColorType color_type = half_float ? kRGBA_F16_SkColorType :
++      (format == wgpu::TextureFormat::BGRA8Unorm ? kBGRA_8888_SkColorType : kRGBA_8888_SkColorType);
++  auto information = SkImageInfo::Make(width, height, color_type, kPremul_SkAlphaType,
++      PredefinedColorSpaceToSkColorSpace(color_space_));
++  if (!pixels || !bitmap.tryAllocPixels(information)) {
++    buffer.Unmap(); buffer.Destroy(); return nullptr;
++  }
++  for (uint32_t row = 0; row < height; ++row) {
++    auto* output = static_cast<uint8_t*>(bitmap.getPixels()) + row * bitmap.rowBytes();
++    memcpy(output, pixels + row * row_bytes, width * pixel_bytes);
++    if (alpha_mode_ == V8GPUCanvasAlphaMode::Enum::kOpaque) {
++      for (uint32_t column = 0; column < width; ++column) {
++        if (half_float) {
++          output[column * 8 + 6] = 0; output[column * 8 + 7] = 0x3c;
++        } else output[column * 4 + 3] = 255;
++      }
++    }
++  }
++  buffer.Unmap(); buffer.Destroy();
++  bitmap.setImmutable();
++  return UnacceleratedStaticBitmapImage::Create(SkImages::RasterFromBitmap(bitmap));
++#else
+   gfx::Size size(texture.GetWidth(), texture.GetHeight());
+
+   // We tag the SharedImage inside the WebGPUImageProvider with display usages
+@@ -1039,6 +1154,7 @@
+   }
+
+   return resource_provider->Snapshot();
++#endif
+ }
+
+ base::WeakPtr<WebGraphicsContext3DProviderWrapper>

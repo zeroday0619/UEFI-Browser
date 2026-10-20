@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>WebGPU canvas lifecycle</title>
+<style>body{background:#10212c;color:#d7ebfa;font:22px sans-serif;padding:24px}canvas{width:256px;height:256px;image-rendering:pixelated}</style>
+<h1 id="status">WebGPU canvas running</h1><canvas id="output" width="17" height="9"></canvas><pre id="results"></pre>
+<script>
+(async()=>{
+  let checks=0;
+  const check=(condition,label)=>{if(!condition)throw Error(label);checks++;results.textContent+=label+'\n';console.log('WEBGPU CANVAS CHECK '+label);};
+  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice();
+  const context=output.getContext('webgpu');
+  const capture=new OffscreenCanvas(29,13).getContext('2d');
+  function draw(color){const texture=context.getCurrentTexture();const encoder=device.createCommandEncoder();const pass=encoder.beginRenderPass({colorAttachments:[{view:texture.createView(),clearValue:color,loadOp:'clear',storeOp:'store'}]});pass.end();device.queue.submit([encoder.finish()]);return texture;}
+  for(const format of ['rgba8unorm','bgra8unorm','rgba16float']){
+    for(const alphaMode of ['opaque','premultiplied']){
+      context.configure({device,format,alphaMode});draw([.25,0,0,.5]);capture.clearRect(0,0,29,13);capture.drawImage(output,0,0);
+      const pixel=capture.getImageData(4,4,1,1).data;
+      const expected=alphaMode==='opaque'?[64,0,0,255]:[128,0,0,128];
+      check(pixel.every((value,index)=>Math.abs(value-expected[index])<=1),format+' '+alphaMode+' pixels');
+    }
+  }
+  output.width=29;output.height=13;const resized=draw([0,0,1,1]);
+  check(resized.width===29&&resized.height===13,'resized texture dimensions');
+  capture.clearRect(0,0,29,13);capture.drawImage(output,0,0);
+  check(capture.getImageData(28,12,1,1).data.join(',')==='0,0,255,255','resized texture edge and row alignment');
+  context.unconfigure();check(context.getConfiguration()===null,'unconfigure releases configuration');
+  let rejected=false;try{context.getCurrentTexture()}catch(error){rejected=error.name==='InvalidStateError'}check(rejected,'unconfigured texture rejection');
+  context.configure({device,format:'rgba8unorm',alphaMode:'opaque'});draw([0,0,1,1]);
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  capture.clearRect(0,0,29,13);capture.drawImage(output,0,0);
+  check(capture.getImageData(14,6,1,1).data.join(',')==='0,0,255,255','front buffer after presentation');
+  document.getElementById('status').textContent='WebGPU canvas passed';console.log('WEBGPU CANVAS PASS checks='+checks);
+})().catch(error=>{document.getElementById('status').textContent='WebGPU canvas failed';console.log('WEBGPU FAILURE '+error.stack);results.textContent+=error.stack;});
+</script>

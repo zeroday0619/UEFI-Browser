@@ -1,5 +1,7 @@
 # Network and firmware runtime service validation
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 This report records the earlier TCP/file implementation. WebSocket, WSS, DNS, shared-memory data pipes and Web Storage were connected subsequently; see [WebSocket and storage validation](WEB-SERVICES.md) for their current status. Remaining-work statements below describe the image hashes recorded in this report.
 ## Scope
 

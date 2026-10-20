@@ -1,0 +1,77 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WebGPU execution</title>
+<style>body{background:#10212c;color:#d7ebfa;font:22px sans-serif;padding:24px}canvas{width:256px;height:256px;image-rendering:pixelated}</style>
+<h1 id="status">WebGPU running</h1><canvas id="output" width="64" height="64"></canvas><pre id="results"></pre>
+<script>
+(async()=>{
+  let checks=0;
+  function check(value,label){if(!value)throw Error(label);checks++;results.textContent+=label+'\n';console.log('WEBGPU CHECK '+label);}
+  check(!!navigator.gpu,'WebGPU API');
+  const adapter=await navigator.gpu.requestAdapter();
+  check(!!adapter,'Vulkan adapter');
+  const device=await adapter.requestDevice();
+  check(!!device,'Dawn device');
+  console.log('WEBGPU STAGE buffers');
+  const source=device.createBuffer({size:256,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_SRC|GPUBufferUsage.COPY_DST});
+  device.queue.writeBuffer(source,0,new Uint32Array(Array.from({length:64},(_,index)=>index)));
+  const readback=device.createBuffer({size:256,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});
+  console.log('WEBGPU STAGE compute pipeline');
+  const compute=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:`
+    @group(0) @binding(0) var<storage,read_write> values:array<u32>;
+    @compute @workgroup_size(8) fn main(@builtin(global_invocation_id) id:vec3u){values[id.x]=values[id.x]*3u+7u;}`}),entryPoint:'main'}});
+  console.log('WEBGPU STAGE bindings');
+  const bindings=device.createBindGroup({layout:compute.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source}}]});
+  const encoder=device.createCommandEncoder();const pass=encoder.beginComputePass();
+  pass.setPipeline(compute);pass.setBindGroup(0,bindings);pass.dispatchWorkgroups(8);pass.end();
+  encoder.copyBufferToBuffer(source,0,readback,0,256);device.queue.submit([encoder.finish()]);
+  console.log('WEBGPU STAGE submit and map');
+  await readback.mapAsync(GPUMapMode.READ);
+  check(new Uint32Array(readback.getMappedRange()).every((value,index)=>value===index*3+7),'WGSL compute and mapped buffer');
+  readback.unmap();
+  device.queue.writeBuffer(source,0,new Uint32Array(64).fill(0x12345678));
+  const bounded=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:`
+    @group(0) @binding(0) var<storage,read_write> values:array<u32>;
+    @compute @workgroup_size(1) fn main(){values[1000000u]=99u;}`}),entryPoint:'main'}});
+  const limited=device.createBindGroup({layout:bounded.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source,size:16}}]});
+  const boundary=device.createCommandEncoder();const dispatch=boundary.beginComputePass();dispatch.setPipeline(bounded);dispatch.setBindGroup(0,limited);dispatch.dispatchWorkgroups(1);dispatch.end();
+  boundary.copyBufferToBuffer(source,0,readback,0,256);device.queue.submit([boundary.finish()]);await readback.mapAsync(GPUMapMode.READ);
+  check(new Uint32Array(readback.getMappedRange()).slice(4).every(value=>value===0x12345678),'shader storage binding boundary');readback.unmap();
+  device.pushErrorScope('validation');
+  const invalid=device.createShaderModule({code:'@compute fn invalid syntax'});
+  check((await invalid.getCompilationInfo()).messages.some(message=>message.type==='error'),'WGSL compiler diagnostics');await device.popErrorScope();
+  const shader=device.createShaderModule({code:`
+    @vertex fn vertex(@builtin(vertex_index) id:u32)->@builtin(position) vec4f{
+      var points=array<vec2f,3>(vec2f(-.8,-.8),vec2f(.8,-.8),vec2f(0.,.8));return vec4f(points[id],0.,1.);}
+    @fragment fn fragment()->@location(0) vec4f{return vec4f(1.,0.,0.,1.);}`});
+  const pipeline=device.createRenderPipeline({layout:'auto',vertex:{module:shader,entryPoint:'vertex'},fragment:{module:shader,entryPoint:'fragment',targets:[{format:'rgba8unorm'}]}});
+  const texture=device.createTexture({size:[64,64],format:'rgba8unorm',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});
+  const pixels=device.createBuffer({size:64*256,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const draw=device.createCommandEncoder();const render=draw.beginRenderPass({colorAttachments:[{view:texture.createView(),loadOp:'clear',storeOp:'store',clearValue:[0,1,0,1]}]});
+  render.setPipeline(pipeline);render.draw(3);render.end();
+  draw.copyTextureToBuffer({texture},{buffer:pixels,bytesPerRow:256},[64,64]);device.queue.submit([draw.finish()]);
+  await pixels.mapAsync(GPUMapMode.READ);const bytes=new Uint8ClampedArray(pixels.getMappedRange().slice(0));
+  check(bytes[0]===0&&bytes[1]===255&&bytes[3]===255,'render pass clear');
+  const middle=(32*64+32)*4;
+  check(bytes[middle]===255&&bytes[middle+1]===0&&bytes[middle+3]===255,'vertex and fragment shader rasterization');
+  pixels.unmap();
+  const context=output.getContext('webgpu');
+  const format=navigator.gpu.getPreferredCanvasFormat();
+  context.configure({device,format,alphaMode:'opaque'});
+  const canvasPipeline=device.createRenderPipeline({layout:'auto',vertex:{module:shader,entryPoint:'vertex'},fragment:{module:shader,entryPoint:'fragment',targets:[{format}]}});
+  const current=context.getCurrentTexture();
+  check(current===context.getCurrentTexture(),'canvas texture identity within frame');
+  const present=device.createCommandEncoder();
+  const presentation=present.beginRenderPass({colorAttachments:[{view:current.createView(),loadOp:'clear',storeOp:'store',clearValue:[0,1,0,0]}]});
+  presentation.setPipeline(canvasPipeline);presentation.draw(3);presentation.end();device.queue.submit([present.finish()]);
+  const capture=new OffscreenCanvas(64,64).getContext('2d');capture.drawImage(output,0,0);
+  const native=capture.getImageData(0,0,64,64).data;
+  check(native[0]===0&&native[1]===255&&native[3]===255&&native[middle]===255&&native[middle+1]===0,'native WebGPU canvas snapshot and opaque alpha');
+  await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  device.pushErrorScope('validation');device.createBuffer({size:4,usage:0});
+  check((await device.popErrorScope()) instanceof GPUValidationError,'validation error propagation');
+  source.destroy();readback.destroy();texture.destroy();pixels.destroy();
+  const replacement=await navigator.gpu.requestAdapter();const second=await replacement.requestDevice();check(!!second,'device recreation');second.destroy();check((await second.lost).reason==='destroyed','device lost notification');
+  document.getElementById('status').textContent='WebGPU passed';console.log('WEBGPU PASS checks='+checks);
+})().catch(error=>{document.getElementById('status').textContent='WebGPU failed';results.textContent+=error.stack;console.log('WEBGPU FAILURE '+error.stack);});
+</script>

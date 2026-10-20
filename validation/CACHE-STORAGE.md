@@ -1,5 +1,7 @@
 # Cache Storage, Blob transport and service probes
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 This report records the Cache Storage image identified below. Cache Storage and Blob byte transport connect to Blink in that image. IndexedDB was added subsequently; see [IndexedDB validation](INDEXEDDB.md). Worker execution, media playback, GPU device services and a renderer sandbox remain unimplemented. The service probes record those failures explicitly; a completed probe is not a working implementation of the API.
 
 ## Implementation

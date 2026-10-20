@@ -10,6 +10,11 @@ This document records the current licensing inventory for publication preparatio
 | Blink | File-specific terms, including BSD and GNU Library General Public License version 2 or later | [LGPL v2 text](licenses/LGPL-2.0.txt); upstream file headers determine scope; full binary inventory pending |
 | V8 | BSD-style license and separately licensed external components | [V8](licenses/v8.txt) |
 | Skia and skcms | BSD-style licenses; linked dependencies retain their own terms | [Skia](licenses/skia.txt), [skcms](licenses/skcms.txt) |
+| ANGLE and Dawn/Tint | BSD-style licenses and file-specific dependency notices | [ANGLE](licenses/ANGLE.txt), [Dawn](licenses/Dawn.txt) |
+| SwiftShader | Apache-2.0; locally modified for static firmware Vulkan dispatch and cooperative scheduling | [SwiftShader](licenses/SwiftShader.txt) |
+| Subzero and bundled LLVM support | University of Illinois/NCSA and file-specific terms | [Subzero](licenses/SwiftShader-Subzero.txt), [LLVM support](licenses/SwiftShader-LLVM-Subzero.txt) |
+| Marl and ASTC encoder | Apache-2.0 | [Marl](licenses/Marl.txt), [ASTC encoder](licenses/ASTC-encoder.txt) |
+| SPIR-V Tools and Headers | Apache-2.0 and MIT, respectively, with file-specific exceptions | [Tools](licenses/SPIRV-Tools.txt), [Headers](licenses/SPIRV-Headers.txt) |
 | libvpx | BSD-style license and separate patent grant for the bundled VP8/VP9 decoder; additional third-party files retain their own terms | [License](licenses/libvpx-LICENSE), [patent grant](licenses/libvpx-PATENTS) |
 | libyuv | BSD-style license and separate patent grant for pixel conversion | [License](licenses/libyuv-LICENSE), [patent grant](licenses/libyuv-PATENTS) |
 | musl 1.2.5 | MIT overall, with exceptions identified in COPYRIGHT | [musl](licenses/musl-COPYRIGHT) |

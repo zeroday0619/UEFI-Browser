@@ -42,8 +42,16 @@ use_kerberos = false
 use_nss_client_certs = false
 use_nss_server_certs = false
 
-# CPU raster presentation does not require a Vulkan software driver.
+# ANGLE and Dawn share a statically linked software Vulkan driver.
+# Disable the separate shared SwiftShader ICD target; the static archive is explicit.
 enable_swiftshader = false
+dawn_enable_vulkan = true
+dawn_enable_vulkan_validation_layers = false
+dawn_enable_vulkan_loader = false
+angle_enable_vulkan = true
+use_static_angle = true
+angle_use_custom_libvulkan = false
+angle_enable_vulkan_validation_layers = false
 
 # Firmware input does not use the Linux xkbcommon library.
 use_xkbcommon = false

@@ -1,0 +1,90 @@
+diff --git a/src/Device/Renderer.hpp b/src/Device/Renderer.hpp
+index 284a6e9..16191c8 100644
+--- a/src/Device/Renderer.hpp
++++ b/src/Device/Renderer.hpp
+@@ -48,7 +48,12 @@ class Resource;
+ struct Constants;
+
+ static constexpr int MaxBatchSize = 128;
++#if defined(UEFI_RUNTIME)
++// One cooperative worker needs a bounded batch pool for simultaneous devices.
++static constexpr int MaxBatchCount = 2;
++#else
+ static constexpr int MaxBatchCount = 16;
++#endif
+ static constexpr int MaxClusterCount = 16;
+ static constexpr int MaxDrawCount = 16;
+
+diff --git a/src/Reactor/ExecutableMemory.cpp b/src/Reactor/ExecutableMemory.cpp
+index db5145b..141e8b1 100644
+--- a/src/Reactor/ExecutableMemory.cpp
++++ b/src/Reactor/ExecutableMemory.cpp
+@@ -284,7 +284,12 @@ void *allocateMemoryPages(size_t bytes, int permissions, bool need_exec)
+
+ 	// Try to name the memory region for the executable code,
+ 	// to aid profilers.
++#if defined(UEFI_RUNTIME)
++	// Firmware shared-memory descriptors deliberately prohibit executable mappings.
++	int anonFd = -1;
++#else
+ 	int anonFd = anonymousFd();
++#endif
+ 	if(anonFd == -1)
+ 	{
+ 		flags |= MAP_ANONYMOUS;
+diff --git a/src/System/SwiftConfig.cpp b/src/System/SwiftConfig.cpp
+index 9e00a5d..910f4ef 100644
+--- a/src/System/SwiftConfig.cpp
++++ b/src/System/SwiftConfig.cpp
+@@ -125,6 +125,12 @@ const Configuration &getConfiguration()
+
+ marl::Scheduler::Config getSchedulerConfiguration(const Configuration &config)
+ {
++#if defined(UEFI_RUNTIME)
++	// Cooperative firmware contexts have no CPU affinity and a bounded slot budget.
++	marl::Scheduler::Config configuration;
++	configuration.setWorkerThreadCount(1);
++	return configuration;
++#else
+ 	uint32_t threadCount = (config.threadCount == 0) ? std::min<size_t>(marl::Thread::numLogicalCPUs(), 16)
+ 	                                                 : config.threadCount;
+ 	auto affinity = getAffinityFromMask(config.affinityMask);
+@@ -138,6 +144,7 @@ marl::Scheduler::Config getSchedulerConfiguration(const Configuration &config)
+ 		sw::CPUID::setDenormalsAreZero(true);
+ 	});
+ 	return cfg;
++#endif
+ }
+
+ }  // namespace sw
+\ No newline at end of file
+diff --git a/src/Vulkan/VulkanPlatform.hpp b/src/Vulkan/VulkanPlatform.hpp
+index 90e5313..6dc6249 100644
+--- a/src/Vulkan/VulkanPlatform.hpp
++++ b/src/Vulkan/VulkanPlatform.hpp
+@@ -49,6 +49,10 @@ public:
+ 	typedef VkNonDispatchableHandle<object##Ptr> object; \
+ 	template class VkNonDispatchableHandle<object##Ptr>;
+
++#if defined(UEFI_RUNTIME)
++// Static driver exports must not collide with the application Vulkan dispatch table.
++#include "UEFIVulkanSymbols.hpp"
++#endif
+ #include <vulkan/vulkan_core.h>
+
+ #endif  // VULKAN_PLATFORM
+diff --git a/third_party/llvm-subzero/build/Linux/include/llvm/Config/config.h b/third_party/llvm-subzero/build/Linux/include/llvm/Config/config.h
+index 0ffd1bf..9ade15b 100644
+--- a/third_party/llvm-subzero/build/Linux/include/llvm/Config/config.h
++++ b/third_party/llvm-subzero/build/Linux/include/llvm/Config/config.h
+@@ -445,3 +445,10 @@
+ /* #undef strdup */
+
+ #endif
++
++#if defined(UEFI_RUNTIME)
++#undef HAVE_BACKTRACE
++#undef HAVE_EXECINFO_H
++#undef HAVE_MALLINFO
++#undef HAVE_MALLINFO2
++#endif

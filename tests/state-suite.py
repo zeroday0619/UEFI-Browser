@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run isolated QEMU media, network, storage, input and scroll regressions and retain evidence."""
+"""Run isolated QEMU graphics, media, network, storage, input and scroll regressions and retain evidence."""
 import argparse
 import concurrent.futures
 import hashlib
@@ -26,6 +26,7 @@ if not options.prefix.replace('-', '').replace('_', '').isalnum():
 project = Path(__file__).resolve().parents[1]
 os.chdir(project)
 cases = options.cases or [
+    'webgpu', 'webgl', 'webgl2', 'webgpu-canvas', 'gpu-lifecycle',
     'workers', 'workers-limits', 'audio', 'audio-limits', 'media', 'media-boundaries', 'indexeddb', 'cache', 'websocket', 'storage', 'storage-lifecycle', 'network', 'network-secure',
     'scroll-state', 'scroll-stuck', 'scroll-state-iframe', 'cookies', 'cookies-secure',
     'scroll-gutter-topology', 'scroll-gutter-replacement', 'scroll-gutter-state',
@@ -81,9 +82,9 @@ def worker(index):
                 environment['QEMU_TEST_GDB_PORT'] = str(listener.getsockname()[1])
             shutil.copy(project / 'build/blink/payload.elf', build / 'payload.elf')
         if case == 'audio': environment['QEMU_TEST_AUDIO_CAPTURE'] = str(build / 'audio-output.wav')
-        if case in ('cookies-secure', 'network-secure', 'websocket', 'cache', 'indexeddb', 'media', 'media-boundaries', 'audio', 'audio-limits', 'workers', 'workers-limits', 'service-capabilities'):
+        if case in ('cookies-secure', 'network-secure', 'websocket', 'cache', 'indexeddb', 'media', 'media-boundaries', 'audio', 'audio-limits', 'workers', 'workers-limits', 'webgpu', 'webgl', 'webgl2', 'gpu-lifecycle', 'webgpu-canvas', 'service-capabilities'):
             environment['TEST_CA_FILE'] = str(options.https_ca.resolve())
-        if case in ('cache', 'indexeddb', 'media', 'media-boundaries', 'audio', 'audio-limits', 'workers', 'workers-limits', 'service-capabilities'):
+        if case in ('cache', 'indexeddb', 'media', 'media-boundaries', 'audio', 'audio-limits', 'workers', 'workers-limits', 'webgpu', 'webgl', 'webgl2', 'gpu-lifecycle', 'webgpu-canvas', 'service-capabilities'):
             import runpy
             disk = build / (case + '-profile.img')
             runpy.run_path(str(project / 'tests/fat-image.py'))['create'](disk, build / 'esp/EFI/BOOT/BOOTX64.EFI')

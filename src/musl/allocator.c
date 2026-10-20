@@ -60,8 +60,15 @@ void *aligned_alloc(size_t alignment, size_t size) {
     return 0;
   if (!size)
     size = 1;
-  if (size > HEAP_LIMIT || allocated > HEAP_LIMIT - size)
+  if (size > HEAP_LIMIT || allocated > HEAP_LIMIT - size) {
+    char message[128];
+    snprintf(message, sizeof(message),
+             "ALLOCATOR: heap limit requested=%zu allocated=%zu limit=%u\n",
+             size, allocated, HEAP_LIMIT);
+    extern void graphics_log(const char *);
+    graphics_log(message);
     return 0;
+  }
   size_t raw_size=size+sizeof(Allocation)+alignment-1;
   void *base=raw_allocate(raw_size);
   if (!base) return NULL;

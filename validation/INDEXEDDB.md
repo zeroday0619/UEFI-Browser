@@ -1,5 +1,7 @@
 # IndexedDB integration
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 `IDBFactory`, database connections, transactions and cursors now connect Blink to a bounded IndexedDB backend in the UEFI renderer. The implementation stores actual structured values and Blob/File contents in the boot-device profile. It uses Chromium's existing Mojo interfaces and key comparison/serialization types; it does not port Chromium's LevelDB or SQLite storage service.
 
 ## Execution and persistence

@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <sys/random.h>
 #include <sys/syscall.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #include <wchar.h>
 extern void musl_initialize(SystemTable *, void *, size_t);
@@ -234,6 +235,9 @@ static int run_checks(void) {
   CHECK(fopen("/unsupported-file", "r") == NULL && errno == EACCES);
   errno = 0;
   CHECK(syscall(0x7fffffff) == -1 && errno == ENOSYS);
+  struct utsname information;
+  CHECK(uname(&information) == 0 && !strcmp(information.sysname, "UEFI") &&
+        !strcmp(information.machine, "x86_64"));
   CHECK(fabsl(expm1l(0.5L) - 0.64872127070012814684865L) < 1e-18L);
   CHECK(fabs(sin(0.5) - 0.479425538604203) < 1e-15);
   CHECK(printf("PASS: musl stdio, UTF-8, locale, TLS, mutex, RNG and math (%d "

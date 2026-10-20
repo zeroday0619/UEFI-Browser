@@ -1,5 +1,7 @@
 # WebM video playback validation
 
+The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
+
 This report records the video milestone and its tested image. The subsequent [PCM audio implementation and validation](AUDIO.md) supersede its audio-unavailable status.
 
 ## Implemented path

@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 extern void graphics_log(const char *);
@@ -63,6 +64,17 @@ long firmware_syscall(long number, long first, long second, long third,
        firmware_file_descriptor(first)))
     return firmware_file_syscall(number,first,second,third,fourth,fifth,sixth);
   switch (number) {
+  case SYS_uname: {
+    if (!first) return -EFAULT;
+    struct utsname *information = (void *)first;
+    memset(information, 0, sizeof(*information));
+    strcpy(information->sysname, "UEFI");
+    strcpy(information->nodename, "uefi-browser");
+    strcpy(information->release, "0.1");
+    strcpy(information->version, "Firmware runtime ABI 1");
+    strcpy(information->machine, "x86_64");
+    return 0;
+  }
   case SYS_write:
     return firmware_serial_write(first, (void *)second, third);
   case SYS_writev: {
