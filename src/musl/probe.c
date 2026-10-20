@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 #include "platform/runtime.h"
 #include "renderer_runtime.h"
+#include "renderer_sandbox.h"
 #include "firmware_io.h"
 #include "firmware_audio.h"
 #include <errno.h>
@@ -254,8 +255,15 @@ static void console_message(SystemTable *table, const char *text) {
   buffer[count] = 0;
   table->output->write(table->output, buffer);
 }
+#ifdef ENABLE_CPL3_PROBE
+#include "../process/cpl3_probe.h"
+#endif
 int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstrap *bootstrap) {
   (void)image;
+#ifdef ENABLE_CPL3_PROBE
+  boundary_bootstrap=bootstrap;
+  if (bootstrap && bootstrap->renderer && bootstrap->sandbox && bootstrap->boundary_test<=10) renderer_boundary_payload(bootstrap);
+#endif
   renderer_runtime_initialize(bootstrap);
   table = renderer_runtime_table(table);
   musl_initialize(table, stack, 4 * 1024 * 1024);
@@ -269,7 +277,21 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
     (*callback)();
 #endif
   int result = run_checks();
+#ifdef ENABLE_CPL3_PROBE
+  if (!result && !renderer_runtime_is_child()) result=renderer_boundary_supervisor(bootstrap);
+#endif
+#ifdef ENABLE_BROKER_PROBE
+  extern int run_renderer_broker_probe(void);
+  if (!result) result = run_renderer_broker_probe();
+#endif
   if(!result) {result=shared_memory_probe();if(result) printf("FAIL: shared memory probe %d\n",result);}
+#ifdef ENABLE_CPL3_PROBE
+  if (bootstrap && bootstrap->renderer && bootstrap->boundary_test==11) {
+    fflush(NULL);
+    renderer_system_call(RENDERER_SYSTEM_EXIT,result,0,0,0,0);
+    __builtin_trap();
+  }
+#endif
 #ifdef ENABLE_SERVICE_PROBE
   extern int run_firmware_io_probe(void);
   if (!result) result = run_firmware_io_probe();
@@ -310,6 +332,10 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
     result = 1;
   if (!result)
     graphics_log("PASS: engine teardown and pool cleanup\n");
+  if (renderer_runtime_is_child() && renderer_runtime_sandboxed()) {
+    renderer_system_call(RENDERER_SYSTEM_EXIT,result,0,0,0,0);
+    __builtin_trap();
+  }
 #ifdef ENABLE_BLINK
   if (renderer_runtime_is_child()) return result;
   const char *scope = "Blink browser session ended.";

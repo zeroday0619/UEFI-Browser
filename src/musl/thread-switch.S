@@ -11,6 +11,9 @@ firmware_thread_switch:
   mov %r15, 48(%rdi)
   fxsave64 64(%rdi)
   mov %rsi, %r8
+  mov %cs,%ax
+  test $3,%al
+  jnz .Luser_thread
   mov $0xc0000100, %ecx
   rdmsr
   mov %eax, 576(%rdi)
@@ -18,6 +21,17 @@ firmware_thread_switch:
   mov 576(%r8), %eax
   mov 580(%r8), %edx
   wrmsr
+  jmp .Lrestore_thread
+.Luser_thread:
+  mov %fs:0,%rax
+  mov %rax,576(%rdi)
+  mov 576(%r8),%rdi
+  mov $0x1001,%eax
+  int $0x80
+  cmp $-14,%rax
+  jne .Lrestore_thread
+  ud2
+.Lrestore_thread:
   mov 0(%r8), %rsp
   mov 8(%r8), %rbx
   mov 16(%r8), %rbp

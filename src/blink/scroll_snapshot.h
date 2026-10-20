@@ -7,6 +7,8 @@
 #include <vector>
 #include "cc/trees/sticky_position_constraint.h"
 #include "third_party/skia/include/core/SkData.h"
+#include "third_party/skia/include/core/SkImage.h"
+#include "third_party/skia/include/core/SkTypeface.h"
 #include "third_party/skia/include/core/SkRRect.h"
 namespace uefi_browser {
 struct ScrollPosition { int x=0, y=0; };
@@ -22,6 +24,10 @@ struct ScrollTransform {
 };
 struct ScrollClip { int parent=-1, transform=-1; SkRRect rectangle; };
 struct ScrollEffect { int parent=-1, clip=-1; float opacity=1; SkBlendMode blend=SkBlendMode::kSrcOver; };
+struct ScrollRaster {
+  SkIRect bounds;
+  std::vector<sk_sp<SkData>> tiles;
+};
 struct ScrollPicture {
   int transform=-1, clip=-1, effect=-1;
   SkRect bounds;
@@ -30,6 +36,8 @@ struct ScrollPicture {
   std::vector<sk_sp<SkData>> appearances;
   std::vector<SkRect> appearance_bounds;
   sk_sp<SkData> data;
+  // The consumer owns these validated compressed tiles; no producer object is referenced.
+  std::vector<std::shared_ptr<ScrollRaster>> raster_appearances;
 };
 struct ScrollRegion { int transform=-1, clip=-1; SkRect bounds; };
 struct ScrollbarLayout {
@@ -51,7 +59,7 @@ struct ScrollbarScene {
 struct ScrollQuery { uint64_t element; unsigned horizontal, vertical; bool stuck=false; };
 struct ScrollGutter { uint64_t element; bool horizontal; int thickness; std::array<int,4> states; };
 struct ScrollImage { int width=0, height=0; sk_sp<SkData> pixels; };
-// Shared publications contain values and immutable bytes; Skia objects are rebuilt by the consumer.
+// This object graph is process-local; CPL3 publications use the scroll wire protocol.
 struct ScrollScene {
   std::vector<std::shared_ptr<ScrollScene>> reflows;
   std::vector<ScrollGutter> gutters;
@@ -66,6 +74,9 @@ struct ScrollScene {
   std::vector<uint32_t> image_keys, font_keys;
   std::vector<ScrollImage> images;
   std::vector<sk_sp<SkData>> fonts;
+  // Capture retains renderer-local resources so encoding does not create duplicate font caches.
+  std::vector<sk_sp<SkImage>> renderer_images;
+  std::vector<sk_sp<SkTypeface>> renderer_fonts;
 };
 struct ScrollSnapshot {
   uint64_t acknowledgement=0;

@@ -1,4 +1,5 @@
 #include "blink/scroll_scene.h"
+#include "blink/scroll_wire.h"
 #include "third_party/blink/public/common/metrics/document_update_reason.h"
 #include "third_party/blink/renderer/core/layout/scroll_anchor.h"
 #include "third_party/blink/renderer/core/layout/custom_scrollbar.h"
@@ -185,6 +186,7 @@ struct Capture {
             resource.pixels->writable_data(),resource.width*4,0,0)) self.valid=false;
       }
       self.scene.images.push_back(std::move(resource));
+      self.scene.renderer_images.push_back(sk_ref_sp(image));
       self.scene.image_keys.push_back(image->uniqueID());
     }
     return SkData::MakeWithCopy(&entry->second,sizeof(uint32_t));
@@ -202,6 +204,7 @@ struct Capture {
       if (!data || !self.Reserve(data->size())) { self.valid=false; return SkData::MakeEmpty(); }
       self.scene.font_keys.push_back(face->uniqueID());
       self.scene.fonts.push_back(std::move(data));
+      self.scene.renderer_fonts.push_back(sk_ref_sp(face));
     }
     return SkData::MakeWithCopy(&entry->second,sizeof(uint32_t));
   }
@@ -822,6 +825,7 @@ bool ScrollCompositor::WheelAllowed(int x,int y) const {
   return true;
 }
 uint64_t ScrollCompositor::Move(uint64_t element,int value,bool absolute,bool chain,ScrollPosition* position,bool horizontal) {
+  uint64_t boundary_element=0; ScrollPosition boundary_position;
   for (unsigned depth=0;element && depth<scene_.transforms.size();++depth) {
     auto found=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==element;});
     if (found==scene_.transforms.end()) return 0;
@@ -830,6 +834,7 @@ uint64_t ScrollCompositor::Move(uint64_t element,int value,bool absolute,bool ch
     int maximum=horizontal ? found->maximum_x : found->maximum;
     bool allowed=horizontal ? found->horizontal : found->vertical;
     bool propagate=horizontal ? found->chain_x : found->chain;
+    if (allowed) { boundary_element=element; boundary_position={found->position_x,found->position}; }
     int next=allowed ? std::clamp(absolute ? value : current+value,minimum,maximum) : current;
     if (allowed && (next!=current || !chain || !propagate)) {
       int previous=current;
@@ -845,7 +850,9 @@ uint64_t ScrollCompositor::Move(uint64_t element,int value,bool absolute,bool ch
     if (!chain || !propagate) return 0;
     element=found->scroll_parent;
   }
-  return 0;
+  // A consumed boundary wheel must not become a delayed relative event after newer absolute offsets.
+  if (boundary_element) *position=boundary_position;
+  return boundary_element;
 }
 uint64_t ScrollCompositor::Keyboard(uint64_t element,unsigned scan,bool space,bool shift,ScrollPosition* position) {
   auto found=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return element && node.element==element;});
@@ -1147,6 +1154,10 @@ bool ScrollCompositor::SelectReflow() {
   std::printf("COMPOSITOR: async gutter scene=%u\n",selected_reflow_);
   return true;
 }
+void ScrollCompositor::ReleaseRasterTiles() {
+  tiles_.clear();
+  for (auto& scene:reflows_) scene->ReleaseRasterTiles();
+}
 void ScrollCompositor::Clear() {
   reflows_.clear(); reflow_states_.clear(); retained_positions_.clear(); selected_reflow_=painted_reflow_=0;
   drag_element_=0; pressed_part_=0;
@@ -1202,6 +1213,16 @@ bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   unsigned reused=0;
   for (unsigned index=0;index<source.pictures.size();++index) {
     const auto& incoming=source.pictures[index];
+    if (!incoming.raster_appearances.empty()) {
+      // Compressed pixels remain local and are expanded only for visible tiles.
+      ScrollPicture value=incoming;
+      value.data=SkData::MakeEmpty();
+      metadata.push_back(std::move(value));
+      pictures.push_back(SkPicture::MakePlaceholder(incoming.bounds));
+      appearances.emplace_back();
+      std::erase_if(tiles_,[&](const Tile& tile){return tile.picture==index;});
+      continue;
+    }
     bool reuse=reuse_resources && index<scene_.pictures.size() &&
         scene_.pictures[index].data->size()==incoming.data->size() &&
         !std::memcmp(scene_.pictures[index].data->data(),incoming.data->data(),incoming.data->size());
@@ -1410,7 +1431,13 @@ void ScrollCompositor::Draw(SkCanvas& canvas,int width,int height) {
         if (!extent.intersect(bounds)) continue;
         sk_sp<SkImage> image;
         if (found!=tiles_.end()) { image=found->image; tiles_.erase(found); }
-        else {
+        else if (!picture.raster_appearances.empty()) {
+          while (!ScrollWireMemoryAvailable(2*1024*1024) && !tiles_.empty()) tiles_.pop_front();
+          if (!ScrollWireMemoryAvailable(2*1024*1024)) continue;
+          image=DecodeScrollTile(*picture.raster_appearances[appearance],x,y);
+          if (!image) continue;
+          ++misses;
+        } else {
           auto surface=SkSurfaces::Raster(SkImageInfo::MakeN32Premul(extent.width(),extent.height()));
           if (!surface) continue;
           auto* target=surface->getCanvas(); target->clear(SK_ColorTRANSPARENT);

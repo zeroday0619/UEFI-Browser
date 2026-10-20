@@ -12,8 +12,8 @@ struct RendererMp {
 };
 extern int UEFI_API browser_setjmp(void*) __attribute__((returns_twice));
 extern void renderer_trap_breakpoint(void), renderer_trap_nmi(void), renderer_trap_invalid(void), renderer_trap_page(void), renderer_trap_general(void), renderer_trap_divide(void);
-uint64_t renderer_escape_context[32], renderer_fault[3];
-uint64_t renderer_escape_stack;
+uint64_t renderer_escape_context[32], renderer_fault[5];
+uint64_t renderer_escape_stack, renderer_supervisor_cs, renderer_supervisor_ss;
 uint32_t renderer_trap_armed, renderer_nmi_seen;
 struct RendererDescriptor { uint16_t limit; uint64_t address; } __attribute__((packed));
 struct RendererGate { uint16_t low, selector; uint8_t ist, flags; uint16_t middle; uint32_t high, reserved; } __attribute__((packed));
@@ -32,8 +32,38 @@ static struct {
   uint32_t apic_identifier;
   struct RendererGate *idt;
   void *escape_stack;
+#ifdef ENABLE_RENDERER_CPL3
+  uint64_t *page_tables;
+  size_t page_table_count;
+  void *gdt, *task, *kernel_stack, *exception_stack, *user_bootstrap;
+  uint64_t user_code, user_data;
+#endif
   Status result;
 } renderer;
+static int renderer_contains(uint64_t base, size_t length, uint64_t address, size_t size) {
+  return address >= base && address - base <= length && size <= length - (address - base);
+}
+#ifdef ENABLE_RENDERER_CPL3
+static int renderer_granted_buffer(uint64_t,size_t,unsigned);
+#endif
+static int UEFI_API renderer_buffer(uint64_t address, size_t size, unsigned writable) {
+  if (!size || !address || size > UINT64_MAX - address || !renderer.event) return 0;
+  if (renderer_contains(renderer.bootstrap.data_physical,
+          renderer.bootstrap.data_end-renderer.bootstrap.data_start, address, size) ||
+      renderer_contains((uintptr_t)renderer.stack,4*1024*1024,address,size)) return 1;
+  size_t tls_size=renderer.tls ? (renderer.tls->memory_size+4095)&~(size_t)4095 : 0;
+  if (renderer_contains((uintptr_t)renderer.thread_allocation,tls_size+4096,address,size)) return 1;
+#ifdef ENABLE_RENDERER_CPL3
+  if (renderer_granted_buffer(address,size,writable)) return 1;
+#endif
+  /* Only immutable ELF segments are shared at their original virtual addresses. */
+  if (!writable) for (unsigned index=0; index<renderer.header->program_count; ++index) {
+    const ElfProgram *program=renderer.programs+index;
+    if (program->type==1 && !(program->flags&2) &&
+        renderer_contains(program->address,program->memory_size,address,size)) return 1;
+  }
+  return 0;
+}
 static void *renderer_pages(size_t count) {
   uint64_t address = 0;
   if (renderer.allocation_count == 64 ||
@@ -47,9 +77,21 @@ static void *renderer_pages(size_t count) {
   return (void*)address;
 }
 static int renderer_owned(uint64_t address) {
+#ifdef ENABLE_RENDERER_CPL3
+  if (renderer.page_tables && address >= (uintptr_t)renderer.page_tables &&
+      address - (uintptr_t)renderer.page_tables < 2048*4096) return 1;
+#endif
   for (size_t index=0; index<renderer.allocation_count; ++index)
     if (renderer.allocations[index] == address) return 1;
   return 0;
+}
+static uint64_t *renderer_new_table(void) {
+#ifdef ENABLE_RENDERER_CPL3
+  if (renderer.page_table_count == 2048) return 0;
+  return renderer.page_tables + 512*renderer.page_table_count++;
+#else
+  return renderer_pages(1);
+#endif
 }
 static int renderer_remap(uint64_t address, uint64_t physical) {
   uint64_t *table = renderer.root;
@@ -57,18 +99,25 @@ static int renderer_remap(uint64_t address, uint64_t physical) {
     uint64_t *entry = table + ((address >> shift)&511);
     if (!(*entry&1)) return 0;
     if (*entry&128) {
-      uint64_t *child = renderer_pages(1);
+      uint64_t *child = renderer_new_table();
       if (!child) return 0;
       uint64_t base = *entry & 0x000ffffffffff000ULL & ~((1ULL<<shift)-1);
       uint64_t flags = *entry & ~0x000ffffffffff000ULL;
+#ifdef ENABLE_RENDERER_CPL3
+      flags &= ~4ULL;
+#endif
       if (shift == 21) flags &= ~128ULL;
       for (size_t index=0; index<512; ++index)
         child[index] = (base + (index << (shift-9))) | flags;
       *entry = (uintptr_t)child | 3;
     } else if (!renderer_owned(*entry & 0x000ffffffffff000ULL)) {
-      uint64_t *child = renderer_pages(1);
+      uint64_t *child = renderer_new_table();
       if (!child) return 0;
       copy(child,(void*)(*entry & 0x000ffffffffff000ULL),4096);
+#ifdef ENABLE_RENDERER_CPL3
+      /* Later user grants must not expose inherited firmware user permissions. */
+      for (size_t index=0;index<512;++index) child[index]&=~4ULL;
+#endif
       *entry = (uintptr_t)child | 3;
     }
     table = (void*)(*entry & 0x000ffffffffff000ULL);
@@ -76,6 +125,12 @@ static int renderer_remap(uint64_t address, uint64_t physical) {
   table[(address>>12)&511] = physical | 3;
   return 1;
 }
+#ifdef ENABLE_RENDERER_CPL3
+#include "loader-sandbox.h"
+#endif
+#ifndef ENABLE_RENDERER_CPL3
+void UEFI_API renderer_system_dispatch(uint64_t *frame) { frame[14]=(uint64_t)-38; }
+#endif
 static Status UEFI_API renderer_invoke(Handle image, SystemTable *table) {
   return engine(image, table, renderer.stack, &renderer.bootstrap) ? ERROR(21) : 0;
 }
@@ -89,6 +144,10 @@ static void UEFI_API renderer_execute(void *argument) {
   uint64_t previous_root, previous_flags;
   struct RendererDescriptor previous_idt;
   uint32_t low, high;
+#ifdef ENABLE_RENDERER_CPL3
+  struct RendererDescriptor previous_gdt;
+  uint16_t previous_task, previous_ss;
+#endif
   __asm__ volatile("mov %%cr3,%0; pushfq; pop %1; cli; sidt %2" : "=r"(previous_root), "=r"(previous_flags), "=m"(previous_idt) :: "memory");
   copy(renderer.idt,(void*)previous_idt.address,previous_idt.limit+1);
   renderer_gate(0,renderer_trap_divide); renderer_gate(2,renderer_trap_nmi);
@@ -96,6 +155,14 @@ static void UEFI_API renderer_execute(void *argument) {
   renderer_gate(6,renderer_trap_invalid); renderer_gate(13,renderer_trap_general);
   renderer_gate(14,renderer_trap_page);
   struct RendererDescriptor descriptor={4095,(uintptr_t)renderer.idt};
+#ifdef ENABLE_RENDERER_CPL3
+  __asm__ volatile("sgdt %0; str %1; mov %%ss,%2" : "=m"(previous_gdt), "=r"(previous_task), "=r"(previous_ss));
+  if (!renderer_sandbox_descriptors(&previous_gdt,previous_task,previous_ss)) {
+    renderer.result=ERROR(3); __atomic_store_n(&renderer.completed,1,__ATOMIC_RELEASE);
+    __asm__ volatile("push %0; popfq" :: "r"(previous_flags) : "memory");
+    return;
+  }
+#endif
   __asm__ volatile("rdmsr" : "=a"(low),"=d"(high) : "c"(0xc0000100u));
   uint64_t previous_thread = ((uint64_t)high<<32)|low;
   uint64_t thread = (uintptr_t)renderer.thread;
@@ -106,15 +173,28 @@ static void UEFI_API renderer_execute(void *argument) {
     __atomic_store_n(&renderer.initialized,1,__ATOMIC_RELEASE);
     __asm__ volatile("mov %0,%%cr3" :: "r"((uintptr_t)renderer.root) : "memory");
     __asm__ volatile("wrmsr" :: "a"((uint32_t)thread),"d"((uint32_t)(thread>>32)),"c"(0xc0000100u) : "memory");
+#ifdef ENABLE_RENDERER_CPL3
+    renderer_enter_user((uintptr_t)engine,(uintptr_t)renderer.stack+4*1024*1024-8,
+        renderer.user_code,renderer.user_data,renderer.stack,renderer.user_bootstrap);
+    renderer.result=0;
+#else
     renderer.result = browser_call_on_stack((unsigned char*)renderer.stack+4*1024*1024,
         renderer.image,renderer.table,renderer_invoke);
-  } else renderer.result=ERROR(21);
+#endif
+  } else renderer.result=renderer_fault[0]==128 && !renderer_fault[1] ? 0 : ERROR(21);
   __atomic_store_n(&renderer_trap_armed,0,__ATOMIC_RELEASE);
   __asm__ volatile("wrmsr" :: "a"((uint32_t)previous_thread),"d"((uint32_t)(previous_thread>>32)),"c"(0xc0000100u) : "memory");
   __asm__ volatile("mov %0,%%cr3" :: "r"(previous_root) : "memory");
   __atomic_store_n(&renderer.completed,1,__ATOMIC_RELEASE);
   /* The BSP acknowledges any requested NMI before allowing the firmware IDT to return. */
   while (!__atomic_load_n(&renderer.released,__ATOMIC_ACQUIRE)) __asm__ volatile("pause");
+#ifdef ENABLE_RENDERER_CPL3
+  if (previous_task) {
+    ((uint64_t*)renderer.gdt)[previous_task/8] &= ~(2ULL<<40);
+    __asm__ volatile("ltr %0" :: "r"(previous_task) : "memory");
+  }
+  __asm__ volatile("lgdt %0; mov %1,%%ss" :: "m"(previous_gdt), "r"(previous_ss) : "memory");
+#endif
   __asm__ volatile("lidt %0; push %1; popfq" :: "m"(previous_idt),"r"(previous_flags) : "memory");
 }
 static Status UEFI_API renderer_terminate(void) {
@@ -162,6 +242,18 @@ static Status UEFI_API renderer_start(void *channel) {
   if (renderer.processor==(size_t)-1) return ERROR(3);
   uint64_t current_root;
   __asm__ volatile("mov %%cr3,%0" : "=r"(current_root));
+#ifdef ENABLE_RENDERER_CPL3
+  uint64_t control_zero,control_four;
+  uint32_t feature_low,feature_high;
+  __asm__ volatile("mov %%cr0,%0; mov %%cr4,%1" : "=r"(control_zero),"=r"(control_four));
+  __asm__ volatile("rdmsr" : "=a"(feature_low),"=d"(feature_high) : "c"(0xc0000080u));
+  if (!(control_zero&(1ULL<<16)) || (control_four&(1ULL<<12)) || !(feature_low&(1u<<11))) return ERROR(3);
+#endif
+#ifdef ENABLE_RENDERER_CPL3
+  renderer.page_table_count=0;
+  renderer.page_tables=renderer_pages(2048);
+  if (!renderer.page_tables) goto failure;
+#endif
   renderer.root=renderer_pages(1);
   if (!renderer.root) goto failure;
   copy(renderer.root,(void*)(current_root&0x000ffffffffff000ULL),4096);
@@ -181,7 +273,7 @@ static Status UEFI_API renderer_start(void *channel) {
   }
   renderer.completed=renderer.released=renderer.termination=renderer.initialized=0;
   renderer_trap_armed=renderer_nmi_seen=0;
-  for (unsigned index=0; index<3; ++index) renderer_fault[index]=0;
+  for (unsigned index=0; index<5; ++index) renderer_fault[index]=0;
   renderer.idt=renderer_pages(1); renderer.escape_stack=renderer_pages(16);
   if (!renderer.idt || !renderer.escape_stack) goto failure;
   renderer.stack=renderer_pages(1024);
@@ -197,6 +289,9 @@ static Status UEFI_API renderer_start(void *channel) {
   *(void**)renderer.thread=renderer.thread;
   renderer.bootstrap.renderer=1;
   renderer.bootstrap.channel=channel;
+#ifdef ENABLE_RENDERER_CPL3
+  if (!renderer_sandbox_prepare()) goto failure;
+#endif
   if (((Status(UEFI_API *)(uint32_t,size_t,void*,void*,void**))renderer.table->boot->function[7])(
       0,0,0,0,&renderer.event)) goto failure;
   Status status=renderer.mp->start_one(renderer.mp,renderer_execute,renderer.processor,renderer.event,0,0,0);

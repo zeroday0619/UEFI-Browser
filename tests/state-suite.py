@@ -19,8 +19,15 @@ parser.add_argument('--cpus', type=int, default=4, choices=(1, 4))
 parser.add_argument('--workers', type=int, default=2, choices=(1, 2))
 parser.add_argument('--https-ca', type=Path, required=True)
 parser.add_argument('--prefix', default='state-release')
+parser.add_argument('--build-directory', type=Path, default=Path('build/blink'))
+parser.add_argument('--require-broker-probe', action='store_true')
+parser.add_argument('--require-cpl3', action='store_true')
+parser.add_argument('--require-scroll-wire', action='store_true')
+parser.add_argument('--require-cpl3-probe', action='store_true')
 parser.add_argument('cases', nargs='*')
 options = parser.parse_args()
+if (options.require_broker_probe or options.require_cpl3 or options.require_cpl3_probe or options.require_scroll_wire) and options.cpus != 4:
+    parser.error('The renderer broker probe requires an AP renderer and --cpus 4.')
 if not options.prefix.replace('-', '').replace('_', '').isalnum():
     parser.error('Prefix must contain letters, digits, hyphens or underscores.')
 project = Path(__file__).resolve().parents[1]
@@ -36,7 +43,8 @@ cases = options.cases or [
 ]
 if len(cases) != len(set(cases)):
     parser.error('Each scenario must appear once.')
-source = project / 'build/blink/esp'
+image_directory = (project / options.build_directory).resolve()
+source = image_directory / 'esp'
 image_hash = hashlib.sha256((source / 'EFI/BOOT/BOOTX64.EFI').read_bytes()).hexdigest()
 pending = queue.Queue()
 for case in cases:
@@ -73,14 +81,18 @@ def worker(index):
                 item.unlink()
         environment = os.environ.copy()
         environment.update(BUILD_DIRECTORY=str(build), QEMU_TEST_ACCEL='kvm', QEMU_TEST_CPUS=str(options.cpus), INPUT_SCENARIO=case)
+        environment['QEMU_TEST_REQUIRE_CPL3'] = '1' if options.require_cpl3 or options.require_cpl3_probe or options.require_scroll_wire else '0'
+        environment['QEMU_TEST_REQUIRE_CPL3_PROBE'] = '1' if options.require_cpl3_probe else '0'
+        environment['QEMU_TEST_REQUIRE_BROKER_PROBE'] = '1' if options.require_broker_probe else '0'
+        environment.pop('QEMU_TEST_DISK_IMAGE', None)
         environment.pop('TEST_CA_FILE', None)
         environment.pop('QEMU_TEST_AUDIO_CAPTURE', None)
-        if case == 'renderer-recovery':
+        if case in ('renderer-recovery', 'sandbox', 'scroll-wire-boundary'):
             import socket
             with socket.socket() as listener:
                 listener.bind(('127.0.0.1', 0))
                 environment['QEMU_TEST_GDB_PORT'] = str(listener.getsockname()[1])
-            shutil.copy(project / 'build/blink/payload.elf', build / 'payload.elf')
+            shutil.copy(image_directory / 'payload.elf', build / 'payload.elf')
         if case == 'audio': environment['QEMU_TEST_AUDIO_CAPTURE'] = str(build / 'audio-output.wav')
         if case in ('cookies-secure', 'network-secure', 'websocket', 'cache', 'indexeddb', 'media', 'media-boundaries', 'audio', 'audio-limits', 'workers', 'workers-limits', 'webgpu', 'webgl', 'webgl2', 'gpu-lifecycle', 'webgpu-canvas', 'service-capabilities'):
             environment['TEST_CA_FILE'] = str(options.https_ca.resolve())
@@ -104,6 +116,27 @@ def worker(index):
             check = subprocess.run(['python3', 'tests/check-audio-output.py', str(build / 'audio-output.wav'), str(output_prefix) + '-spectrum.json'])
             if check.returncode: result.returncode = check.returncode
         record = {'scenario': case, 'exit_code': result.returncode, 'seconds': round(time.monotonic() - started, 2)}
+        if options.require_broker_probe:
+            import re
+            record['broker_checks'] = [int(value) for value in re.findall(
+                r'BROKER PROBE: passed checks=(\d+);',
+                (build / 'browser-serial.log').read_text(errors='replace'))]
+            if not record['broker_checks'] or any(count != 59 for count in record['broker_checks']):
+                record['exit_code'] = 1
+        if options.require_cpl3 or options.require_cpl3_probe or options.require_scroll_wire:
+            import re
+            text=(build / 'browser-serial.log').read_text(errors='replace')
+            record['renderer_cpl']=[int(value) for value in re.findall(r'Blink/V8 event loop[^\n]*cpl=(\d+)',text)]
+            if not record['renderer_cpl'] or any(value!=3 for value in record['renderer_cpl']): record['exit_code']=1
+            if options.require_cpl3_probe:
+                record['boundary_cases']=[int(value) for value in re.findall(r'CPL3: case=(\d+)',text)]
+                if record['boundary_cases']!=list(range(1,12)): record['exit_code']=1
+        if options.require_scroll_wire:
+            import re
+            text=(build / 'browser-serial.log').read_text(errors='replace')
+            record['wire_publications']=len(re.findall(r'COMPOSITOR: scene .* wire=\d+ cpl3=1',text))
+            record['wire_self_test']='COMPOSITOR: wire validation self-test passed' in text
+            if not record['wire_publications'] or not record['wire_self_test']: record['exit_code']=1
         with lock:
             summary['cases'].append(record)
             (project / 'validation' / (options.prefix + '-suite.json')).write_text(json.dumps(summary, indent=2) + '\n')

@@ -4,6 +4,7 @@
 #include "virtual_memory.h"
 #include "firmware_shared.h"
 #include "renderer_runtime.h"
+#include "renderer_sandbox.h"
 extern int renderer_runtime_entropy(void *, size_t);
 extern int renderer_runtime_protect(void *, size_t, int);
 #endif
@@ -255,6 +256,7 @@ void platform_release_pages(void) {
 
 #ifdef USE_MUSL
 static long firmware_memory_pages(int available_only) {
+  if (renderer_runtime_is_child()) return (long)renderer_runtime_request(RENDERER_MEMORY_PAGES,available_only,0,0,0,0);
   struct Descriptor {
     uint32_t type;
     uint64_t physical, virtual_address, pages, attributes;
@@ -543,6 +545,10 @@ _Bool firmware_entropy(unsigned char *buffer, size_t size) {
   return !status && random && !random->generate(random, 0, size, buffer);
 }
 static uint64_t page_permissions(void *address) {
+  if (renderer_runtime_is_child() && renderer_runtime_sandboxed()) {
+    uint64_t result=renderer_system_call(RENDERER_SYSTEM_PERMISSIONS,(uintptr_t)address,0,0,0,0);
+    return (result&1) ? result&~4ULL : 0;
+  }
   uintptr_t root, control;
   __asm__ volatile("mov %%cr3,%0" : "=r"(root));
   __asm__ volatile("mov %%cr4,%0" : "=r"(control));

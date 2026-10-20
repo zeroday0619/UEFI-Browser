@@ -275,7 +275,8 @@ struct BrowserContext {
     }
     if (renderer_runtime_available()) draw("Renderer AP: private runtime, TLS and page tables; BSP copies completed frames to GOP.");
     else if (!snapshot.workers) draw("No AP workers available; BSP presentation is active.");
-    draw(renderer_runtime_available() ? "Tabs share one renderer address space. CPL0 execution is not a security sandbox." : "Tabs share the main process. CPU percentages and per-tab memory are not measured.");
+    draw(renderer_runtime_sandboxed() ? "CPL3 renderer | supervisor-owned page tables and syscall broker | tabs share one renderer" :
+        renderer_runtime_available() ? "Tabs share one renderer address space. CPL0 execution is not a security sandbox." : "Tabs share the main process. CPU percentages and per-tab memory are not measured.");
     for (size_t index=0;index<tabs.size();++index) {
       std::snprintf(line,sizeof(line),"Tab %zu | %s | %s | frames %zu | %.180s",tabs[index]->identifier,index==active_tab ? "selected" : "background",tabs[index]->frame->NavigationPending() ? "navigation pending" : "document committed",tabs[index]->presentations,tabs[index]->frame->CurrentUrl().c_str()); draw(line);
     }
@@ -732,6 +733,7 @@ static void InitializeNetworkState() {
 }
 
 extern "C" int run_blink_browser(SystemTable* table) {
+  fflush(stdout);
   setvbuf(stdout, nullptr, _IONBF, 0);
   auto discardable_allocator = uefi_browser::CreateDiscardableAllocator();
   {
@@ -832,8 +834,12 @@ extern "C" int run_blink_browser(SystemTable* table) {
     }
     CHECK_EQ(resource_async_initialize(table), 0u);
     bool remote=uefi_browser::StartRenderer(table,context.width,context.height-kToolbarHeight);
-    if (!remote && context.framebuffer) render_processes_initialize(table, context.width * context.height);
-    Status result = context.NewTab(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url);
+    if (!remote && renderer_runtime_sandboxed()) {
+      std::puts("FAIL: CPL3 renderer unavailable; privileged rendering is disabled in this build");
+    }
+    bool permitted=remote || !renderer_runtime_sandboxed();
+    if (permitted && !remote && context.framebuffer) render_processes_initialize(table, context.width * context.height);
+    Status result = permitted ? context.NewTab(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url) : ERROR(3);
     if (result) {
       std::printf("FAIL: navigation transport status 0x%llx\n",
                   static_cast<unsigned long long>(result));

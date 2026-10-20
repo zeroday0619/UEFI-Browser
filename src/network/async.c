@@ -46,6 +46,8 @@ struct ResourceJob {
   int finished, abandoned, started;
 #ifdef UEFI_RUNTIME
   int remote;
+  uint64_t remote_identifier;
+  int remote_delivered;
   struct ResourceJob *remote_next;
 #endif
   int saved_errno;
@@ -53,8 +55,42 @@ struct ResourceJob {
 };
 #ifdef UEFI_RUNTIME
 static ResourceJob *remote_jobs;
+static uint64_t next_remote_identifier=1;
 typedef struct RemoteResponse RemoteResponse;
-struct RemoteResponse { ResourceResponse response; RemoteResponse *next; };
+struct RemoteResponse { ResourceResponse response, source; void *storage; size_t storage_size; RemoteResponse *next; };
+static void remote_response_destroy(RemoteResponse *entry) {
+  if (entry->storage) {
+    renderer_runtime_export_free(entry->storage,entry->storage_size);
+    resource_release(&entry->source);
+  } else resource_release(&entry->response);
+  free(entry);
+}
+static int remote_response_export(RemoteResponse *entry) {
+  ResourceResponse *source=&entry->response;
+  if (source->length>RESOURCE_BODY_LIMIT || source->header_count>1024) return 0;
+  size_t size=source->header_count*sizeof(Header)+source->length+1;
+  for (size_t index=0;index<source->header_count;++index) {
+    size_t name=strnlen(source->headers[index].name,16384),value=strnlen(source->headers[index].value,65536);
+    if (name==16384 || value==65536 || size>16*1024*1024-name-value-2) return 0;
+    size+=name+value+2;
+  }
+  unsigned char *storage=renderer_runtime_export_allocate(size);
+  if (!storage) return 0;
+  entry->source=*source; entry->storage=storage; entry->storage_size=size;
+  Header *headers=(void*)storage;
+  unsigned char *position=storage+source->header_count*sizeof(Header);
+  source->body=position;
+  if (source->length) memcpy(position,entry->source.body,source->length);
+  position+=source->length; *position++=0;
+  for (size_t index=0;index<source->header_count;++index) {
+    size_t length=strlen(entry->source.headers[index].name)+1;
+    headers[index].name=(char*)position; memcpy(position,entry->source.headers[index].name,length); position+=length;
+    length=strlen(entry->source.headers[index].value)+1;
+    headers[index].value=(char*)position; memcpy(position,entry->source.headers[index].value,length); position+=length;
+  }
+  source->headers=headers;
+  return 1;
+}
 static RemoteResponse *remote_responses;
 static void remote_unlink(ResourceJob *job) {
   ResourceJob **position=&remote_jobs;
@@ -274,6 +310,7 @@ void resource_async_shutdown(SystemTable *table) {
 void renderer_network_reset(void) {
   firmware_socket_reset(1);
   firmware_file_reset(1);
+  firmware_dns_reset(1);
   size_t jobs=0, responses=0;
   while (remote_jobs) {
     ResourceJob *job=remote_jobs; remote_jobs=job->remote_next;
@@ -282,41 +319,104 @@ void renderer_network_reset(void) {
   }
   while (remote_responses) {
     RemoteResponse *entry=remote_responses; remote_responses=entry->next;
-    resource_release(&entry->response); free(entry); ++responses;
+    remote_response_destroy(entry); ++responses;
   }
   printf("NETWORK_SERVICE: detached renderer jobs=%zu responses=%zu\n",jobs,responses);
+}
+static ResourceJob *remote_lookup(uint64_t identifier) {
+  for (ResourceJob *job=remote_jobs; job; job=job->remote_next)
+    if (job->remote_identifier==identifier) return job;
+  return NULL;
+}
+static uint64_t remote_request(const ResourceRequestSpec *source, unsigned weight, unsigned legacy) {
+  ResourceRequestSpec request=*source;
+  if (request.header_count>64 || request.body_length>RESOURCE_BODY_LIMIT ||
+      !renderer_runtime_buffer((uintptr_t)request.headers,request.header_count*sizeof(Header),0) ||
+      !renderer_runtime_buffer((uintptr_t)request.body,request.body_length,0)) return 0;
+  char url[RESOURCE_URL_LIMIT], method[16];
+  if (!renderer_runtime_string(url,sizeof(url),(uintptr_t)request.url)) return 0;
+  if (legacy) memcpy(method,"GET",4);
+  else if (!renderer_runtime_string(method,sizeof(method),(uintptr_t)request.method)) return 0;
+  Header source_headers[64], headers[64]={0};
+  if (request.header_count) memcpy(source_headers,request.headers,request.header_count*sizeof(Header));
+  void *body=NULL;
+  uint64_t identifier=0;
+  for (size_t index=0; index<request.header_count; ++index) {
+    headers[index].name=malloc(1024); headers[index].value=malloc(16384);
+    if (!headers[index].name || !headers[index].value ||
+        !renderer_runtime_string(headers[index].name,1024,(uintptr_t)source_headers[index].name) ||
+        !renderer_runtime_string(headers[index].value,16384,(uintptr_t)source_headers[index].value)) goto cleanup;
+  }
+  if (request.body_length) {
+    body=malloc(request.body_length);
+    if (!body) goto cleanup;
+    memcpy(body,request.body,request.body_length);
+  }
+  if (!next_remote_identifier || next_remote_identifier>INTPTR_MAX) goto cleanup;
+  request.url=url; request.method=method; request.headers=headers; request.body=body;
+  ResourceJob *job=resource_async_request(service_table,&request,weight);
+  if (job) {
+    identifier=next_remote_identifier++;
+    job->remote_identifier=identifier;
+    job->remote=1; job->remote_next=remote_jobs; remote_jobs=job;
+  }
+cleanup:
+  for (size_t index=0; index<request.header_count; ++index) {
+    free(headers[index].name); free(headers[index].value);
+  }
+  free(body);
+  return identifier;
 }
 uint64_t renderer_network_service(unsigned operation, uint64_t first, uint64_t second,
     uint64_t third, uint64_t fourth, uint64_t fifth) {
   (void)fifth;
   switch (operation) {
     case RENDERER_NETWORK_REQUEST: {
-      ResourceJob *job = resource_async_request(service_table, (const ResourceRequestSpec *)first, second);
-      if (job) { job->remote=1; job->remote_next=remote_jobs; remote_jobs=job; }
-      return (uintptr_t)job;
+      ResourceRequestSpec request;
+      if (!renderer_runtime_buffer(first,sizeof(request),0)) return 0;
+      memcpy(&request,(const void*)first,sizeof(request));
+      return remote_request(&request,second,0);
     }
     case RENDERER_NETWORK_START: {
-      ResourceJob *job=resource_async_start_priority(service_table,(const char*)first,(const Header*)second,third,fourth);
-      if (job) { job->remote=1; job->remote_next=remote_jobs; remote_jobs=job; }
-      return (uintptr_t)job;
+      /* Legacy requests have no method pointer to validate in the renderer. */
+      ResourceRequestSpec request={(const char*)first,NULL,(const Header*)second,third,NULL,0};
+      return remote_request(&request,fourth,1);
     }
     case RENDERER_NETWORK_RESULT: {
-      ResourceJob *job=(ResourceJob*)first;
-      if (!job->finished) return 0;
+      ResourceJob *job=remote_lookup(first);
+      if (!job || !job->finished || job->remote_delivered ||
+          !renderer_runtime_buffer(second,sizeof(Status),1) ||
+          !renderer_runtime_buffer(third,sizeof(ResourceResponse),1)) return 0;
       RemoteResponse *entry=calloc(1,sizeof(*entry));
       if (!entry) return 0;
-      int result=resource_async_result(job,(Status*)second,(ResourceResponse*)third);
-      entry->response=*(ResourceResponse*)third;
+      Status status;
+      int result=resource_async_result(job,&status,&entry->response);
+      if (renderer_runtime_sandboxed() && !remote_response_export(entry)) {
+        resource_release(&entry->response); memset(&entry->response,0,sizeof(entry->response)); status=ERROR(9);
+      }
+      memcpy((void*)second,&status,sizeof(status));
+      memcpy((void*)third,&entry->response,sizeof(entry->response));
+      job->remote_delivered=1;
       entry->next=remote_responses; remote_responses=entry;
       return result;
     }
-    case RENDERER_NETWORK_RELEASE: resource_async_release((ResourceJob*)first); return 0;
+    case RENDERER_NETWORK_RELEASE: {
+      ResourceJob *job=remote_lookup(first);
+      if (!job) return ERROR(2);
+      remote_unlink(job); job->remote=0; job->remote_next=NULL;
+      resource_async_release(job); return 0;
+    }
     case RENDERER_RESPONSE_RELEASE: {
-      ResourceResponse *response=(ResourceResponse*)first;
+      ResourceResponse response;
+      if (!renderer_runtime_buffer(first,sizeof(response),1)) return ERROR(15);
+      memcpy(&response,(const void*)first,sizeof(response));
       RemoteResponse **position=&remote_responses;
-      while (*position && ((*position)->response.body!=response->body || (*position)->response.headers!=response->headers)) position=&(*position)->next;
-      if (*position) { RemoteResponse *entry=*position; *position=entry->next; free(entry); }
-      resource_release(response); return 0;
+      while (*position && ((*position)->response.body!=response.body || (*position)->response.headers!=response.headers)) position=&(*position)->next;
+      if (!*position) return ERROR(2);
+      RemoteResponse *entry=*position; *position=entry->next;
+      remote_response_destroy(entry);
+      memset((void*)first,0,sizeof(response));
+      return 0;
     }
     default: return ERROR(3);
   }

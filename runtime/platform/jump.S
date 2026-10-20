@@ -115,6 +115,18 @@ renderer_trap_common:
     movq %rax,renderer_fault+8(%rip)
     movq 32(%rsp),%rax
     movq %rax,renderer_fault+16(%rip)
+    movq 40(%rsp),%rax
+    movq %rax,renderer_fault+24(%rip)
+    movq %cr2,%rax
+    movq %rax,renderer_fault+32(%rip)
+    testb $3,40(%rsp)
+    jz 3f
+    movq renderer_supervisor_cs(%rip),%rax
+    movq %rax,40(%rsp)
+    movq renderer_supervisor_ss(%rip),%rax
+    movq %rax,64(%rsp)
+    movq $2,48(%rsp)
+3:
     leaq renderer_escape(%rip),%rax
     movq %rax,32(%rsp)
     movq renderer_escape_stack(%rip),%rax
@@ -124,7 +136,92 @@ renderer_trap_common:
     popq %rax
     addq $16,%rsp
     iretq
+.globl renderer_escape
 renderer_escape:
     leaq renderer_escape_context(%rip),%rcx
     movl $1,%edx
     jmp browser_longjmp
+
+/* The first four arguments use the loader ABI; the payload entry uses SysV. */
+.globl renderer_enter_user
+renderer_enter_user:
+    movq 40(%rsp),%r10
+    movq 48(%rsp),%r11
+    pushq %r9
+    pushq %rdx
+    pushq $2
+    pushq %r8
+    pushq %rcx
+    xor %edi,%edi
+    xor %esi,%esi
+    movq %r10,%rdx
+    movq %r11,%rcx
+    xor %ebp,%ebp
+    iretq
+
+.globl renderer_system_interrupt
+renderer_system_interrupt:
+    push %rax
+    push %rbx
+    push %rcx
+    push %rdx
+    push %rsi
+    push %rdi
+    push %rbp
+    push %r8
+    push %r9
+    push %r10
+    push %r11
+    push %r12
+    push %r13
+    push %r14
+    push %r15
+    cld
+    mov %rsp,%rcx
+    mov %rsp,%rbx
+    and $-16,%rsp
+    sub $32,%rsp
+    call renderer_system_dispatch
+    mov %rbx,%rsp
+    pop %r15
+    pop %r14
+    pop %r13
+    pop %r12
+    pop %r11
+    pop %r10
+    pop %r9
+    pop %r8
+    pop %rbp
+    pop %rdi
+    pop %rsi
+    pop %rdx
+    pop %rcx
+    pop %rbx
+    pop %rax
+    iretq
+
+.altmacro
+.macro RENDERER_EXCEPTION number
+renderer_exception_\number:
+ .if (\number != 8) && (\number != 10) && (\number != 11) && (\number != 12) && (\number != 13) && (\number != 14) && (\number != 17) && (\number != 21) && (\number != 29) && (\number != 30)
+ pushq $0
+ .endif
+ pushq $\number
+ jmp renderer_trap_common
+.endm
+.set renderer_vector,0
+.rept 32
+ RENDERER_EXCEPTION %renderer_vector
+ .set renderer_vector,renderer_vector+1
+.endr
+.section .rdata,"dr"
+.globl renderer_exception_table
+renderer_exception_table:
+.macro RENDERER_EXCEPTION_POINTER number
+ .quad renderer_exception_\number
+.endm
+.set renderer_vector,0
+.rept 32
+ RENDERER_EXCEPTION_POINTER %renderer_vector
+ .set renderer_vector,renderer_vector+1
+.endr

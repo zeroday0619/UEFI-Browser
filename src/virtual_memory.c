@@ -1,6 +1,7 @@
 #include "uefi.h"
 #include "virtual_memory.h"
 #include "renderer_runtime.h"
+#include "renderer_sandbox.h"
 #include "firmware_shared.h"
 #include <errno.h>
 #include <stdint.h>
@@ -91,6 +92,12 @@ static void free_page(uint64_t address) {
 }
 static int initialize(void) {
   if (arena_start) return 0;
+  if (renderer_runtime_sandboxed() && renderer_runtime_is_child()) {
+    firmware_root=allocate_page();
+    if (!firmware_root) return -1;
+    arena_index=128; arena_start=(uintptr_t)arena_index<<39;
+    return 0;
+  }
   uintptr_t root, control;
   __asm__ volatile("mov %%cr3,%0" : "=r"(root));
   __asm__ volatile("mov %%cr4,%0" : "=r"(control));
@@ -151,6 +158,12 @@ static int empty_region(void) {
   return -1;
 }
 static void invalidate(uintptr_t address) {
+  if (renderer_runtime_sandboxed() && renderer_runtime_is_child()) {
+    uint64_t *entry=leaf(address,0);
+    uint64_t value=entry ? *entry : 0;
+    if (renderer_system_call(RENDERER_SYSTEM_MAP,address,value&ADDRESS_MASK,value&(EXECUTE_DISABLE|3),0,0)) abort();
+    return;
+  }
   __asm__ volatile("invlpg (%0)" :: "r"(address) : "memory");
 }
 int virtual_memory_protect(void *address, size_t length, int protection) {
@@ -295,8 +308,9 @@ void virtual_memory_release(void) {
     if (regions[index].start && virtual_memory_unmap((void *)regions[index].start,
         regions[index].end - regions[index].start)) abort();
   uint64_t *directory = (uint64_t *)(firmware_root[arena_index] & ADDRESS_MASK);
-  __asm__ volatile("mov %0,%%cr3" :: "r"(original_root) : "memory");
-  release_tables(directory, 3);
+  if (!renderer_runtime_sandboxed() || !renderer_runtime_is_child())
+    __asm__ volatile("mov %0,%%cr3" :: "r"(original_root) : "memory");
+  if (directory) release_tables(directory, 3);
   free_page((uintptr_t)firmware_root);
   arena_start = 0;
   renderer_pages_release();

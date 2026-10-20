@@ -993,7 +993,7 @@ index 2e6f81363b..008906b767 100644
    Vector<mojom::blink::EditCommandPtr> edit_commands_;
 
 diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
-index 7c10f4fa47..81b07f5e35 100644
+index 7c10f4fa47..c1a5f8b697 100644
 --- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
 +++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
 @@ -35,6 +35,7 @@
@@ -1082,7 +1082,17 @@ index 7c10f4fa47..81b07f5e35 100644
  void WebFrameWidgetImpl::BeginMainFrame(const viz::BeginFrameArgs& args) {
    base::TimeTicks last_frame_time = args.frame_time;
    TRACE_EVENT1("blink", "WebFrameWidgetImpl::BeginMainFrame", "frameTime",
-@@ -4532,24 +4569,36 @@ void WebFrameWidgetImpl::DidHandleGestureEvent(const WebGestureEvent& event) {
+@@ -3674,6 +3711,9 @@ void WebFrameWidgetImpl::RequestMouseLock(
+     bool has_transient_user_activation,
+     bool request_unadjusted_movement,
+     mojom::blink::WidgetInputHandlerHost::RequestMouseLockCallback callback) {
++  // Non-composited embedders have no browser input-host connection.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   auto host =
+       widget_base_->widget_input_handler_manager()->GetWidgetInputHandlerHost();
+
+@@ -4532,24 +4572,36 @@ void WebFrameWidgetImpl::DidHandleGestureEvent(const WebGestureEvent& event) {
 
  void WebFrameWidgetImpl::SetHasPointerRawUpdateEventHandlers(
      bool has_handlers) {
@@ -1119,7 +1129,30 @@ index 7c10f4fa47..81b07f5e35 100644
    widget_base_->widget_input_handler_manager()
        ->input_event_queue()
        ->SetNeedsUnbufferedInputForDebugger(unbuffered);
+@@ -4575,6 +4627,9 @@ void WebFrameWidgetImpl::FlushInputForTesting(base::OnceClosure done_callback) {
+ }
 
+ void WebFrameWidgetImpl::SetMouseCapture(bool capture) {
++  // The firmware embedder owns pointer delivery without a compositor input host.
++  if (!widget_base_->widget_input_handler_manager())
++    return;
+   if (auto host = widget_base_->widget_input_handler_manager()
+                       ->GetWidgetInputHandlerHost()) {
+     host->SetMouseCapture(capture);
+@@ -4583,9 +4638,10 @@ void WebFrameWidgetImpl::SetMouseCapture(bool capture) {
+
+ void WebFrameWidgetImpl::NotifyAutoscrollForSelectionInMainFrame(
+     bool autoscroll_selection) {
+-  if (auto host = widget_base_->widget_input_handler_manager()
+-                      ->GetWidgetInputHandlerHost()) {
+-    host->SetAutoscrollSelectionActiveInMainFrame(autoscroll_selection);
++  if (auto* manager = widget_base_->widget_input_handler_manager()) {
++    if (auto host = manager->GetWidgetInputHandlerHost()) {
++      host->SetAutoscrollSelectionActiveInMainFrame(autoscroll_selection);
++    }
+   }
+
+   if (!autoscroll_selection) {
 diff --git a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc b/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc
 index bae3a739fc..d8172ce49b 100644
 --- a/third_party/blink/renderer/platform/loader/fetch/resource_loader.cc

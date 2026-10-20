@@ -151,6 +151,11 @@ Status UEFI_API efi_main(Handle image, SystemTable *table) {
     renderer.programs = programs; renderer.tls = tls;
     browser_bootstrap.start = renderer_start; browser_bootstrap.join = renderer_join;
     browser_bootstrap.terminate = renderer_terminate; browser_bootstrap.fault = renderer_fault;
+    browser_bootstrap.buffer = renderer_buffer;
+#ifdef ENABLE_RENDERER_CPL3
+    browser_bootstrap.sandbox=1;
+    browser_bootstrap.grant=renderer_grant;
+#endif
     engine_stack = stack;
     result = browser_call_on_stack((unsigned char *)stack + 4 * 1024 * 1024,
                                    image, table, invoke);

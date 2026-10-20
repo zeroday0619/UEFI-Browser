@@ -64,6 +64,91 @@ def run(execute, build, log):
             elif character == '_': key('shift','minus')
             elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-wire-boundary':
+        import subprocess
+        import tempfile
+        import json
+        assert os.environ.get('QEMU_TEST_REQUIRE_CPL3_PROBE')=='1'
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-blocking.html'); key('ret')
+        wait_marker('ISOLATION ready'); wait_marker('cpl3=1'); time.sleep(2)
+        symbols=subprocess.check_output(['llvm-nm','--defined-only',str(build/'payload.elf')],text=True)
+        match=re.search(r'^([0-9a-fA-F]+) [Tt] renderer_boundary_scroll_wire$',symbols,re.M)
+        assert match
+        offset=len(healthy())
+        commands='set pagination off\ntarget remote 127.0.0.1:'+os.environ['QEMU_TEST_GDB_PORT']+'\nthread 2\npython\n'
+        commands+="if int(gdb.parse_and_eval('$cs')) & 3 == 3:\n    gdb.execute('set $rip = 0x"+match.group(1)+"')\n    print('WIRE_PROBE_CPL3')\nelse:\n    print('RETRY')\nend\ndetach\n"
+        with tempfile.NamedTemporaryFile(mode='w',suffix='.gdb') as command_file:
+            command_file.write(commands); command_file.flush()
+            for attempt in range(40):
+                result=subprocess.run(['gdb','-q','-nx','-batch','-x',command_file.name],text=True,capture_output=True,timeout=10,check=True)
+                if 'WIRE_PROBE_CPL3' in result.stdout:
+                    print(result.stdout,flush=True); break
+                time.sleep(.05)
+            else: raise AssertionError('Renderer never reached CPL3')
+        deadline=time.monotonic()+30
+        while True:
+            text=healthy()[offset:]
+            if text.count('COMPOSITOR: wire rejected')==5 and re.search(r'COMPOSITOR: scene .* cpl3=1',text): break
+            assert time.monotonic()<deadline,text
+            assert 'RENDERER: stopped' not in text,text
+            time.sleep(.05)
+        move(1100,500); before=snapshot('wire-boundary-before-scroll')
+        wheel('down'); after=snapshot('wire-boundary-after-scroll')
+        assert before[2]!=after[2] and 'COMPOSITOR: async scroll' in healthy()[offset:]
+        assert 'ISOLATION scroll' not in healthy()[offset:]
+        key('shift','esc'); key('delete'); wait_marker('RENDERER: recovery launched')
+        key('esc'); recovered=len(healthy()); click(260,24,False)
+        deadline=time.monotonic()+30
+        while 'ISOLATION ready' not in healthy()[recovered:]:
+            assert time.monotonic()<deadline,healthy()[recovered:]
+            time.sleep(.1)
+        time.sleep(1); click(280,50)
+        assert 'ISOLATION click' in healthy()[recovered:]
+        result={'producer_cpl':3,'rejected_publications':5,'untrusted_pointer_fields_ignored':True,
+                'valid_cache_after_rejection':True,'scroll_while_producer_busy':True,'recovery_click':True}
+        (build/'scroll-wire-boundary-results.json').write_text(json.dumps(result,indent=2))
+        print('PASS: CPL3 hostile scroll publications',json.dumps(result)); return
+    if os.environ.get('INPUT_SCENARIO') == 'sandbox':
+        import subprocess
+        import tempfile
+        assert os.environ.get('QEMU_TEST_REQUIRE_CPL3_PROBE')=='1'
+        key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-blocking.html'); key('ret')
+        wait_marker('ISOLATION ready'); time.sleep(1)
+        click(280,50); wait_marker('ISOLATION click')
+        snapshot('sandbox-before')
+        symbols=subprocess.check_output(['llvm-nm','--defined-only',str(build/'payload.elf')],text=True)
+        for symbol,expected_error in (('renderer_boundary_attack',5),('renderer_boundary_attack_table',7)):
+            match=re.search(r'^([0-9a-fA-F]+) [Tt] '+symbol+r'$',symbols,re.M)
+            assert match, symbol
+            previous=healthy(); offset=len(previous)
+            command_text='set pagination off\ntarget remote 127.0.0.1:'+os.environ['QEMU_TEST_GDB_PORT']+'\nthread 2\npython\n'
+            command_text+="if int(gdb.parse_and_eval('$cs')) & 3 == 3:\n    gdb.execute('set $rip = 0x"+match.group(1)+"')\n    print('CPL3_FAULT_ARMED')\nelse:\n    print('CPL3_RETRY')\nend\ndetach\n"
+            armed=False
+            with tempfile.NamedTemporaryFile(mode='w',suffix='.gdb') as command_file:
+                command_file.write(command_text); command_file.flush()
+                for attempt in range(30):
+                    result=subprocess.run(['gdb','-q','-nx','-batch','-x',command_file.name],text=True,capture_output=True,timeout=10,check=True)
+                    if 'CPL3_FAULT_ARMED' in result.stdout:
+                        armed=True; print(result.stdout,flush=True); break
+                    time.sleep(.05)
+            assert armed, 'The AP never reached CPL3 for fault injection.'
+            deadline=time.monotonic()+20
+            while 'RENDERER: recovery launched' not in healthy()[offset:]:
+                assert time.monotonic()<deadline, healthy()[offset:]
+                time.sleep(.05)
+            fault=re.search(r'vector=14 error=([0-9a-f]+) rip=([0-9a-f]+) cs=([0-9a-f]+) address=([0-9a-f]+)',healthy()[offset:])
+            assert fault and int(fault[1],16)==expected_error and int(fault[3],16)&3==3, healthy()[offset:]
+            assert int(fault[4],16)!=0, fault.groups()
+            click(260,24,False)
+            deadline=time.monotonic()+30
+            while healthy()[offset:].count('ISOLATION ready')<1:
+                assert time.monotonic()<deadline, healthy()[offset:]
+                time.sleep(.1)
+            time.sleep(1); click(280,50)
+            assert 'ISOLATION click' in healthy()[offset:]
+            snapshot('sandbox-recovered-'+symbol)
+        print('PASS: live CPL3 website input, corrupted channel recovery, supervisor read denial, page-table write denial and two interactive recoveries',flush=True)
+        return
     if os.environ.get('INPUT_SCENARIO') == 'webgpu-canvas':
         key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu-canvas.html'); key('ret')
         wait_marker('WEBGPU CANVAS PASS checks=11', timeout=150)

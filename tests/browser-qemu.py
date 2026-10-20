@@ -50,6 +50,12 @@ try:
                 'BLINK: main document load finished',
                 'BLINK: main frame stopped loading',
                 'BLINK: first raster frame copied to GOP']
+    if os.environ.get('QEMU_TEST_REQUIRE_BROKER_PROBE') == '1':
+        required.append('BROKER PROBE: passed checks=59;')
+    if os.environ.get('QEMU_TEST_REQUIRE_CPL3') == '1':
+        required.append('cpl=3')
+    if os.environ.get('QEMU_TEST_REQUIRE_CPL3_PROBE') == '1':
+        required.append('PASS: CPL3 payload entry, fixed syscall ABI')
     deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         text = log.read_text(errors='replace')

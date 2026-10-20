@@ -1,6 +1,7 @@
 #include "blink/remote_frame.h"
 #include "blink/scroll_snapshot.h"
 #include "blink/scroll_scene.h"
+#include "blink/scroll_wire.h"
 #include "third_party/skia/include/core/SkImage.h"
 #include "third_party/skia/include/core/SkPixmap.h"
 #include "renderer_runtime.h"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstddef>
 #include <cstring>
 #include <vector>
 #include <deque>
@@ -39,14 +41,28 @@ struct Publication {
   uint32_t *pixels;
   uint64_t scroll_acknowledgement;
   const ScrollScene* scroll_scene;
+  uint32_t scroll_bytes;
 };
 struct Channel {
   uint32_t head, tail, ready, stopping;
   unsigned width, height;
   Command commands[kCommands];
   Publication slots[kSlots];
+  uint32_t scroll_owner;
 };
+static_assert(offsetof(Channel,width)==4*sizeof(uint32_t) &&
+              offsetof(Channel,height)==5*sizeof(uint32_t),
+              "The boundary probe exercises the shared command header layout.");
 static Channel *channel;
+static size_t channel_bytes;
+static unsigned viewport_width,viewport_height;
+static uint32_t *trusted_pixels[kSlots];
+static uint8_t *trusted_scroll_bytes;
+static void ReleaseChannel() {
+  if (renderer_runtime_sandboxed()) renderer_runtime_shared_free(channel,channel_bytes);
+  else { for (auto& slot:channel->slots) delete[] slot.pixels; delete channel; }
+  channel=nullptr;
+}
 static std::array<RemoteFrame*,kSlots> clients{};
 static uint64_t next_generation=1;
 static bool termination_requested=false;
@@ -69,6 +85,7 @@ struct RendererTab {
   uint64_t generation=0, frame=0, navigation=0, focus_sequence=0;
   std::vector<uint32_t> pixels;
   std::shared_ptr<ScrollScene> published_scene;
+  std::vector<uint8_t> serialized_scene;
   sk_sp<SkSurface> surface;
   std::unique_ptr<BrowserFrame> browser;
   std::string opened_url;
@@ -83,6 +100,7 @@ static void Publish(unsigned index) {
   auto& tab=server[index];
   auto& output=channel->slots[index];
   if (!tab.browser || __atomic_load_n(&output.ready,__ATOMIC_ACQUIRE)) return;
+  if (renderer_runtime_sandboxed() && __atomic_load_n(&channel->scroll_owner,__ATOMIC_ACQUIRE)) return;
   std::string url=tab.browser->CurrentUrl();
   uint64_t keyboard_element=tab.browser->KeyboardScrollTarget();
   if (output.generation==tab.generation && output.navigation==tab.navigation && output.frame==tab.frame &&
@@ -103,10 +121,50 @@ static void Publish(unsigned index) {
   std::memcpy(output.pixels,tab.pixels.data(),tab.pixels.size()*sizeof(uint32_t));
   const auto& snapshot=tab.browser->Snapshot();
   output.scroll_acknowledgement=snapshot.acknowledgement;
+  if (renderer_runtime_sandboxed()) {
+    if (tab.published_scene!=snapshot.scene) {
+      // The previous publication is acknowledged, so encoding can reclaim its temporary buffer first.
+      std::vector<uint8_t>().swap(tab.serialized_scene);
+      tab.published_scene.reset();
+      tab.serialized_scene=snapshot.scene ? EncodeScrollScene(*snapshot.scene) : std::vector<uint8_t>{};
+      if (snapshot.scene) std::printf("COMPOSITOR: wire encoded bytes=%zu pictures=%zu\n",tab.serialized_scene.size(),snapshot.scene->pictures.size());
+    }
+    output.scroll_bytes=static_cast<uint32_t>(tab.serialized_scene.size());
+    // The fixed mailbox is part of the application mapping; its address is never supplied by a publication.
+    auto* destination=reinterpret_cast<uint8_t*>(channel+1)+kSlots*size_t(channel->width)*channel->height*sizeof(uint32_t);
+    if (output.scroll_bytes) std::memcpy(destination,tab.serialized_scene.data(),output.scroll_bytes);
+    __atomic_store_n(&channel->scroll_owner,index+1,__ATOMIC_RELEASE);
+  }
   tab.published_scene=snapshot.scene;
-  output.scroll_scene=tab.published_scene.get();
+  output.scroll_scene=renderer_runtime_sandboxed() ? nullptr : tab.published_scene.get();
   __atomic_store_n(&output.ready,1,__ATOMIC_RELEASE);
 }
+}
+// The probe is linked only when the CPL3 boundary test wrapper references it.
+extern "C" __attribute__((noinline)) void renderer_scroll_wire_probe(void) {
+  unsigned index=0;
+  while (index<kSlots && (!server[index].browser || server[index].serialized_scene.empty())) ++index;
+  if (index==kSlots) for (;;) __asm__ volatile("pause");
+  auto& output=channel->slots[index];
+  const auto& source=server[index].serialized_scene;
+  auto* bytes=reinterpret_cast<uint8_t*>(channel+1)+kSlots*size_t(channel->width)*channel->height*sizeof(uint32_t);
+  for (unsigned test=0;test<6;++test) {
+    while (__atomic_load_n(&output.ready,__ATOMIC_ACQUIRE) || __atomic_load_n(&channel->scroll_owner,__ATOMIC_ACQUIRE)) __asm__ volatile("pause");
+    std::memcpy(bytes,source.data(),source.size());
+    output.scroll_bytes=static_cast<uint32_t>(source.size());
+    if (test==0) output.scroll_bytes=kScrollWireCapacity+1;
+    if (test==1) --output.scroll_bytes;
+    if (test==2) bytes[4]=0xff;
+    if (test==3) { bytes[28]=0; bytes[29]=0; bytes[30]=0xc0; bytes[31]=0x7f; }
+    if (test==4) bytes[source.size()-1]^=1;
+    output.scroll_scene=reinterpret_cast<const ScrollScene*>(uintptr_t(0xffff800000001000));
+    output.pixels=reinterpret_cast<uint32_t*>(uintptr_t(0xffff800000001000));
+    ++output.frame;
+    __atomic_store_n(&channel->scroll_owner,index+1,__ATOMIC_RELEASE);
+    __atomic_store_n(&output.ready,1,__ATOMIC_RELEASE);
+  }
+  // The BSP must accept the final valid cache and scroll while this user thread remains busy.
+  for (;;) __asm__ volatile("pause");
 }
 class RemoteFrame::State {
  public:
@@ -123,7 +181,7 @@ class RemoteFrame::State {
   bool pointer_drag=false, pointer_outside=true;
   ScrollCompositor compositor;
   void InvalidateScroll() { compositor.Clear(); keyboard_element=0; pointer_drag=false; }
-  void CompositeScroll() { compositor.Draw(canvas,channel->width,channel->height); present.Run(); }
+  void CompositeScroll() { compositor.Draw(canvas,viewport_width,viewport_height); present.Run(); }
   unsigned last_buttons=0;
   std::deque<DeferredInput> inputs;
   size_t maximum_deferred=0, overflow=0;
@@ -182,7 +240,8 @@ RemoteFrame::RemoteFrame(SkCanvas& canvas, gfx::Size,
   for (unsigned index=0; index<kSlots; ++index) {
     if (clients[index] || !__atomic_load_n(&channel->slots[index].closed,__ATOMIC_ACQUIRE)) continue;
     state_->slot=index; state_->generation=next_generation++;
-    if (!channel->slots[index].pixels) channel->slots[index].pixels=new uint32_t[channel->width*channel->height]{};
+    if (renderer_runtime_sandboxed()) channel->slots[index].pixels=trusted_pixels[index];
+    else if (!channel->slots[index].pixels) channel->slots[index].pixels=new uint32_t[viewport_width*viewport_height]{};
     clients[index]=this;
     channel->slots[index].ready=0;
     __atomic_store_n(&channel->slots[index].closed,0,__ATOMIC_RELEASE);
@@ -271,7 +330,7 @@ void RemoteFrame::Keyboard(const KeySample& sample) {
 }
 void RemoteFrame::SetVisible(bool visible) {
   state_->visible=visible;
-  if (!visible) { state_->compositor.CancelDrag(); state_->compositor.Hover(-1,-1); state_->pointer_drag=false; state_->Reflowed(); }
+  if (!visible) { state_->compositor.ReleaseRasterTiles(); state_->compositor.CancelDrag(); state_->compositor.Hover(-1,-1); state_->pointer_drag=false; state_->Reflowed(); }
   Command command{}; command.operation=Visible; command.slot=state_->slot;
   command.generation=state_->generation; command.visible=visible; Send(command);
 }
@@ -288,24 +347,46 @@ void RemoteFrame::Poll() {
   }
   auto& input=channel->slots[state_->slot];
   if (!__atomic_load_n(&input.ready,__ATOMIC_ACQUIRE)) return;
-  if (input.generation!=state_->generation || input.navigation<state_->navigation) { __atomic_store_n(&input.ready,0,__ATOMIC_RELEASE); return; }
-  bool changed=state_->frame!=input.frame || state_->pending!=input.pending || state_->url!=input.url;
+  auto release=[&] {
+    __atomic_store_n(&input.ready,0,__ATOMIC_RELEASE);
+    if (renderer_runtime_sandboxed()) __atomic_store_n(&channel->scroll_owner,0,__ATOMIC_RELEASE);
+  };
+  if (input.generation!=state_->generation || input.navigation<state_->navigation) { release(); return; }
+  bool changed=state_->frame!=input.frame || state_->pending!=input.pending || state_->url!=std::string(input.url,strnlen(input.url,sizeof(input.url)));
   state_->pending=input.pending; state_->status=input.status;
   state_->focus_acknowledgement=input.focus_acknowledgement; state_->keyboard_element=input.keyboard_element;
-  state_->back=input.back; state_->forward=input.forward; state_->url=input.url;
-  preferences=input.preferences;
-  std::string opened=input.opened_url;
+  state_->back=input.back; state_->forward=input.forward;
+  state_->url.assign(input.url,strnlen(input.url,sizeof(input.url)));
+  BrowserPreferences received=input.preferences;
+  if (received.version==1 && received.dark<=1 &&
+      (received.font_size==14 || received.font_size==16 || received.font_size==20) &&
+      received.javascript<=1 && received.images<=1 && received.startup_settings<=1) preferences=received;
+  std::string opened(input.opened_url,strnlen(input.opened_url,sizeof(input.opened_url)));
   if (state_->frame!=input.frame && input.scroll_acknowledgement>=state_->scroll_sequence) {
-    if (!input.scroll_scene) state_->InvalidateScroll();
-    if (input.scroll_scene && state_->compositor.Install(*input.scroll_scene))
+    if (renderer_runtime_sandboxed()) {
+      const uint32_t length=__atomic_load_n(&input.scroll_bytes,__ATOMIC_RELAXED);
+      std::shared_ptr<ScrollScene> decoded;
+      if (length && length<=kScrollWireCapacity && ScrollWireMemoryAvailable(2*size_t(length)+16*1024*1024)) {
+        // Copy once from the trusted fixed mapping. Validation and rendering never read shared bytes again.
+        std::vector<uint8_t> owned(length);
+        std::memcpy(owned.data(),trusted_scroll_bytes,length);
+        decoded=DecodeScrollScene(owned.data(),owned.size());
+      }
+      if (!decoded || !state_->compositor.Install(*decoded)) {
+        state_->InvalidateScroll();
+        if (length) std::printf("COMPOSITOR: wire rejected bytes=%u\n",length);
+      } else std::printf("COMPOSITOR: scene pictures=%zu transforms=%zu acknowledgement=%llu wire=%u cpl3=1\n",
+          decoded->pictures.size(),decoded->transforms.size(),(unsigned long long)input.scroll_acknowledgement,length);
+    } else if (!input.scroll_scene) state_->InvalidateScroll();
+    if (!renderer_runtime_sandboxed() && input.scroll_scene && state_->compositor.Install(*input.scroll_scene))
       std::printf("COMPOSITOR: scene pictures=%zu transforms=%zu acknowledgement=%llu\n",
           input.scroll_scene->pictures.size(),input.scroll_scene->transforms.size(),(unsigned long long)input.scroll_acknowledgement);
-    state_->canvas.writePixels(SkImageInfo::Make(channel->width,channel->height,
-        kBGRA_8888_SkColorType,kPremul_SkAlphaType),input.pixels,channel->width*4,0,0);
-    if (state_->compositor.Ready() && state_->compositor.AppearanceChanged()) state_->compositor.Draw(state_->canvas,channel->width,channel->height);
+    state_->canvas.writePixels(SkImageInfo::Make(viewport_width,viewport_height,
+        kBGRA_8888_SkColorType,kPremul_SkAlphaType),renderer_runtime_sandboxed() ? trusted_pixels[state_->slot] : input.pixels,viewport_width*4,0,0);
+    if (state_->visible && state_->compositor.Ready() && state_->compositor.AppearanceChanged()) state_->compositor.Draw(state_->canvas,viewport_width,viewport_height);
     state_->frame=input.frame;
   }
-  __atomic_store_n(&input.ready,0,__ATOMIC_RELEASE);
+  release();
   auto present=state_->present; auto open=state_->open;
   if (changed) present.Run();
   if (!opened.empty()) open.Run(std::move(opened));
@@ -326,6 +407,12 @@ void TerminateRenderer() {
 }
 bool RemoteRendererConfigured() { return channel && !renderer_runtime_is_child(); }
 static void RecoverRenderer() {
+  if (renderer_runtime_sandboxed()) {
+    /* A stopped renderer may have corrupted every byte of the publication channel. */
+    std::memset(channel,0,sizeof(*channel));
+    channel->width=viewport_width; channel->height=viewport_height;
+    for (unsigned index=0;index<kSlots;++index) channel->slots[index].pixels=trusted_pixels[index];
+  }
   channel->head=channel->tail=channel->ready=channel->stopping=0;
   for (auto& slot:channel->slots) { slot.ready=0; slot.closed=1; }
   Status status=renderer_runtime_start(channel);
@@ -353,23 +440,40 @@ bool PollRemoteFrames() {
   return false;
 }
 bool StartRenderer(SystemTable*, int width, int height) {
-  channel=new Channel{}; channel->width=width; channel->height=height;
+  if (width<=0 || height<=0 || width>4096 || height>4096) return false;
+  viewport_width=width; viewport_height=height;
+  if (renderer_runtime_sandboxed()) {
+    if (!TestScrollWire()) { std::puts("COMPOSITOR: wire validation self-test failed"); return false; }
+    std::puts("COMPOSITOR: wire validation self-test passed");
+  }
+  channel_bytes=sizeof(Channel)+kSlots*size_t(width)*height*sizeof(uint32_t)+kScrollWireCapacity;
+  channel=renderer_runtime_sandboxed() ? static_cast<Channel*>(renderer_runtime_shared_allocate(channel_bytes)) : new Channel{};
+  if (!channel) return false;
+  channel->width=width; channel->height=height;
+  if (renderer_runtime_sandboxed()) {
+    auto* pixels=reinterpret_cast<uint32_t*>(channel+1);
+    for (unsigned index=0;index<kSlots;++index)
+      channel->slots[index].pixels=trusted_pixels[index]=pixels+index*size_t(width)*height;
+    trusted_scroll_bytes=reinterpret_cast<uint8_t*>(pixels+kSlots*size_t(width)*height);
+    renderer_runtime_application_size(channel_bytes);
+  }
   for (auto& slot:channel->slots) slot.closed=1;
   Status result=renderer_runtime_start(channel);
   if (result) {
-    for (auto& slot:channel->slots) { delete[] slot.pixels; }
-    delete channel; channel=nullptr;
-    std::printf("RENDERER: separate address space unavailable status=%llx; local fallback\n",(unsigned long long)result);
+    ReleaseChannel();
+    std::printf("RENDERER: separate address space unavailable status=%llx; %s\n",(unsigned long long)result,
+        renderer_runtime_sandboxed() ? "privileged fallback disabled" : "local fallback");
     return false;
   }
-  std::puts("RENDERER: AP process launched with private image data, stack, TLS and page tables (CPL0)");
+  std::puts(renderer_runtime_sandboxed() ?
+      "RENDERER: AP process launched with protected page tables and CPL3 entry" :
+      "RENDERER: AP process launched with private image data, stack, TLS and page tables (CPL0)");
   return true;
 }
 void StopRenderer() {
   if (!channel) return;
   if (!renderer_runtime_available()) {
-    for (auto& slot:channel->slots) delete[] slot.pixels;
-    delete channel; channel=nullptr; return;
+    ReleaseChannel(); return;
   }
   __atomic_store_n(&channel->stopping,1,__ATOMIC_RELEASE);
   Status result;
@@ -379,8 +483,7 @@ void StopRenderer() {
     result=renderer_runtime_join();
     if (result==ERROR(6)) { renderer_runtime_service(); resource_async_process(); }
   } while (result==ERROR(6));
-  for (auto& slot:channel->slots) { delete[] slot.pixels; }
-  delete channel; channel=nullptr;
+  ReleaseChannel();
   std::puts("RENDERER: joined and released private address space");
 }
 bool PollRenderer(void*) {
@@ -420,7 +523,10 @@ bool PollRenderer(void*) {
   }
   for (unsigned index=0; index<kSlots; ++index) {
     if (__atomic_load_n(&channel->slots[index].closed,__ATOMIC_ACQUIRE)==2) {
-      server[index].browser.reset(); server[index].published_scene.reset(); server[index].surface.reset(); server[index].pixels.clear();
+      server[index].browser.reset(); server[index].published_scene.reset(); server[index].serialized_scene.clear(); server[index].surface.reset(); server[index].pixels.clear();
+      __atomic_store_n(&channel->slots[index].ready,0,__ATOMIC_RELEASE);
+      if (renderer_runtime_sandboxed() && __atomic_load_n(&channel->scroll_owner,__ATOMIC_ACQUIRE)==index+1)
+        __atomic_store_n(&channel->scroll_owner,0,__ATOMIC_RELEASE);
       __atomic_store_n(&channel->slots[index].closed,1,__ATOMIC_RELEASE);
     } else Publish(index);
   }
@@ -431,13 +537,14 @@ int RunRenderer(SystemTable* table, blink::scheduler::WebThreadScheduler& schedu
   channel=static_cast<Channel*>(renderer_runtime_channel());
   server_table=table; server_scheduler=&scheduler;
   base::RunLoop loop; server_loop=&loop;
-  uintptr_t root, thread; uint16_t selector;
-  __asm__ volatile("mov %%cr3,%0; mov %%cs,%1; mov %%fs:0,%2" : "=r"(root),"=r"(selector),"=r"(thread));
+  uintptr_t root=0, thread; uint16_t selector;
+  __asm__ volatile("mov %%cs,%0; mov %%fs:0,%1" : "=r"(selector),"=r"(thread));
+  if (!(selector&3)) __asm__ volatile("mov %%cr3,%0" : "=r"(root));
   std::printf("RENDERER: Blink/V8 event loop cr3=%llx tls=%llx cpl=%u\n",
       (unsigned long long)root,(unsigned long long)thread,selector&3);
   __atomic_store_n(&channel->ready,1,__ATOMIC_RELEASE);
   loop.Run();
-  for (auto& tab:server) { tab.browser.reset(); tab.published_scene.reset(); tab.surface.reset(); tab.pixels.clear(); }
+  for (auto& tab:server) { tab.browser.reset(); tab.published_scene.reset(); tab.serialized_scene.clear(); tab.surface.reset(); tab.pixels.clear(); }
   server_loop=nullptr;
   return 0;
 }

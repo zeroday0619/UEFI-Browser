@@ -7,6 +7,7 @@
 #include <cstring>
 #include <string>
 #include "network/resource.h"
+#include "renderer_runtime.h"
 #include "blink/browser_build_info.h"
 #include "url/gurl.h"
 #include "v8/include/v8-version-string.h"
@@ -80,7 +81,11 @@ body.dark{color:#f5f5f5;background:#202020;--surface:#292929;--muted:#bdbdbd;--b
   if (about) {
     html += "<div class=\"logo\" aria-hidden=\"true\">U</div><h1>About UEFI BROWSER</h1><p>A browser built for UEFI firmware.</p><div class=\"card\"><div class=\"row\"><div><div class=\"label\">UEFI BROWSER</div><div class=\"detail\">Experimental firmware port · Fluent-inspired interface</div></div></div><div class=\"row\"><span>Blink / Chromium source</span><span class=\"version\">" UEFI_CHROMIUM_VERSION "</span></div><div class=\"row\"><span>V8</span><span class=\"version\">";
     html += V8_VERSION_STRING;
-    html += "</span></div><div class=\"row\"><span>Rendering</span><span>Skia · Software rasterization</span></div><div class=\"row\"><span>Platform</span><span>UEFI x86-64 · musl 1.2.5</span></div></div><div class=\"notice version\">Chromium revision: " UEFI_CHROMIUM_REVISION "</div><h2>Updates and open source</h2><p>This build has no automatic updater. Install a new EFI build to update the browser.</p><p>Blink, V8 and Skia are Chromium open-source components. This project is not Google Chrome. License texts and third-party notices are included with the distribution.</p><div class=\"notice\">With multiple CPUs, Blink and V8 run in a separate AP address space with private runtime and TLS. Firmware networking and browser controls run on the BSP. The renderer still has CPL0 privileges. Chrome profiles, sync, extensions, password management and a security sandbox are not available.</div>";
+    html += "</span></div><div class=\"row\"><span>Rendering</span><span>Skia · Software rasterization</span></div><div class=\"row\"><span>Platform</span><span>UEFI x86-64 · musl 1.2.5</span></div></div><div class=\"notice version\">Chromium revision: " UEFI_CHROMIUM_REVISION "</div><h2>Updates and open source</h2><p>This build has no automatic updater. Install a new EFI build to update the browser.</p><p>Blink, V8 and Skia are Chromium open-source components. This project is not Google Chrome. License texts and third-party notices are included with the distribution.</p><div class=\"notice\">With multiple CPUs, Blink and V8 run in a separate AP address space with private runtime and TLS. Firmware networking and browser controls run on the BSP.";
+    html += renderer_runtime_sandboxed() ?
+        " The renderer uses CPL3, supervisor-owned page tables and a fixed syscall broker. Tabs share one renderer. JIT pages may be RWX. Cached scrolling uses validated compressed pixel tiles and bounded scroll metadata. This experimental isolation has not received an independent security audit." :
+        " The renderer still has CPL0 privileges and has no security sandbox.";
+    html += " Chrome profiles, sync, extensions and password management are not available.</div>";
   } else {
     html += "<input class=\"search\" type=\"search\" placeholder=\"Search settings\" aria-label=\"Search settings\"><h1>Settings</h1><p>Make this browser work the way you prefer.</p>";
     auto choice = [](const char* query, const char* label, bool selected) {

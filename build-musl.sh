@@ -12,8 +12,23 @@ common=(-O2 -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic -fno-pie -f
  make -j"${JOBS:-8}" lib/libc.a > build.log 2>&1
 )
 includes=(-nostdinc -isystem "$(clang -print-resource-dir)/include" -I"$source_tree/arch/x86_64" -I"$source_tree/arch/generic" -I"$libc_build/obj/src/internal" -I"$libc_build/obj/include" -I"$source_tree/src/include" -I"$source_tree/src/internal" -I"$source_tree/include" -I"$project/runtime")
+# Browser builds fail closed when an unprivileged AP renderer cannot be started.
+renderer_cpl3=${ENABLE_RENDERER_CPL3:-${ENABLE_BLINK:-0}}
+case "$renderer_cpl3" in 0|1) ;; *) printf '%s\n' 'ENABLE_RENDERER_CPL3 must be 0 or 1.' >&2; exit 1 ;; esac
 engine_flags=()
 engine_objects=()
+if [[ ${ENABLE_CPL3_PROBE:-0} == 1 ]]; then
+ if [[ $renderer_cpl3 != 1 ]]; then
+  printf '%s\n' 'ENABLE_CPL3_PROBE requires ENABLE_RENDERER_CPL3=1.' >&2
+  exit 1
+ fi
+ engine_flags+=(-DENABLE_CPL3_PROBE)
+fi
+if [[ ${ENABLE_BROKER_PROBE:-0} == 1 ]]; then
+ engine_flags+=(-DENABLE_BROKER_PROBE)
+ clang "${common[@]}" "${includes[@]}" -c "$project/src/process/broker_probe.c" -o "$build/broker-probe.o"
+ engine_objects+=("$build/broker-probe.o")
+fi
 if [[ ${ENABLE_SERVICE_PROBE:-0} == 1 ]]; then
  engine_flags+=(-DENABLE_SERVICE_PROBE)
  clang "${common[@]}" "${includes[@]}" -c "$project/src/musl/io_probe.c" -o "$build/io-probe.o"
@@ -138,6 +153,12 @@ payload_start:
 payload_end:
 ASM
 loader_flags=()
+if [[ $renderer_cpl3 == 1 ]]; then
+ loader_flags+=(-DENABLE_RENDERER_CPL3 -mgeneral-regs-only)
+fi
+if [[ ${ENABLE_CPL3_PROBE:-0} == 1 ]]; then
+ loader_flags+=(-DENABLE_CPL3_PROBE)
+fi
 if [[ ${ENABLE_BLINK:-0} == 1 ]]; then
  "$project/build-input-driver.sh"
  "$project/build-http-driver.sh"

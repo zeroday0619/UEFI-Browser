@@ -46,4 +46,4 @@ assert struct.unpack_from('<H',pe,header+24)[0]==0x20b
 assert struct.unpack_from('<H',pe,header+24+68)[0]==10
 imports=output('llvm-readobj' ,'--coff-imports',str(image))
 assert 'Import {' not in imports, 'PE imports found.'
-print('PASS: static x86-64 EFI image, bounded ELF loads, no required unresolved symbols or syscall instructions')
+print('PASS: static x86-64 EFI image, bounded ELF loads, no required unresolved symbols or hosted syscall/sysenter instructions')

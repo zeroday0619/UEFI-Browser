@@ -20,6 +20,7 @@ class ScrollCompositor {
   bool Install(const ScrollScene&);
   std::vector<ScrollbarState> TakeReflowStates();
   void Clear();
+  void ReleaseRasterTiles();
   uint64_t Scroll(int x, int y, int delta, ScrollPosition* position);
   bool WheelAllowed(int x, int y) const;
   bool WheelListeners() const { return scene_.wheel_listeners; }

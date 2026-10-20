@@ -54,6 +54,15 @@ void firmware_atomic_load(size_t size, const void *source, void *destination,
      Masking interrupts makes arbitrary-sized loads indivisible on that processor.
      Full fences provide the strongest ordering accepted by the generic ABI. */
   uintptr_t flags;
+  uint16_t selector;
+  __asm__ volatile("mov %%cs,%0" : "=r"(selector));
+  if (selector&3) {
+    /* Cooperative user contexts cannot switch during this bounded copy. */
+    __asm__ volatile("mfence" ::: "memory");
+    memcpy(destination,source,size);
+    __asm__ volatile("mfence" ::: "memory");
+    return;
+  }
   __asm__ volatile("pushfq; popq %0; cli; mfence" : "=r"(flags) : : "memory", "cc");
   memcpy(destination, source, size);
   __asm__ volatile("mfence; pushq %0; popfq" : : "r"(flags) : "memory", "cc");
