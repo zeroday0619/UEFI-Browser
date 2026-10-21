@@ -22,7 +22,7 @@ The controlled fixture runs one uninterrupted JavaScript task for six seconds. Q
 
 Thirteen wheel ticks moved the page **1,040 pixels** while the script was still running. A colored marker initially outside the viewport became visible. Fixed buttons and the input field were pixel-identical in their comparison region. No DOM scroll callback ran inside the long task. After the script returned, Blink reported offset 1,040 and acknowledged sequence 13. The asynchronous and reconciled page captures had no color-channel differences greater than two in the checked region `(25,180)-(1000,700)`.
 
-Evidence: [serial log](renderer-release-renderer-scroll.log), [measurements](renderer-release-scroll-results.json), [before](renderer-release-input-scroll-before.png), [during JavaScript](renderer-release-input-scroll-offscreen-during-javascript.png), [after reconciliation](renderer-release-input-scroll-reconciled.png). The captures were visually inspected.
+Evidence: serial log (`renderer-release-renderer-scroll.log`; local artifact), measurements (`renderer-release-scroll-results.json`; local artifact), before (`renderer-release-input-scroll-before.png`; local artifact), during JavaScript (`renderer-release-input-scroll-offscreen-during-javascript.png`; local artifact), after reconciliation (`renderer-release-input-scroll-reconciled.png`; local artifact). The captures were visually inspected.
 
 ## Termination and fault verification
 
@@ -37,7 +37,7 @@ All four interruptions returned through the supervisor, restarted the AP, and pe
 
 The first termination took **92.84 ms** from QMP Delete submission to the recovery-launch log, including AP quiescence, resource cleanup and dispatch of the fresh AP. It does not measure completion of the new renderer's initialization or page load. GDB stops were used only for fault injection, not the scroll latency measurement.
 
-Evidence: [serial log](renderer-release-renderer-recovery.log), [native recovery message](renderer-release-input-renderer-recovery-message.png), [page after recovery](renderer-release-input-renderer-recovered.png).
+Evidence: serial log (`renderer-release-renderer-recovery.log`; local artifact), native recovery message (`renderer-release-input-renderer-recovery-message.png`; local artifact), page after recovery (`renderer-release-input-renderer-recovered.png`; local artifact).
 
 ## Repeated layout workload
 
@@ -49,17 +49,17 @@ The 800-card fixture repeatedly runs JavaScript and changes grid width. An initi
 | Click | 52.10 / 77.58 ms | 41.65 / 51.98 ms |
 | Scroll | 52.65 / 125.30 ms | 16.50 / 67.63 ms |
 
-These observations include host polling and, for clicks, the test's button hold. They are distinct from framebuffer latency and do not establish a general speedup or worst-case bound. Recording and rasterizing the larger cache still adds rendering work. Evidence: [comparison](renderer-async-heavy-comparison.json), [final samples](renderer-async-heavy-samples.json), [serial log](renderer-async-heavy-fixture.log).
+These observations include host polling and, for clicks, the test's button hold. They are distinct from framebuffer latency and do not establish a general speedup or worst-case bound. Recording and rasterizing the larger cache still adds rendering work. Evidence: comparison (`renderer-async-heavy-comparison.json`; local artifact), final samples (`renderer-async-heavy-samples.json`; local artifact), serial log (`renderer-async-heavy-fixture.log`; local artifact).
 
 ## Regression coverage
 
-Nine QEMU scenarios passed on the [regression image](renderer-async-regression-image-sha256.txt): asynchronous scroll, repeated CPU/layout work, two-tab renderer recovery, F12 shutdown during infinite JavaScript, tab/history lifecycle, the live `https://zeroday0619.dev` site, native and queued page input during long JavaScript, cancelled/nested wheel input, and single-CPU fallback. All returned to firmware. The live-site test exercised HTTPS/subresources, theme activation by mouse and keyboard, scrolling, settings and tab restoration. Unsupported site scroll properties used the renderer path.
+Nine QEMU scenarios passed on the regression image (`renderer-async-regression-image-sha256.txt`; local artifact): asynchronous scroll, repeated CPU/layout work, two-tab renderer recovery, F12 shutdown during infinite JavaScript, tab/history lifecycle, the live `https://zeroday0619.dev` site, native and queued page input during long JavaScript, cancelled/nested wheel input, and single-CPU fallback. All returned to firmware. The live-site test exercised HTTPS/subresources, theme activation by mouse and keyboard, scrolling, settings and tab restoration. Unsupported site scroll properties used the renderer path.
 
-The last relink only extended the allocation-reclamation diagnostic with its tracked count. Both asynchronous scrolling and the four-interruption recovery scenario passed again on that final image, including equality checks between tracked and reclaimed allocations. The [aggregate evidence](renderer-async-results.json) records both image hashes and their individual test results. [Static and host checks](renderer-async-static-checks.json) passed. The captures of scrolling, recovery and the live site were inspected.
+The last relink only extended the allocation-reclamation diagnostic with its tracked count. Both asynchronous scrolling and the four-interruption recovery scenario passed again on that final image, including equality checks between tracked and reclaimed allocations. The aggregate evidence (`renderer-async-results.json`; local artifact) records both image hashes and their individual test results. Static and host checks (`renderer-async-static-checks.json`; local artifact) passed. The captures of scrolling, recovery and the live site were inspected.
 
 ## Reproduction
 
-The final build uses Chromium 158.0.8110.0, musl 1.2.5, Clang 23.1.3, QEMU 11.1.2/KVM and OVMF 2026.08+ds-2 with 4 GiB RAM. The AP scenarios use four vCPUs. [Image SHA-256](renderer-async-image-sha256.txt), [binary checks](renderer-async-binary.log) and [final scenario results](renderer-release-suite.json) identify the delivered image and its final reruns. The [full regression scenarios](renderer-async-suite.json) refer to the preceding image with the same rendering and lifecycle logic.
+The final build uses Chromium 158.0.8110.0, musl 1.2.5, Clang 23.1.3, QEMU 11.1.2/KVM and OVMF 2026.08+ds-2 with 4 GiB RAM. The AP scenarios use four vCPUs. Image SHA-256 (`renderer-async-image-sha256.txt`; local artifact), binary checks (`renderer-async-binary.log`; local artifact) and final scenario results (`renderer-release-suite.json`; local artifact) identify the delivered image and its final reruns. The full regression scenarios (`renderer-async-suite.json`; local artifact) refer to the preceding image with the same rendering and lifecycle logic.
 
 ```sh
 python3 build-blink-libraries.py --resolve-inputs --jobs 20

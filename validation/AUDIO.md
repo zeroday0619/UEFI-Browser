@@ -39,11 +39,11 @@ The final image passed all nine four-vCPU scenarios and all three one-vCPU scena
 
 Evidence:
 
-- [Four-vCPU suite](audio-final-suite.json) and [one-vCPU suite](audio-final-single-suite.json).
-- [Four-vCPU waveform measurements](audio-final-audio-spectrum.json) and [one-vCPU measurements](audio-final-single-audio-spectrum.json).
-- [Raw capture](audio-final-audio-raw.wav) and [playable WAV](audio-final-audio-playable.wav).
-- [Service results](audio-final-service-capabilities-service-capabilities-results.json), which distinguish working PCM/WebM/IndexedDB paths from unavailable workers and GPU providers.
-- [Native build](audio-final-native-build.log), [EFI link](audio-final-link.log), [binary validation](audio-final-binary.log) and [static checks](audio-final-static-checks.json).
+- Four-vCPU suite (`audio-final-suite.json`; local artifact) and one-vCPU suite (`audio-final-single-suite.json`; local artifact).
+- Four-vCPU waveform measurements (`audio-final-audio-spectrum.json`; local artifact) and one-vCPU measurements (`audio-final-single-audio-spectrum.json`; local artifact).
+- Raw capture (`audio-final-audio-raw.wav`; local artifact) and playable WAV (`audio-final-audio-playable.wav`; local artifact).
+- Service results (`audio-final-service-capabilities-service-capabilities-results.json`; local artifact), which distinguish working PCM/WebM/IndexedDB paths from unavailable workers and GPU providers.
+- Native build (`audio-final-native-build.log`; local artifact), EFI link (`audio-final-link.log`; local artifact), binary validation (`audio-final-binary.log`; local artifact) and static checks (`audio-final-static-checks.json`; local artifact).
 
 The installed QEMU WAV backend left zero RIFF/data size fields even after QMP quit. The raw capture is preserved unchanged. The analyzer writes a separate playable container with correct sizes and verifies that its PCM bytes exactly match the raw capture. Reports include the raw and PCM hashes and whether the original header was finalized. This is a container-header repair, not synthesized or substituted audio. The [upstream WAV backend](https://github.com/qemu/qemu/blob/master/audio/wavaudio.c) describes its output format. Capture verification does not establish playback through physical speakers.
 

@@ -32,18 +32,18 @@ Final EFI SHA-256: `4d755fbaa330531f462368b9f89f160c0f73685a98727e2a5434c0e7c760
 
 The build uses Chromium 158.0.8110.0, musl 1.2.5 and Debian Clang 23.1.3. Execution used QEMU 11.1.2 with OVMF and KVM.
 
-- The [six-scenario QEMU suite](cache-release-suite.json) completed: Cache Storage, service diagnostics, WebSocket, Web Storage, secure networking and live-site tabs. Cache Storage passed 35 JavaScript assertions. The diagnostics scenario records unsupported APIs and must not be interpreted as their functionality passing.
-- [Three independent raw-disk boots](cache-release-persistence-results.json) each passed all 35 assertions. The persistent counter advanced 1, 2, 3. Before boot three, the test corrupted the latest snapshot at generation 46. The runtime loaded generation 45 and preserved the counter. Host-side FAT reads independently checked snapshot hashes.
-- The [single-CPU suite](cache-single-cpu-suite.json) exercises Cache Storage and the same service diagnostics without an AP renderer.
-- [Cache Storage](cache-release-cache-input-cache-checks.png), [service diagnostics](cache-release-service-capabilities-input-service-capabilities.png) and [zeroday0619.dev](cache-release-tabs-site-input-tabs-site-interactive.png) screenshots were inspected. The live-site scenario also exercises native tabs and settings. This does not establish arbitrary-site compatibility or visual parity.
-- [Native compilation](cache-release-native-compilation.log), [EFI linking](cache-release-link.log) and [binary validation](cache-release-binary.log) passed. The binary validator reports no required unresolved symbols, imports or host syscall instructions. Existing compiler warnings remain.
+- The six-scenario QEMU suite (`cache-release-suite.json`; local artifact) completed: Cache Storage, service diagnostics, WebSocket, Web Storage, secure networking and live-site tabs. Cache Storage passed 35 JavaScript assertions. The diagnostics scenario records unsupported APIs and must not be interpreted as their functionality passing.
+- Three independent raw-disk boots (`cache-release-persistence-results.json`; local artifact) each passed all 35 assertions. The persistent counter advanced 1, 2, 3. Before boot three, the test corrupted the latest snapshot at generation 46. The runtime loaded generation 45 and preserved the counter. Host-side FAT reads independently checked snapshot hashes.
+- The single-CPU suite (`cache-single-cpu-suite.json`; local artifact) exercises Cache Storage and the same service diagnostics without an AP renderer.
+- Cache Storage (`cache-release-cache-input-cache-checks.png`; local artifact), service diagnostics (`cache-release-service-capabilities-input-service-capabilities.png`; local artifact) and zeroday0619.dev (`cache-release-tabs-site-input-tabs-site-interactive.png`; local artifact) screenshots were inspected. The live-site scenario also exercises native tabs and settings. This does not establish arbitrary-site compatibility or visual parity.
+- Native compilation (`cache-release-native-compilation.log`; local artifact), EFI linking (`cache-release-link.log`; local artifact) and binary validation (`cache-release-binary.log`; local artifact) passed. The binary validator reports no required unresolved symbols, imports or host syscall instructions. Existing compiler warnings remain.
 - Python syntax checks, shell syntax checks, Chromium patch reverse-application checks and `git diff --check` passed. The full default suite, WPT, physical hardware and adversarial sandbox validation were not run.
 
 The 35 cache assertions cover empty/composite/large blobs, Unicode and NUL bytes, 262,145-byte binary bodies, repeated body reads, response metadata, cache ordering, query options, Vary, replacement, delete, global/named match, invalid put rejection, network `addAll()`, failed `addAll()`, concurrent writes, deleted handles, recreated caches, cross-origin isolation, opaque responses, quota rollback and persistence.
 
 ### Service results for this historical image
 
-The [actual JavaScript probe results](cache-release-service-capabilities-service-capabilities-results.json) are:
+The actual JavaScript probe results (`cache-release-service-capabilities-service-capabilities-results.json`; local artifact) are:
 
 | Service | Final observed result | Missing implementation |
 | --- | --- | --- |

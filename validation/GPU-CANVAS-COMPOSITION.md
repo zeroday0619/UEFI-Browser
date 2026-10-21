@@ -86,9 +86,9 @@ Exploratory runs used incomplete WebGL readback instrumentation or preceded the 
 
 ## Controlled results on 2026-10-21 (Asia/Seoul)
 
-Both EFI images link the same native Blink/ANGLE/Dawn/Skia libraries and Mesa archive. Only `ENABLE_GPU_CANVAS` differs. [The manifest](canvas-finalized-manifest.json) records the image and source hashes. Three runs per mode passed with the order control/direct, direct/control, control/direct. These final runs followed temporary-disk cleanup and did not overlap compilation or another test VM.
+Both EFI images link the same native Blink/ANGLE/Dawn/Skia libraries and Mesa archive. Only `ENABLE_GPU_CANVAS` differs. The manifest (`canvas-finalized-manifest.json`; local artifact) records the image and source hashes. Three runs per mode passed with the order control/direct, direct/control, control/direct. These final runs followed temporary-disk cleanup and did not overlap compilation or another test VM.
 
-Values below are medians across the three runs. The p95 row is the median of each run's p95, not a pooled percentile. [Raw runs and aggregates](canvas-finalized-comparison.json) retain all individual input samples.
+Values below are medians across the three runs. The p95 row is the median of each run's p95, not a pooled percentile. Raw runs and aggregates (`canvas-finalized-comparison.json`; local artifact) retain all individual input samples.
 
 | Measurement | CPU canvas readback control | Direct GPU canvas |
 | --- | ---: | ---: |
@@ -118,10 +118,10 @@ Intermediate direct runs exposed two corrected defects: an initialized WebGL can
 
 | Validation | Result and evidence |
 | --- | --- |
-| WebGPU API, alpha/origin/format pixels and repeated context switching | All three cases passed in [the alpha/lifecycle suite](canvas-finalized-alpha-lifecycle-suite.json). Pixel checks cover 14 locations across 10 canvases. Lifecycle checks include eight WebGPU/WebGL2 round trips. |
-| WebGL2, WebGPU snapshots/resize, multiple contexts and long-JavaScript scrolling | All four cases passed in [the regression suite](canvas-finalized-regressions-suite.json). Explicit readback APIs remain functional. The scroll case includes 12 seconds of blocking JavaScript. |
-| `https://zeroday0619.dev` | Passed in the regression suite and [the control run](canvas-finalized-real-control-suite.json). Input was delivered during loading; theme clicks, keyboard input and wheel scrolling were exercised after load. |
-| WebGL Fundamentals 3D Perspective | Passed in [the final live-site retest](canvas-finalized-live-3-suite.json). Slider and Home-key interactions changed 2,603 and 5,205 canvas pixels, respectively; the canvas readback counter remained zero. |
+| WebGPU API, alpha/origin/format pixels and repeated context switching | All three cases passed in the alpha/lifecycle suite (`canvas-finalized-alpha-lifecycle-suite.json`; local artifact). Pixel checks cover 14 locations across 10 canvases. Lifecycle checks include eight WebGPU/WebGL2 round trips. |
+| WebGL2, WebGPU snapshots/resize, multiple contexts and long-JavaScript scrolling | All four cases passed in the regression suite (`canvas-finalized-regressions-suite.json`; local artifact). Explicit readback APIs remain functional. The scroll case includes 12 seconds of blocking JavaScript. |
+| `https://zeroday0619.dev` | Passed in the regression suite and the control run (`canvas-finalized-real-control-suite.json`; local artifact). Input was delivered during loading; theme clicks, keyboard input and wheel scrolling were exercised after load. |
+| WebGL Fundamentals 3D Perspective | Passed in the final live-site retest (`canvas-finalized-live-3-suite.json`; local artifact). Slider and Home-key interactions changed 2,603 and 5,205 canvas pixels, respectively; the canvas readback counter remained zero. |
 | Broker, runtime and transport host tests | `python3 tests/venus-broker-host.py`, `python3 tests/venus-runtime-host.py` and `python3 tests/venus-transport-host.py` passed with sanitizers. Logs use the `canvas-direct-*-host.log` names. |
 | Patch reproducibility and builds | Chromium patches applied to the pinned base and reverse checks passed against the modified checkout. Mesa patch checks, native library builds and both final EFI links passed. See `canvas-direct-patch-checks.log`, `canvas-direct-opaque-alpha-build.log`, `canvas-direct-final-efi-build.log` and `canvas-readback-control-final-efi-build.log`. |
 
@@ -137,4 +137,4 @@ The helper preserves existing window rules and saves the original configuration 
 
 This isolates window placement and focus, not CPU or GPU resources. Tests and games still share the host GPU. Measurements collected while gaming are functional checks and must not be mixed into the controlled performance comparison above. Desktop verification uses KWin's actual window state; this host's XWayland root reports one X11 desktop regardless of the KDE virtual-desktop assignment. The rule fields follow [KWin's rule schema](https://github.com/KDE/kwin/blob/master/src/rulesettings.kcfg).
 
-The isolated live WebGL run passed in 42.57 seconds: [suite result](canvas-isolated-desktop-suite.json), [canvas results](canvas-isolated-desktop-gpu-live-webgl-gpu-live-webgl-results.json) and [desktop evidence](qemu-test-desktop-validation.json). KWin reported the test desktop assignment, `active=false` and `wantsInput=false` at window creation. The current desktop remained unchanged. The off-desktop SDL capture showed the rendered geometry and both input-driven changes; readback remained zero. This run is excluded from the performance table.
+The isolated live WebGL run passed in 42.57 seconds: suite result (`canvas-isolated-desktop-suite.json`; local artifact), canvas results (`canvas-isolated-desktop-gpu-live-webgl-gpu-live-webgl-results.json`; local artifact) and desktop evidence (`qemu-test-desktop-validation.json`; local artifact). KWin reported the test desktop assignment, `active=false` and `wantsInput=false` at window creation. The current desktop remained unchanged. The off-desktop SDL capture showed the rendered geometry and both input-driven changes; readback remained zero. This run is excluded from the performance table.

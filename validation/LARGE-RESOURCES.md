@@ -8,9 +8,9 @@ EDK II's HTTPS receive path parsed only the portion of a TLS fragment copied int
 
 ## Verification
 
-The EFI image in `build/large-resources-tls` has SHA-256 `cc3da64ec265b4ee658dcbbf9a4ab5b1efa256c109f3cbb41417bcbc3c15463f`; the payload hash is `aa0399d1ccdd46dedb6b0ef104ae53950774829ebf9ac576c28984ada7030a2b`. Native compilation, EDK II driver compilation, EFI linking and [static validation](large-resources-tls-binary.log) passed. The patch also passed reverse applicability checking against the pinned EDK II checkout.
+The EFI image in `build/large-resources-tls` has SHA-256 `cc3da64ec265b4ee658dcbbf9a4ab5b1efa256c109f3cbb41417bcbc3c15463f`; the payload hash is `aa0399d1ccdd46dedb6b0ef104ae53950774829ebf9ac576c28984ada7030a2b`. Native compilation, EDK II driver compilation, EFI linking and static validation (`large-resources-tls-binary.log`; local artifact) passed. The patch also passed reverse applicability checking against the pinned EDK II checkout.
 
-[The QEMU suite](large-resources-tls-suite.json) passed at CPL3 without unexpected renderer faults:
+The QEMU suite (`large-resources-tls-suite.json`; local artifact) passed at CPL3 without unexpected renderer faults:
 
 - An 11 MiB script with declared Content-Length executes through Blink.
 - An 11 MiB chunked HTTPS response preserves every byte across buffer growth and partial TLS reads.
@@ -31,4 +31,4 @@ python3 tests/state-suite.py --cpus 4 --workers 2 \
 
 Responses remain fully buffered before Blink delivery. Streaming delivery, per-origin scheduling, comprehensive malformed/pipelined TLS response coverage and aggregate network memory accounting remain incomplete. Increasing one response bound does not implement unlimited resource loading or establish full browser compatibility.
 
-The verified image was promoted to `build/blink` with previous binaries retained under `build/release-backups`; see [promotion hashes](large-resources-default-promotion.json). A live YouTube rerun received the 10,877,847-byte main bundle successfully, but playback was still pending at 90 seconds. See [the live investigation](YOUTUBE.md).
+The verified image was promoted to `build/blink` with previous binaries retained under `build/release-backups`; see promotion hashes (`large-resources-default-promotion.json`; local artifact). A live YouTube rerun received the 10,877,847-byte main bundle successfully, but playback was still pending at 90 seconds. See [the live investigation](YOUTUBE.md).

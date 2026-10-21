@@ -25,11 +25,11 @@ A QEMU failure exposed a pre-existing drag quantization problem: moving only acr
 
 Validated on 2026-10-20 with Chromium 158.0.8110.0 at `f12c350cb1e1e7ea05c11d6045b0a04158ec9e28`, clang 23.1.3, musl 1.2.5, QEMU 11.1.2 and OVMF 2026.08. QEMU used KVM, four virtual CPUs, 4 GiB RAM and a 1280×800 framebuffer with a 1280×720 page viewport.
 
-The final EFI SHA-256 is `8fbce47fcf747c473cfd2b23cec0f2605f0a040c576675fd5e5772e9ccdf2af2`. [Static checks](scroll-gutter-static-checks.json) record the source hashes and confirm that the Chromium adapter mirror matches the project sources. [Suite results](scroll-gutter-suite.json) identify the same image and the tested fixture sources.
+The final EFI SHA-256 is `8fbce47fcf747c473cfd2b23cec0f2605f0a040c576675fd5e5772e9ccdf2af2`. Static checks (`scroll-gutter-static-checks.json`; local artifact) record the source hashes and confirm that the Chromium adapter mirror matches the project sources. Suite results (`scroll-gutter-suite.json`; local artifact) identify the same image and the tested fixture sources.
 
 ### Reproduction and measured behavior
 
-The previous EFI failed the nested vertical fixture before implementation: the hover state retained a 476-pixel text column instead of reducing it to 420 pixels. The marker remained at framebuffer Y=368. See the [baseline result](scroll-gutter-before.json), [runner output](scroll-gutter-before-runner.log) and [hover screenshot](scroll-gutter-before-hover-reference.png). The baseline records its separate EFI and test hashes.
+The previous EFI failed the nested vertical fixture before implementation: the hover state retained a 476-pixel text column instead of reducing it to 420 pixels. The marker remained at framebuffer Y=368. See the baseline result (`scroll-gutter-before.json`; local artifact), runner output (`scroll-gutter-before-runner.log`; local artifact) and hover screenshot (`scroll-gutter-before-hover-reference.png`; local artifact). The baseline records its separate EFI and test hashes.
 
 The final fixtures execute an uninterrupted 25-second JavaScript loop. QMP sends pointer movement, press, release and cross-axis movement while the loop is running. Framebuffer pixels establish the text-column width and the position of a marker after the text. Each assertion also checks that JavaScript has not finished. Serial publication counts establish that the renderer did not publish a frame during these input transitions.
 
@@ -45,11 +45,11 @@ The horizontal fixture uses an aspect-ratio column whose width depends on the av
 
 Each fixture recorded zero renderer publications during the busy input sequence and zero publications during a one-second idle check. No additional ResizeObserver callback was delivered during that idle interval. After JavaScript completed, Blink reported the accepted client dimension. Comparing the affected viewport crop before and after renderer reconciliation produced a difference fraction of **0.0** in all three cases. The comparison counts color components differing by more than two levels; its acceptance threshold is 2%. These measurements do not establish optical input latency or a frame-rate guarantee.
 
-- Nested: [measurements](scroll-gutter-scroll-gutter-scroll-gutter-results.json), [busy pressed screenshot](scroll-gutter-scroll-gutter-input-gutter-pressed-busy.png), [serial log](scroll-gutter-scroll-gutter.log).
-- Root: [measurements](scroll-gutter-scroll-gutter-root-scroll-gutter-results.json), [busy pressed screenshot](scroll-gutter-scroll-gutter-root-input-gutter-pressed-busy.png), [serial log](scroll-gutter-scroll-gutter-root.log).
-- Horizontal: [measurements](scroll-gutter-scroll-gutter-horizontal-scroll-gutter-results.json), [busy pressed screenshot](scroll-gutter-scroll-gutter-horizontal-input-gutter-pressed-busy.png), [serial log](scroll-gutter-scroll-gutter-horizontal.log).
+- Nested: measurements (`scroll-gutter-scroll-gutter-scroll-gutter-results.json`; local artifact), busy pressed screenshot (`scroll-gutter-scroll-gutter-input-gutter-pressed-busy.png`; local artifact), serial log (`scroll-gutter-scroll-gutter.log`; local artifact).
+- Root: measurements (`scroll-gutter-scroll-gutter-root-scroll-gutter-results.json`; local artifact), busy pressed screenshot (`scroll-gutter-scroll-gutter-root-input-gutter-pressed-busy.png`; local artifact), serial log (`scroll-gutter-scroll-gutter-root.log`; local artifact).
+- Horizontal: measurements (`scroll-gutter-scroll-gutter-horizontal-scroll-gutter-results.json`; local artifact), busy pressed screenshot (`scroll-gutter-scroll-gutter-horizontal-input-gutter-pressed-busy.png`; local artifact), serial log (`scroll-gutter-scroll-gutter-horizontal.log`; local artifact).
 
-The container-query fixture verifies fallback: its text-column width remains 476 pixels during the blocking script and becomes 420 pixels after the renderer resumes. It produces no cached gutter transitions. See [fallback measurements](scroll-gutter-scroll-gutter-fallback-scroll-gutter-fallback-results.json). The cross-axis drag regression is recorded in the [failed intermediate run](scroll-gutter-drag-before-runner.log) and [serial log](scroll-gutter-drag-before.log); the final three reflow fixtures cover the correction.
+The container-query fixture verifies fallback: its text-column width remains 476 pixels during the blocking script and becomes 420 pixels after the renderer resumes. It produces no cached gutter transitions. See fallback measurements (`scroll-gutter-scroll-gutter-fallback-scroll-gutter-fallback-results.json`; local artifact). The cross-axis drag regression is recorded in the failed intermediate run (`scroll-gutter-drag-before-runner.log`; local artifact) and serial log (`scroll-gutter-drag-before.log`; local artifact); the final three reflow fixtures cover the correction.
 
 ### QEMU regression results
 
@@ -87,7 +87,7 @@ git -C ../../work/chromium-build/chromium apply --reverse --check "$PWD/patches/
 git diff --check
 ```
 
-The [Blink build log](blink-native-library-build.log) records compilation. The [binary validation](scroll-gutter-binary.log) confirms a static x86-64 EFI image with bounded ELF loads, no required unresolved symbols and no syscall instructions. [Pump checks](scroll-gutter-pump.log) passed immediate, idle, pre-wait and nested quit behavior. [Scheduler checks](scroll-gutter-scheduler.log) passed eligibility, deadline selection, service fairness, cancellation and 4128 SSE2 raster cases. Python syntax compilation and JavaScript fixture syntax checks also passed. Full Chromium WPT and browser test suites were not run; runtime validation targets the UEFI image in QEMU.
+The Blink build log (`blink-native-library-build.log`; local artifact) records compilation. The binary validation (`scroll-gutter-binary.log`; local artifact) confirms a static x86-64 EFI image with bounded ELF loads, no required unresolved symbols and no syscall instructions. Pump checks (`scroll-gutter-pump.log`; local artifact) passed immediate, idle, pre-wait and nested quit behavior. Scheduler checks (`scroll-gutter-scheduler.log`; local artifact) passed eligibility, deadline selection, service fairness, cancellation and 4128 SSE2 raster cases. Python syntax compilation and JavaScript fixture syntax checks also passed. Full Chromium WPT and browser test suites were not run; runtime validation targets the UEFI image in QEMU.
 
 ### Reproduction commands
 

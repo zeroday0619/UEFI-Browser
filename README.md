@@ -4,8 +4,6 @@ An experimental x86-64 UEFI browser built from pinned Chromium components: Blink
 
 The project is an independent port. It is not an official Chromium or Google product.
 
-![UEFI BROWSER displaying a website in QEMU](validation/tabs-site.png)
-
 ## Project status
 
 | Area | Current implementation |
@@ -26,7 +24,7 @@ The musl C heap grows on demand within a process budget derived from available f
 
 The loader displays a POST screen with CPU, a bounded writable-memory test, driver installation, ELF validation and payload setup results. Failures retain the item and EFI status before returning to firmware on a keypress. This is the browser's startup self-test, not a replacement for firmware hardware diagnostics. See [boot POST validation](validation/BOOT-POST.md).
 
-Validation evidence: [AP renderer and service separation](validation/RENDERER-PROCESS.md), [tabs and process monitor](validation/TABS-AND-MONITOR.md), [idle-resume results](validation/IDLE-RESUME.md), [process isolation](validation/PROCESSES.md), [settings and About](validation/FLUENT-SETTINGS.md), and [input under load](validation/HEAVY-INPUT.md). Website captures document individual test runs, not universal compatibility.
+Validation evidence: [AP renderer and service separation](validation/RENDERER-PROCESS.md), [tabs and process monitor](validation/TABS-AND-MONITOR.md), [idle-resume results](validation/IDLE-RESUME.md), [process isolation](validation/PROCESSES.md), [settings and About](validation/FLUENT-SETTINGS.md), and [input under load](validation/HEAVY-INPUT.md). Raw website captures, media recordings and generated logs remain local and are excluded from source publication. See the [validation artifact policy](validation/README.md).
 
 ## AI-assisted development and disclaimer
 

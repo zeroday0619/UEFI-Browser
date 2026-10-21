@@ -13,3 +13,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+
+# Publish written validation summaries only; raw evidence remains local.
+/validation/*
+!/validation/*.md

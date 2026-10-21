@@ -46,9 +46,9 @@ Environment: Chromium 158.0.8110.0 (`f12c350cb1e1e7ea05c11d6045b0a04158ec9e28`),
 
 Final EFI SHA256: `7a37fca93406d7debe7f3f10fbf0a1fffc9c69b495b93c76ad94fff64334e36c`.
 
-Evidence: [suite results](state-release-suite.json), [source and image hashes](state-release-hashes.json), [binary validation](state-binary.log), [static checks](state-static-checks.json), [scrollable-query measurements](state-release-scroll-state-scroll-state-results.json), [stuck-query measurements](state-release-scroll-stuck-scroll-state-results.json) and [iframe-query measurements](state-release-scroll-state-iframe-scroll-state-results.json).
+Evidence: suite results (`state-release-suite.json`; local artifact), source and image hashes (`state-release-hashes.json`; local artifact), binary validation (`state-binary.log`; local artifact), static checks (`state-static-checks.json`; local artifact), scrollable-query measurements (`state-release-scroll-state-scroll-state-results.json`; local artifact), stuck-query measurements (`state-release-scroll-stuck-scroll-state-results.json`; local artifact) and iframe-query measurements (`state-release-scroll-state-iframe-scroll-state-results.json`; local artifact).
 
-Framebuffer captures: [dependent scrollbar created while JavaScript runs](state-release-scroll-gutter-topology-input-gutter-hover-busy.png), [sticky descendant expanded while JavaScript runs](state-release-scroll-stuck-input-state-expanded-busy.png) and [scrollable state before renderer recovery](state-release-scroll-state-input-state-final-busy.png).
+Framebuffer captures: dependent scrollbar created while JavaScript runs (`state-release-scroll-gutter-topology-input-gutter-hover-busy.png`; local artifact), sticky descendant expanded while JavaScript runs (`state-release-scroll-stuck-input-state-expanded-busy.png`; local artifact) and scrollable state before renderer recovery (`state-release-scroll-state-input-state-final-busy.png`; local artifact).
 
 ## Changed files
 

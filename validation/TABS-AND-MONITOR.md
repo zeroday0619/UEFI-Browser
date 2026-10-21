@@ -16,15 +16,15 @@ Two integration defects were corrected during testing. A non-current Blink navig
 
 ## Verified behavior
 
-All listed runs used the final EFI image identified in [tabs-result.json](tabs-result.json).
+All listed runs used the final EFI image identified in `tabs-result.json` (local artifact).
 
 | Run | Verified outcome | Evidence |
 | --- | --- | --- |
-| 4 CPUs, deterministic HTTP fixtures | Form values and JavaScript state survive switching; page pixels including scroll position match before/after switching; independent history navigation, background close, surviving subresource load, new-window links, four-tab limit, last-tab replacement and pending navigation close pass | [Log](tabs-4cpu.log) |
-| 1 CPU, same fixtures | The same tab tests pass; the monitor reports zero AP workers and BSP presentation | [Log](tabs-1cpu.log), [capture](tabs-monitor-1cpu.png) |
-| 4 CPUs, real HTTPS website | `zeroday0619.dev` loads and accepts click, Space and wheel input; returning from a settings tab preserves an interactive website; settings survives closing the website tab | [Log](tabs-site.log), [website](tabs-site.png), [monitor](tabs-monitor.png) |
-| 4 CPUs, browser settings | Theme, font size, JavaScript and image preferences, search, startup choice, About and Back pass with the new tab strip | [Log](tabs-settings.log) |
-| Static binary checks | Bounded ELF loads, no required unresolved symbols, no Linux syscall instructions and valid EFI structure | [Log](tabs-binary.log) |
+| 4 CPUs, deterministic HTTP fixtures | Form values and JavaScript state survive switching; page pixels including scroll position match before/after switching; independent history navigation, background close, surviving subresource load, new-window links, four-tab limit, last-tab replacement and pending navigation close pass | Log (`tabs-4cpu.log`; local artifact) |
+| 1 CPU, same fixtures | The same tab tests pass; the monitor reports zero AP workers and BSP presentation | Log (`tabs-1cpu.log`; local artifact), capture (`tabs-monitor-1cpu.png`; local artifact) |
+| 4 CPUs, real HTTPS website | `zeroday0619.dev` loads and accepts click, Space and wheel input; returning from a settings tab preserves an interactive website; settings survives closing the website tab | Log (`tabs-site.log`; local artifact), website (`tabs-site.png`; local artifact), monitor (`tabs-monitor.png`; local artifact) |
+| 4 CPUs, browser settings | Theme, font size, JavaScript and image preferences, search, startup choice, About and Back pass with the new tab strip | Log (`tabs-settings.log`; local artifact) |
+| Static binary checks | Bounded ELF loads, no required unresolved symbols, no Linux syscall instructions and valid EFI structure | Log (`tabs-binary.log`; local artifact) |
 
 All QEMU runs completed browser teardown and returned to firmware. The real-site and monitor captures were visually inspected. No physical-hardware validation or new performance comparison was performed.
 

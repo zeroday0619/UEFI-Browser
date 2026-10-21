@@ -26,11 +26,11 @@ The fixture server from `tests/network-servers.py` must remain running during th
 
 Both POST cases passed. The successful screen shows each completed check. The corrupted image displays `EFI_UNSUPPORTED` (`0x8000000000000003`) and never enters musl or reports POST completion. Both screenshots were visually inspected; the failure item and retained diagnostic screen are legible.
 
-The final [normal-image suite](post-release-suite.json) passed both root scrolling during JavaScript and real-site interaction after POST. The final [probe-image suite](post-isolation-suite.json) passed all 11 startup CPL3 boundary cases, 160 MiB allocation/reclamation at CPL0/CPL3, live forbidden-memory accesses and interactive recovery. [Binary validation](post-binary.log) also passed.
+The final normal-image suite (`post-release-suite.json`; local artifact) passed both root scrolling during JavaScript and real-site interaction after POST. The final probe-image suite (`post-isolation-suite.json`; local artifact) passed all 11 startup CPL3 boundary cases, 160 MiB allocation/reclamation at CPL0/CPL3, live forbidden-memory accesses and interactive recovery. Binary validation (`post-binary.log`; local artifact) also passed.
 
-- [Machine-readable POST results](post-qemu.json)
-- [Successful POST screen](post-success.png)
-- [Invalid ELF diagnostic screen](post-invalid-elf.png)
+- Machine-readable POST results (`post-qemu.json`; local artifact)
+- Successful POST screen (`post-success.png`; local artifact)
+- Invalid ELF diagnostic screen (`post-invalid-elf.png`; local artifact)
 
 Normal image SHA-256: `7f41014e7fe519ccaa4c9e95db1165560b1bb236c67f496e1d4166c5cfa60434`.
 

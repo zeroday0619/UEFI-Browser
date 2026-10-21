@@ -19,10 +19,10 @@ The capability gate parses standard VP9 codec strings through Chromium's origina
 
 The final media release image has SHA-256 `4f70d35d6f802d50053860c678fee8b930553f5ca4f86073f7fe4dc3403eb594`; its payload hash is `041f033dbd63c24101a2098c527466b5183bcb8d9625b49e2fb31d72def71f70`. The broker-probe image has SHA-256 `8850f4df47f7a0138a76aba25f0d354a35b0be92721940173d7484c6fd37ffb5`.
 
-- [Probe suite](mse-audio-final-suite.json): MSE audio/video, original MSE video, MSE boundaries, CJK input and DevTools all passed. Every scenario executed at CPL3 and completed 65 broker checks without an unexpected renderer fault.
-- [Release suite](mse-audio-final-release-suite.json): MSE audio/video, existing PCM output, URL video and audio limits all passed at CPL3 without unexpected renderer faults.
-- [Static binary validation](mse-audio-final-binary.log): EFI and ELF load bounds, required symbols and absence of hosted syscall/sysenter instructions passed.
-- [DMA host test](mse-audio-final-dma-host.log): production queue code passed AddressSanitizer and UndefinedBehaviorSanitizer checks for capacity, sample ordering across 300 wraps, partial pause/resume, underrun/refill and reset.
+- Probe suite (`mse-audio-final-suite.json`; local artifact): MSE audio/video, original MSE video, MSE boundaries, CJK input and DevTools all passed. Every scenario executed at CPL3 and completed 65 broker checks without an unexpected renderer fault.
+- Release suite (`mse-audio-final-release-suite.json`; local artifact): MSE audio/video, existing PCM output, URL video and audio limits all passed at CPL3 without unexpected renderer faults.
+- Static binary validation (`mse-audio-final-binary.log`; local artifact): EFI and ELF load bounds, required symbols and absence of hosted syscall/sysenter instructions passed.
+- DMA host test (`mse-audio-final-dma-host.log`; local artifact): production queue code passed AddressSanitizer and UndefinedBehaviorSanitizer checks for capacity, sample ordering across 300 wraps, partial pause/resume, underrun/refill and reset.
 
 The 17 MSE audio assertions cover capability parsing, multiplexed and separate streams, visible red/green/blue frame changes, the device clock, pause/resume, seek, mute/volume, end-of-stream, buffering exhaustion and appended-data recovery, and audio-only attachment. Green/blue frame pixels are checked through QEMU screendumps; the release blue screenshot was also visually inspected.
 

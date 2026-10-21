@@ -35,7 +35,7 @@ These call sites require a process-local runtime and validated broker protocol b
 
 ## Final-image website verification
 
-Four-CPU QEMU/KVM loaded `https://zeroday0619.dev` with visible Korean text and imagery. Loading-time input was exercised. Post-load theme click, keyboard Space activation and wheel scrolling passed. The screenshot was visually inspected: [website capture](idle-site.png). This does not establish complete site fidelity.
+Four-CPU QEMU/KVM loaded `https://zeroday0619.dev` with visible Korean text and imagery. Loading-time input was exercised. Post-load theme click, keyboard Space activation and wheel scrolling passed. The screenshot was visually inspected: website capture (`idle-site.png`; local artifact). This does not establish complete site fidelity.
 
 The run presented 400 frames: 330 through three AP workers and 70 through BSP fallback. There were 16 service starts, 16 idle stops and zero worker failures. Theme change was observed after 310 ms for click and 62 ms for Space; these values include test-harness event delays and polling. They are not optical latency measurements or a controlled comparison with the old implementation.
 
@@ -48,6 +48,6 @@ QEMU_TEST_ACCEL=kvm QEMU_TEST_CPUS=4 INPUT_SCENARIO=heavy-site python3 outputs/c
 BUILD_DIRECTORY="$PWD/outputs/chromium-uefi/build/blink" python3 outputs/chromium-uefi/validate-binary.py
 ```
 
-The build, CPU comparison, website test, clean firmware return and static binary validation passed. See [website log](idle-site.log), [binary validation](idle-binary.log) and [machine-readable results](idle-result.json).
+The build, CPU comparison, website test, clean firmware return and static binary validation passed. See website log (`idle-site.log`; local artifact), binary validation (`idle-binary.log`; local artifact) and machine-readable results (`idle-result.json`; local artifact).
 
-Two-CPU QEMU/TCG settings navigation and firmware return also passed on the same final image. The log records one startup, one idle stop, three fallback frames and zero worker failures: [TCG log](idle-tcg.log).
+Two-CPU QEMU/TCG settings navigation and firmware return also passed on the same final image. The log records one startup, one idle stop, three fallback frames and zero worker failures: TCG log (`idle-tcg.log`; local artifact).

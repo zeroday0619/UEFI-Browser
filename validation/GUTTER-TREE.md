@@ -25,17 +25,17 @@ The embedder previously returned no child frame from `CreateChildFrame`. It now 
 
 Validation uses Chromium 158.0.8110.0 at `f12c350cb1e1e7ea05c11d6045b0a04158ec9e28`, clang 23.1.3, musl 1.2.5, QEMU 11.1.2 and OVMF 2026.08. The run date is 2026-10-20. QEMU uses KVM, four virtual CPUs, 4 GiB RAM and a 1280×800 framebuffer.
 
-The final EFI SHA-256 is `11c9cdc7cd4e3a0e6f3ecece7df7875ef3eea3ffc349250327079aefb7826a82`. [Static checks](gutter-tree-static-checks.json) record exact source hashes and the matching Chromium adapter mirror. [Binary validation](gutter-tree-binary.log) confirms a static x86-64 EFI image with bounded ELF loads, no required unresolved symbols and no syscall instructions. [Suite results](gutter-tree-suite.json) record completed QEMU cases against that image.
+The final EFI SHA-256 is `11c9cdc7cd4e3a0e6f3ecece7df7875ef3eea3ffc349250327079aefb7826a82`. Static checks (`gutter-tree-static-checks.json`; local artifact) record exact source hashes and the matching Chromium adapter mirror. Binary validation (`gutter-tree-binary.log`; local artifact) confirms a static x86-64 EFI image with bounded ELF loads, no required unresolved symbols and no syscall instructions. Suite results (`gutter-tree-suite.json`; local artifact) record completed QEMU cases against that image.
 
 ### Baseline
 
-The earlier EFI (`8fbce47fcf747c473cfd2b23cec0f2605f0a040c576675fd5e5772e9ccdf2af2`) failed the new container-query test during the blocking script: hover retained a 476-pixel text column instead of 420 pixels. Its iframe test never reached the child document's ready marker because child frame creation was unimplemented. See the [container runner](gutter-tree-before-container-runner.log), [container serial log](gutter-tree-before-container.log), [iframe runner](gutter-tree-before-iframe-runner.log) and [iframe serial log](gutter-tree-before-iframe.log).
+The earlier EFI (`8fbce47fcf747c473cfd2b23cec0f2605f0a040c576675fd5e5772e9ccdf2af2`) failed the new container-query test during the blocking script: hover retained a 476-pixel text column instead of 420 pixels. Its iframe test never reached the child document's ready marker because child frame creation was unimplemented. See the container runner (`gutter-tree-before-container-runner.log`; local artifact), container serial log (`gutter-tree-before-container.log`; local artifact), iframe runner (`gutter-tree-before-iframe-runner.log`; local artifact) and iframe serial log (`gutter-tree-before-iframe.log`; local artifact).
 
 ### Parent-to-child geometry correction
 
 The first frame-tree build updated the iframe clip but left the child layout viewport at its old width during speculative capture. Hover produced a 1200-pixel visible column while its text-end marker stayed at Y=368; the live renderer placed the marker at Y=400. The normal post-layout path propagates embedded frame geometry, but the snapshot path intentionally skipped that path to suppress script and plugin callbacks.
 
-The correction calls `UpdateGeometry()` for local child views before their recursive layout pass. It preserves the script/observer restrictions and excludes plugin callbacks. The targeted rerun produced Y=400 during the blocking script and a reconciliation difference fraction of 0.0. See the [failed run](gutter-tree-parent-geometry-before-runner.log), [failed busy screenshot](gutter-tree-parent-geometry-before-hover-busy.png), [live reference](gutter-tree-parent-geometry-before-hover-reference.png), [successful rerun](gutter-tree-parent-geometry-after-runner.log) and [measurements](gutter-tree-parent-geometry-after-results.json).
+The correction calls `UpdateGeometry()` for local child views before their recursive layout pass. It preserves the script/observer restrictions and excludes plugin callbacks. The targeted rerun produced Y=400 during the blocking script and a reconciliation difference fraction of 0.0. See the failed run (`gutter-tree-parent-geometry-before-runner.log`; local artifact), failed busy screenshot (`gutter-tree-parent-geometry-before-hover-busy.png`; local artifact), live reference (`gutter-tree-parent-geometry-before-hover-reference.png`; local artifact), successful rerun (`gutter-tree-parent-geometry-after-runner.log`; local artifact) and measurements (`gutter-tree-parent-geometry-after-results.json`; local artifact).
 
 ### Method
 
@@ -61,13 +61,13 @@ All five new geometry cases passed on the final EFI. Values follow normal → ho
 
 Every case also recorded zero scene publications during the one-second idle check. Iframe wheel input moved the text-end marker upward by 80 pixels during the blocking script and restored its position on the opposite wheel input. The topology fallback fixture retained the initial 476-pixel width while busy, applied 420 pixels after resumption and preserved the rebuilt inner scroller's 40-pixel offset.
 
-- [Container-query measurements](gutter-tree-scroll-gutter-container-scroll-gutter-results.json).
-- [Network iframe measurements](gutter-tree-scroll-gutter-iframe-scroll-gutter-results.json).
-- [srcdoc measurements](gutter-tree-scroll-gutter-srcdoc-scroll-gutter-results.json) and [pressed-state screenshot](gutter-tree-scroll-gutter-srcdoc-input-gutter-pressed-busy.png).
-- [Nested iframe measurements](gutter-tree-scroll-gutter-nested-frame-scroll-gutter-results.json).
-- [Parent scrollbar measurements](gutter-tree-scroll-gutter-parent-frame-scroll-gutter-results.json) and [busy hover screenshot](gutter-tree-scroll-gutter-parent-frame-input-gutter-hover-busy.png).
-- [Topology fallback measurements](gutter-tree-scroll-gutter-fallback-scroll-gutter-fallback-results.json).
-- [Origin, sandbox, CSP and detach log](gutter-tree-frame-policy.log).
+- Container-query measurements (`gutter-tree-scroll-gutter-container-scroll-gutter-results.json`; local artifact).
+- Network iframe measurements (`gutter-tree-scroll-gutter-iframe-scroll-gutter-results.json`; local artifact).
+- srcdoc measurements (`gutter-tree-scroll-gutter-srcdoc-scroll-gutter-results.json`; local artifact) and pressed-state screenshot (`gutter-tree-scroll-gutter-srcdoc-input-gutter-pressed-busy.png`; local artifact).
+- Nested iframe measurements (`gutter-tree-scroll-gutter-nested-frame-scroll-gutter-results.json`; local artifact).
+- Parent scrollbar measurements (`gutter-tree-scroll-gutter-parent-frame-scroll-gutter-results.json`; local artifact) and busy hover screenshot (`gutter-tree-scroll-gutter-parent-frame-input-gutter-hover-busy.png`; local artifact).
+- Topology fallback measurements (`gutter-tree-scroll-gutter-fallback-scroll-gutter-fallback-results.json`; local artifact).
+- Origin, sandbox, CSP and detach log (`gutter-tree-frame-policy.log`; local artifact).
 
 ### Build and reproduction
 

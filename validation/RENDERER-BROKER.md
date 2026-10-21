@@ -86,7 +86,7 @@ BUILD_DIRECTORY="$PWD/build/blink" python3 validate-binary.py
 
 The final probe image SHA-256 is
 `2a9b1ab4bbe6fe5bdb7fa10d5d92eb0f73f447bfa73ec44f84e98ad6acce9906`.
-Its [five-case suite](broker-final-probe-suite.json) passed HTTPS network
+Its five-case suite (`broker-final-probe-suite.json`; local artifact) passed HTTPS network
 operations, WebGPU, dedicated workers, WebSocket/WSS and renderer recovery.
 Every startup passed 59 assertions. The recovery case recorded six successful
 probe executions. The matching EFI and symbols are in `build/broker-probe`.
@@ -94,8 +94,8 @@ probe executions. The matching EFI and symbols are in `build/broker-probe`.
 The final normal image SHA-256 is
 `a726df93d8b490e5e91bda72012363031389a48b5565abeddeb32fadce7e8750`.
 It contains no fixture-dependent startup probe. Its
-[HTTPS and WebGPU suite](broker-final-production-suite.json) and
-[binary validation](broker-final-production-binary.log) passed.
+HTTPS and WebGPU suite (`broker-final-production-suite.json`; local artifact) and
+binary validation (`broker-final-production-binary.log`; local artifact) passed.
 This is the image in `build/blink/esp/EFI/BOOT/BOOTX64.EFI`.
 
 The final addition rejects `FREE_PAGES` while the allocation is read-protected
@@ -107,22 +107,22 @@ Earlier runs cover additional features and are attributed to their own images:
 The initial 58-assertion probe image SHA-256 was
 `bc0c4f4c12c9eb930f1cd782ee1ab8a80526e914f9e2b60078c2398a4d16d2b6`.
 
-The [ten-case regression run](broker-regression-suite.json) passed nine cases:
+The ten-case regression run (`broker-regression-suite.json`; local artifact) passed nine cases:
 HTTPS network operations, IndexedDB, Cache Storage, dedicated workers, captured
 AC'97 audio output, WebGL, WebGPU, settings reset and renderer recovery. Each
 startup completed all 58 broker assertions. The recovery scenario recorded six
 successful probe executions, including renderer restarts.
 
 That run's WebSocket case failed because its dedicated fixture server was not
-running. After starting the server, the [WebSocket retry](broker-websocket-suite.json)
+running. After starting the server, the WebSocket retry (`broker-websocket-suite.json`; local artifact)
 passed on the same image, including trusted WSS and untrusted-certificate rejection.
-The [wire log](broker-websocket-wire.log) records those WebSocket exchanges.
-The [binary check](broker-probe-binary.log) also passed.
+The wire log (`broker-websocket-wire.log`; local artifact) records those WebSocket exchanges.
+The binary check (`broker-probe-binary.log`; local artifact) also passed.
 
 The corresponding normal image
 `d200dad5a18dfd28868268d3ae4e652946e8872498eb86189634fb7ed18ec080`
-passed a [six-case AP suite](broker-production-suite.json) and a
-[three-case single-CPU suite](broker-single-suite.json). These results precede
+passed a six-case AP suite (`broker-production-suite.json`; local artifact) and a
+three-case single-CPU suite (`broker-single-suite.json`; local artifact). These results precede
 the final writable-page requirement for `FREE_PAGES`.
 
 During initial debugging, the probe's `printf` succeeded but its message was

@@ -24,7 +24,7 @@ An initialized-data probe and a TLS probe start with their ELF initial values in
 | BSP | `0x7da7d000` | `0x7de82000` |
 | Renderer AP | `0x5b8e1000` | `0x5c134000` |
 
-The earlier debugger capture in [renderer-process-stacks.log](renderer-process-stacks.log) independently shows CPU 1 executing generated code while CPU 0 remains in firmware/browser work, with different CR3 and FS base values. Debugger stops were not used in the final latency measurement.
+The earlier debugger capture in `renderer-process-stacks.log` (local artifact) independently shows CPU 1 executing generated code while CPU 0 remains in firmware/browser work, with different CR3 and FS base values. Debugger stops were not used in the final latency measurement.
 
 ## Input, frames and lifetime
 
@@ -38,11 +38,11 @@ Small renderer allocations reuse private slabs. Virtual-memory backing pages com
 
 `tests/input-pages/renderer-blocking.html` starts a delayed network response and then runs one uninterrupted JavaScript task for six seconds. QMP clicks the native address field and types `x` while that task is active. A cropped address-field framebuffer comparison observes the native update before the JavaScript completion marker.
 
-The final run measured **17.37 ms** from QMP key submission to the first changed address-field capture. This single sample includes QMP and screenshot overhead; it is not optical latency, a percentile or a response-time guarantee. The source image was inspected: [address field during JavaScript](renderer-address-during-javascript.png).
+The final run measured **17.37 ms** from QMP key submission to the first changed address-field capture. This single sample includes QMP and screenshot overhead; it is not optical latency, a percentile or a response-time guarantee. The source image was inspected: address field during JavaScript (`renderer-address-during-javascript.png`; local artifact).
 
 The network-service completion marker appears between `ISOLATION begin` and `ISOLATION end`. Page clicks, input text `y` and wheel scrolling are retained and delivered after the task returns. They do **not** execute during the task. The AP task-gap measurement is approximately six seconds; this is distinct from the BSP native-input polling interval.
 
-Evidence: [log](renderer-process-blocking.log), [structured result](renderer-process-blocking.json), [page after JavaScript](renderer-after-javascript.png).
+Evidence: log (`renderer-process-blocking.log`; local artifact), structured result (`renderer-process-blocking.json`; local artifact), page after JavaScript (`renderer-after-javascript.png`; local artifact).
 
 ## Regression coverage
 
@@ -52,15 +52,15 @@ The final image was exercised with QEMU 11.1.2/KVM, OVMF 2026.08+ds-2, 4 GiB RAM
 
 | Scenario | Observed result | Evidence |
 | --- | --- | --- |
-| Six-second task | Native address paint observed in 17.37 ms; network completed before the task returned; page input dispatched afterward | [Blocking log](renderer-process-blocking.log) |
-| Tabs | Form/DOM state, history, reload, target-blank, closing/loading lifetime and tab limits passed | [Tabs log](renderer-process-tabs.log) |
-| 800-element repeated computation/layout | Five samples each: keyboard median/max 10.95/46.38 ms; click 41.57/46.64 ms; wheel 16.17/21.32 ms | [Heavy log](renderer-process-heavy-fixture.log), [samples](renderer-process-heavy.json) |
-| `https://zeroday0619.dev` | HTTPS document/subresources, loading input, theme click/Space, wheel, settings and tab restoration passed | [Site log](renderer-process-tabs-site.log), [loading samples](renderer-process-site-samples.json) |
-| One vCPU | Local renderer fallback, startup and clean teardown passed | [Fallback log](renderer-process-1cpu.log) |
+| Six-second task | Native address paint observed in 17.37 ms; network completed before the task returned; page input dispatched afterward | Blocking log (`renderer-process-blocking.log`; local artifact) |
+| Tabs | Form/DOM state, history, reload, target-blank, closing/loading lifetime and tab limits passed | Tabs log (`renderer-process-tabs.log`; local artifact) |
+| 800-element repeated computation/layout | Five samples each: keyboard median/max 10.95/46.38 ms; click 41.57/46.64 ms; wheel 16.17/21.32 ms | Heavy log (`renderer-process-heavy-fixture.log`; local artifact), samples (`renderer-process-heavy.json`; local artifact) |
+| `https://zeroday0619.dev` | HTTPS document/subresources, loading input, theme click/Space, wheel, settings and tab restoration passed | Site log (`renderer-process-tabs-site.log`; local artifact), loading samples (`renderer-process-site-samples.json`; local artifact) |
+| One vCPU | Local renderer fallback, startup and clean teardown passed | Fallback log (`renderer-process-1cpu.log`; local artifact) |
 
 Heavy-fixture measurements are host QMP-to-DOM-log observations with 5 ms polling; clicks include a 30 ms button hold. They are not directly comparable with the native address-field screenshot measurement. The live site's visible theme change took 89.78 ms for click and 55.39 ms for Space in this run. The renderer still recorded a 369.28 ms task gap during site loading. No native polling gaps above the logger's 50 ms threshold were recorded in these scenarios; that is not a worst-case guarantee.
 
-The [aggregate results](renderer-process-results.json), [binary validation](renderer-process-binary.log), and [EFI SHA-256](renderer-process-image-sha256.txt) identify the final tested build. The final [website capture](renderer-process-heavy-loaded.png), [process monitor](renderer-process-tabs-site-monitor.png), and blocking-task captures were inspected. Blink's own `maximum_queue_us` begins after an IPC command reaches its input dispatcher and therefore excludes the time spent waiting for a long task in the transport queue. Earlier `*-first` logs and the debugger capture describe intermediate builds and are not the final image's performance results.
+The aggregate results (`renderer-process-results.json`; local artifact), binary validation (`renderer-process-binary.log`; local artifact), and EFI SHA-256 (`renderer-process-image-sha256.txt`; local artifact) identify the final tested build. The final website capture (`renderer-process-heavy-loaded.png`; local artifact), process monitor (`renderer-process-tabs-site-monitor.png`; local artifact), and blocking-task captures were inspected. Blink's own `maximum_queue_us` begins after an IPC command reaches its input dispatcher and therefore excludes the time spent waiting for a long task in the transport queue. Earlier `*-first` logs and the debugger capture describe intermediate builds and are not the final image's performance results.
 
 ```sh
 python3 build-blink-libraries.py --resolve-inputs --jobs 20

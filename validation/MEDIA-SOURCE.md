@@ -12,15 +12,15 @@ The playback clock stops when decoded data runs out and resumes when new appende
 
 ## Recorded validation
 
-The final `build/mse` EFI SHA-256 is `8dff87fa56ffb1b9ae889b9fc6ec0394648e0f0506b963826f0314702cd5337a`. The [native build](mse-seek-native.log), [EFI link](mse-seek-link.log) and [static binary validation](mse-seek-binary.log) passed. Static validation found no required unresolved symbols, hosted syscall/sysenter instructions or PE imports.
+The final `build/mse` EFI SHA-256 is `8dff87fa56ffb1b9ae889b9fc6ec0394648e0f0506b963826f0314702cd5337a`. The native build (`mse-seek-native.log`; local artifact), EFI link (`mse-seek-link.log`; local artifact) and static binary validation (`mse-seek-binary.log`; local artifact) passed. Static validation found no required unresolved symbols, hosted syscall/sysenter instructions or PE imports.
 
-The initial image `a75454a950f82ec79b3c0e6fb4ff18a52cd5145acfd91155d06ce3695aa3e32e` [passed these QEMU scenarios](mse-first-suite.json) with four vCPUs, KVM and CPL3 renderer execution, without unexpected renderer faults:
+The initial image `a75454a950f82ec79b3c0e6fb4ff18a52cd5145acfd91155d06ce3695aa3e32e` passed these QEMU scenarios (`mse-first-suite.json`; local artifact) with four vCPUs, KVM and CPL3 renderer execution, without unexpected renderer faults:
 
 - `media-source`: 22 checks covering 127-byte appends, source ranges and duration, playback before endOfStream, underflow and append recovery, seek cancellation, buffer removal and reappend, end-of-stream, replay, reopening, VP9 reattachment and decode statistics. The harness injects a native mouse click and checks red, green and blue pixels at three positions in the QEMU framebuffer. Canvas pixel assertions independently verify decoded frames.
 - `media`: all 20 existing URL playback checks.
 - `media-boundaries`: all 14 existing media failure/recovery checks.
 
-Actual screenshots: [red](mse-first-media-source-input-mse-red.png), [green](mse-first-media-source-input-mse-green.png), [blue](mse-first-media-source-input-mse-blue.png).
+Actual screenshots: red (`mse-first-media-source-input-mse-red.png`; local artifact), green (`mse-first-media-source-input-mse-green.png`; local artifact), blue (`mse-first-media-source-input-mse-blue.png`; local artifact).
 
 ## Boundary correction and final image
 
@@ -28,9 +28,9 @@ The initial boundary test waited for a frame at zero after an append window remo
 
 A subsequent test reproduced an actual player defect: seeking to the exact duration returned only EOF and never completed the seek. `mse-bounds-window-suite.json` retains that failure. The player now requests coded data one microsecond before the finite duration while preserving the requested presentation time. This decodes and displays the final frame and completes `seeked`.
 
-The final [five-scenario suite](mse-seek-suite.json) passed all 85 assertions on the final EFI image with CPL3 execution and no unexpected renderer faults. Its 14 new boundary assertions cover partial-parser abort, append windows, sequence mode, VP8-to-VP9 changeType, exact-end seeking, malformed data and recovery, a 70-frame 640×480 clip whose cumulative decoded pixels exceed 64 MiB, backward seeking after frame recycling, pending-seek detachment, SourceBuffer removal and recovery. The 22-check MSE streaming test and existing URL video, media-boundary and PCM audio tests also passed. The audio scenario includes captured PCM waveform analysis; it does not validate compressed MSE audio.
+The final five-scenario suite (`mse-seek-suite.json`; local artifact) passed all 85 assertions on the final EFI image with CPL3 execution and no unexpected renderer faults. Its 14 new boundary assertions cover partial-parser abort, append windows, sequence mode, VP8-to-VP9 changeType, exact-end seeking, malformed data and recovery, a 70-frame 640×480 clip whose cumulative decoded pixels exceed 64 MiB, backward seeking after frame recycling, pending-seek detachment, SourceBuffer removal and recovery. The 22-check MSE streaming test and existing URL video, media-boundary and PCM audio tests also passed. The audio scenario includes captured PCM waveform analysis; it does not validate compressed MSE audio.
 
-The verified EFI and matching payload were copied byte-for-byte to `build/blink` after checking that no QEMU process used that default directory. Previous binaries were retained under `build/release-backups`. [Promotion hashes](mse-default-promotion.json) and [source hashes](mse-release-sources.json) identify the artifacts. The default runner now includes the DevTools toolbar entry and MSE video path.
+The verified EFI and matching payload were copied byte-for-byte to `build/blink` after checking that no QEMU process used that default directory. Previous binaries were retained under `build/release-backups`. Promotion hashes (`mse-default-promotion.json`; local artifact) and source hashes (`mse-release-sources.json`; local artifact) identify the artifacts. The default runner now includes the DevTools toolbar entry and MSE video path.
 
 ## Reproduction
 

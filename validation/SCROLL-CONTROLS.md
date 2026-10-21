@@ -18,7 +18,7 @@ Changed source files are `src/blink/scroll_snapshot.h`, `scroll_scene.h`, `scrol
 
 The [fixture](../tests/input-pages/scroll-controls.html) has custom and native nested containers, a horizontally scrollable document, sticky elements and an RTL mode. Three consecutive modes each occupy the renderer with uninterrupted JavaScript for 20 seconds. Input enters through QEMU's keyboard and virtio mouse devices. The harness checks serial commands and captured pixels before each long task ends, then compares the final renderer image and DOM scroll offsets. It does not inject DOM commands through a debugger.
 
-The [results](scroll-controls-results.json) and [serial log](scroll-controls.log) record:
+The results (`scroll-controls-results.json`; local artifact) and serial log (`scroll-controls.log`; local artifact) record:
 
 | Check | Observed result |
 | --- | --- |
@@ -35,17 +35,17 @@ The [results](scroll-controls-results.json) and [serial log](scroll-controls.log
 | RTL reconciliation crop | 0.001667% of RGB channels differed by more than 2 |
 | Shutdown | EFI loader released payload, stack and TLS |
 
-The LTR and RTL image comparisons use framebuffer rectangle `(60,250)` to `(560,650)`, including custom content, the sticky region and both scrollbar tracks. Screenshots were visually inspected. Evidence: [initial frame](scroll-controls-initial.png), [horizontal drag during JavaScript](scroll-controls-horizontal-thumb-busy.png), [vertical drag during JavaScript](scroll-controls-vertical-thumb-busy.png), [LTR reconciliation](scroll-controls-reconciled.png), [native reconciliation](scroll-controls-native-reconciled.png), [RTL during JavaScript](scroll-controls-rtl-busy.png) and [RTL reconciliation](scroll-controls-rtl-reconciled.png).
+The LTR and RTL image comparisons use framebuffer rectangle `(60,250)` to `(560,650)`, including custom content, the sticky region and both scrollbar tracks. Screenshots were visually inspected. Evidence: initial frame (`scroll-controls-initial.png`; local artifact), horizontal drag during JavaScript (`scroll-controls-horizontal-thumb-busy.png`; local artifact), vertical drag during JavaScript (`scroll-controls-vertical-thumb-busy.png`; local artifact), LTR reconciliation (`scroll-controls-reconciled.png`; local artifact), native reconciliation (`scroll-controls-native-reconciled.png`; local artifact), RTL during JavaScript (`scroll-controls-rtl-busy.png`; local artifact) and RTL reconciliation (`scroll-controls-rtl-reconciled.png`; local artifact).
 
 Other per-action durations in the JSON include deliberate pointer movement and key/button sleeps. They are test-operation durations, not input latency measurements. Neither the single key sample nor the reconciliation comparison establishes a worst-case or physical input-to-display latency bound.
 
 ## Regression coverage
 
-The [same-image regression suite](scroll-controls-suite.json) passed `scroll-input`, `scroll-site-input`, `scroll-tree`, `wheel-fixture`, `tabs-site`, `renderer-recovery` and the final `scroll-controls` rerun. This covers cancelable listeners, text/select defaults, nested/sticky scrolling, a live Python documentation page, live-site tab switching and renderer termination/exception recovery. The live-site scrollbar [result](scroll-controls-scroll-site-input-scroll-site-results.json) and [framebuffer](scroll-controls-scroll-site-input-input-site-input-document-after.png) show independent sidebar and document scrolling. Recovery [serial evidence](scroll-controls-renderer-recovery.log) records tracked allocation reclamation after AP quiescence. Every scenario completed EFI teardown.
+The same-image regression suite (`scroll-controls-suite.json`; local artifact) passed `scroll-input`, `scroll-site-input`, `scroll-tree`, `wheel-fixture`, `tabs-site`, `renderer-recovery` and the final `scroll-controls` rerun. This covers cancelable listeners, text/select defaults, nested/sticky scrolling, a live Python documentation page, live-site tab switching and renderer termination/exception recovery. The live-site scrollbar result (`scroll-controls-scroll-site-input-scroll-site-results.json`; local artifact) and framebuffer (`scroll-controls-scroll-site-input-input-site-input-document-after.png`; local artifact) show independent sidebar and document scrolling. Recovery serial evidence (`scroll-controls-renderer-recovery.log`; local artifact) records tracked allocation reclamation after AP quiescence. Every scenario completed EFI teardown.
 
 ## Build and checks
 
-Blink compilation and the final EFI link passed. [Binary validation](scroll-controls-binary.log) found no required unresolved symbols, PE imports or OS syscall instructions. [Pump tests](scroll-controls-pump.log), [EEVDF/network coroutine tests and 4,128 SIMD cases](scroll-controls-scheduler.log), Python compilation, fixture JavaScript syntax and `git diff --check` passed.
+Blink compilation and the final EFI link passed. Binary validation (`scroll-controls-binary.log`; local artifact) found no required unresolved symbols, PE imports or OS syscall instructions. Pump tests (`scroll-controls-pump.log`; local artifact), EEVDF/network coroutine tests and 4,128 SIMD cases (`scroll-controls-scheduler.log`; local artifact), Python compilation, fixture JavaScript syntax and `git diff --check` passed.
 
 ```sh
 python3 build-blink-libraries.py --resolve-inputs --jobs 20

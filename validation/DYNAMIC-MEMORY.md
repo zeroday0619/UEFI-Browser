@@ -63,11 +63,11 @@ The final memory/runtime changes before adding POST passed three probe scenarios
 
 | Evidence | Result |
 | --- | --- |
-| [Host sanitizer log](dynamic-memory-host.log) | Passed with ASan and UBSan. |
-| [Memory/boundary suite](dynamic-memory-final-probe-suite.json) | 3/3 pass: root scroll, live sandbox faults/recovery and real-site tabs. Every case records 160 MiB allocation/reclamation at CPL0 and CPL3 and all 11 startup boundary cases. |
-| [Normal-image regression](dynamic-memory-final-suite.json) | 2/2 pass: cancelable/passive wheel, keyboard, drag controls and real-site interaction. |
-| [Fatal-console test](panic-qemu.json) | Intentional BSP abort produces a stable 1280×800 screen. [Visual inspection](panic-qemu.png) confirms the fatal header, caller/register values and recent diagnostics. |
-| [Binary validation](dynamic-memory-binary.log) | Passed static EFI/ELF and required-symbol/instruction checks. |
+| Host sanitizer log (`dynamic-memory-host.log`; local artifact) | Passed with ASan and UBSan. |
+| Memory/boundary suite (`dynamic-memory-final-probe-suite.json`; local artifact) | 3/3 pass: root scroll, live sandbox faults/recovery and real-site tabs. Every case records 160 MiB allocation/reclamation at CPL0 and CPL3 and all 11 startup boundary cases. |
+| Normal-image regression (`dynamic-memory-final-suite.json`; local artifact) | 2/2 pass: cancelable/passive wheel, keyboard, drag controls and real-site interaction. |
+| Fatal-console test (`panic-qemu.json`; local artifact) | Intentional BSP abort produces a stable 1280×800 screen. Visual inspection (`panic-qemu.png`; local artifact) confirms the fatal header, caller/register values and recent diagnostics. |
+| Binary validation (`dynamic-memory-binary.log`; local artifact) | Passed static EFI/ELF and required-symbol/instruction checks. |
 
 The 4 GiB QEMU memory probe measured a BSP requested-byte limit of 916,656,128 bytes and an initial CPL3 limit of 911,501,312 bytes. Limits depend on available memory at initialization and can differ after recovery. The normal input regression observed the first keyboard-scroll pixel change after 20.83 ms during a 12-second JavaScript task. The probe root-scroll test observed 21.14 ms during a 6-second task. Both reconciliation checks found no channel differences greater than 2. These are QMP observations, not physical display latency guarantees.
 

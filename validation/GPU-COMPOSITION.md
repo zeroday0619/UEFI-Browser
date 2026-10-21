@@ -60,7 +60,7 @@ python3 tests/venus-runtime-host.py
 python3 tests/venus-broker-host.py
 ```
 
-The transport and runtime host tests use ASan/UBSan. They cover ownership and bounds failures, negotiated modifiers, exported device-local allocations, context cleanup and the existing broker boundary. See the retained `venus-compositor-*-host.log` files and [QEMU suite results](venus-compositor-verified-suite.json).
+The transport and runtime host tests use ASan/UBSan. They cover ownership and bounds failures, negotiated modifiers, exported device-local allocations, context cleanup and the existing broker boundary. See the retained `venus-compositor-*-host.log` files and QEMU suite results (`venus-compositor-verified-suite.json`; local artifact).
 
 ### QEMU results on 2026-10-21
 
@@ -71,11 +71,11 @@ The transport and runtime host tests use ASan/UBSan. They cover ownership and bo
 | `gpu-multicontext` | Passed | Peak four contexts including the BSP compositor; five opened and five closed; zero remaining |
 | `gpu-lifecycle` | Passed | Eight WebGPU/WebGL2 round trips; ten contexts opened and closed; zero remaining |
 
-Every case passed the 65-check broker probe and the 14 CPL3 boundary cases, recorded no unexpected renderer fault and returned to firmware. The candidate EFI SHA-256 is `14ead56435ead1357503b0d9f570a495679e57e433092674628212ecb431b4dc`. The [artifact manifest](venus-compositor-manifest.json) records source, host executable and baseline image hashes. The original default EFI hash was unchanged.
+Every case passed the 65-check broker probe and the 14 CPL3 boundary cases, recorded no unexpected renderer fault and returned to firmware. The candidate EFI SHA-256 is `14ead56435ead1357503b0d9f570a495679e57e433092674628212ecb431b4dc`. The artifact manifest (`venus-compositor-manifest.json`; local artifact) records source, host executable and baseline image hashes. The original default EFI hash was unchanged.
 
 ### Input and presentation measurements
 
-A CPU comparison image was built from the same implementation with `ENABLE_GPU_COMPOSITION=0`. Both paths used the primary Virtio VGA device, SDL/X11 capture, KVM and four vCPUs. The runs were sequential. The CPU run passed the same real-site and long-JavaScript input scenarios. [Raw comparison data](venus-compositor-comparison.json) retains presentation counts and timing totals.
+A CPU comparison image was built from the same implementation with `ENABLE_GPU_COMPOSITION=0`. Both paths used the primary Virtio VGA device, SDL/X11 capture, KVM and four vCPUs. The runs were sequential. The CPU run passed the same real-site and long-JavaScript input scenarios. Raw comparison data (`venus-compositor-comparison.json`; local artifact) retains presentation counts and timing totals.
 
 | Measurement | CPU output | GPU output |
 | --- | ---: | ---: |
@@ -103,4 +103,4 @@ The long-task scenario verifies root and nested keyboard scrolling, passive whee
 
 The QEMU build script was rerun against an already patched tree. Forward-only application prevents `patch` from automatically reversing an installed patch. The resulting device still exposes `uefi-scanout-modifier`, and final tests use that rebuilt executable. Separate smoke tests also passed with system QEMU and CPU/GOP output, and with patched QEMU and GPU output. Both completed EFI loader cleanup. Modified source checks pass. A repository-wide whitespace check also reports pre-existing trailing whitespace in `patches/blink-build.patch` and a generated `validation/http-driver-build.log`; those unrelated contents were retained.
 
-![Actual GPU display showing the website](venus-compositor-verified-heavy-site-input-heavy-click.png)
+Website capture omitted from source distribution; retained only in local validation artifacts.

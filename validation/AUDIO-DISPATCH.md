@@ -141,9 +141,9 @@ scope are retained in `audio-dispatch-live-timing.json`.
 The raw file and its hash are retained. This confirms decoded audio reached the
 device output; it does not establish physical speaker output or A/V sync.
 
-The [120-second video capture](audio-dispatch-youtube-input-youtube-120.png),
-[post-seek video capture](audio-dispatch-youtube-input-youtube-playback-visible.png)
-and [Console capture](audio-dispatch-youtube-input-youtube-playback-final.png)
+The 120-second video capture (`audio-dispatch-youtube-input-youtube-120.png`; local artifact),
+post-seek video capture (`audio-dispatch-youtube-input-youtube-playback-visible.png`; local artifact)
+and Console capture (`audio-dispatch-youtube-input-youtube-playback-final.png`; local artifact)
 were visually inspected. The final Console screenshot shows returned samples
 through identifier 9 and the typed final command; serial output and the JSON
 record contain the final identifier 15 response. These checks do not establish

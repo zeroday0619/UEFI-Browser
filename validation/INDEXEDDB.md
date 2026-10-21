@@ -20,12 +20,12 @@ The backend runs on the renderer event loop. Snapshot encoding, index scans and 
 
 EFI SHA-256: `250387f964a025c87576acc28896ff811280172077917d718c55a5c2b99be5e0`. The build uses Chromium 158.0.8110.0, musl 1.2.5 and Debian Clang 23.1.3. Runtime tests use QEMU 11.1.2 with OVMF and KVM.
 
-- [Native compilation](idb-final-native-compilation.log), [EFI linking](idb-final-link.log) and [binary validation](idb-final-binary.log) passed. The image has no required unresolved symbols, PE imports or host syscall instructions. Existing upstream compiler warnings remain.
-- The [seven-scenario suite](idb-final-suite.json) passed IndexedDB, service diagnostics, Cache Storage, WebSocket, Web Storage, secure network requests and live-site tabs. The diagnostic case requires IndexedDB write/read success; its other service failures are recorded separately.
-- [Three independent raw-disk boots](idb-final-recovery-results.json) each passed 37 IndexedDB assertions. A counter advanced 1, 2, 3 and Blob contents survived. Before boot three, the fixture corrupted snapshot generation 59. The guest loaded generation 58 and retained the committed counter and Blob. Host-side FAT reads verified the snapshot checksums.
-- The [single-CPU suite](idb-single-suite.json) passed all 37 assertions and the service probes without a separate AP renderer. The final recovery and single-CPU tests include a 90,000-byte pseudorandom array alongside a large string, forcing the value through Blink's Blob wrapping path despite compression.
-- [IndexedDB](idb-single-indexeddb-input-indexeddb-checks.png) and [zeroday0619.dev](idb-final-tabs-site-input-tabs-site-interactive.png) screenshots were inspected. The live-site case also exercises native tabs, settings and page interaction. This is not a visual-parity or arbitrary-site compatibility result.
-- [Static checks](idb-final-static-checks.json) passed Python and fixture JavaScript syntax, compiled adapter mirror equality, Chromium patch reverse-application and `git diff --check`.
+- Native compilation (`idb-final-native-compilation.log`; local artifact), EFI linking (`idb-final-link.log`; local artifact) and binary validation (`idb-final-binary.log`; local artifact) passed. The image has no required unresolved symbols, PE imports or host syscall instructions. Existing upstream compiler warnings remain.
+- The seven-scenario suite (`idb-final-suite.json`; local artifact) passed IndexedDB, service diagnostics, Cache Storage, WebSocket, Web Storage, secure network requests and live-site tabs. The diagnostic case requires IndexedDB write/read success; its other service failures are recorded separately.
+- Three independent raw-disk boots (`idb-final-recovery-results.json`; local artifact) each passed 37 IndexedDB assertions. A counter advanced 1, 2, 3 and Blob contents survived. Before boot three, the fixture corrupted snapshot generation 59. The guest loaded generation 58 and retained the committed counter and Blob. Host-side FAT reads verified the snapshot checksums.
+- The single-CPU suite (`idb-single-suite.json`; local artifact) passed all 37 assertions and the service probes without a separate AP renderer. The final recovery and single-CPU tests include a 90,000-byte pseudorandom array alongside a large string, forcing the value through Blink's Blob wrapping path despite compression.
+- IndexedDB (`idb-single-indexeddb-input-indexeddb-checks.png`; local artifact) and zeroday0619.dev (`idb-final-tabs-site-input-tabs-site-interactive.png`; local artifact) screenshots were inspected. The live-site case also exercises native tabs, settings and page interaction. This is not a visual-parity or arbitrary-site compatibility result.
+- Static checks (`idb-final-static-checks.json`; local artifact) passed Python and fixture JavaScript syntax, compiled adapter mirror equality, Chromium patch reverse-application and `git diff --check`.
 
 The assertions cover schema creation and renaming, inline auto-increment keys, Unicode, unique and multiEntry indexes, handled constraint failures, generator rollback, transaction abort, range cursors, reverse/unique traversal, prefetch reset, Blob/File/typed-array/date values, index population ordering, chunked getAll, overlapping transaction ordering, version blocking and cooperative close, version rejection, upgrade rollback, cross-origin isolation, binary/array/date/infinite keys, quota rollback and persistent data.
 
@@ -33,7 +33,7 @@ The initial renderer failure was a key-injection error: an out-of-line-key value
 
 ### Remaining requested services
 
-The [final JavaScript service results](idb-final-service-capabilities-service-capabilities-results.json) show:
+The final JavaScript service results (`idb-final-service-capabilities-service-capabilities-results.json`; local artifact) show:
 
 | Service | Observed result | Remaining implementation |
 | --- | --- | --- |

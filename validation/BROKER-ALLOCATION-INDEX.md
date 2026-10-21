@@ -84,7 +84,7 @@ instructions.
 `broker-index-youtube-run.json` records a fresh raw-disk run of the normal image.
 The observer reached 180 seconds, then opened DevTools through the native button,
 selected Console and typed a player-state query with QEMU keyboard events.
-The [Console screenshot](broker-index-youtube-inspected.png) and serial log show:
+The Console screenshot (`broker-index-youtube-inspected.png`; local artifact) and serial log show:
 
 ```text
 YTSTATE 1 56.9335 3 null
@@ -94,8 +94,8 @@ The values are player state, video `currentTime`, `readyState` and `error`.
 The player state uses the [YouTube playing value](https://developers.google.com/youtube/iframe_api_reference#Playback_status),
 while ready state 3 means [HAVE_FUTURE_DATA](https://html.spec.whatwg.org/multipage/media.html#ready-states).
 This is a point-in-time result, not evidence of uninterrupted or synchronized
-playback. The [120-second](broker-index-youtube-120.png) and
-[180-second](broker-index-youtube-180.png) captures also show video progression.
+playback. The 120-second (`broker-index-youtube-120.png`; local artifact) and
+180-second (`broker-index-youtube-180.png`; local artifact) captures also show video progression.
 
 `broker-index-youtube-audio.json` records 222.175 seconds of 48 kHz stereo PCM;
 178 of 222 complete one-second windows have RMS above 1. The raw WAV remains in

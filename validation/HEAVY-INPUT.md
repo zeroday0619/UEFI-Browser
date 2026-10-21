@@ -1,6 +1,6 @@
 # Input under JavaScript and rendering load
 
-Validated on 2026-10-18 with QEMU 11.1.2, OVMF 2026.08, Clang/LLD 23.1.3, 4 GiB guest RAM and a 1280 × 800 framebuffer. The browser remains a single-process UEFI application. No production dependency was added. The final image and driver hashes are in [heavy-result.json](heavy-result.json).
+Validated on 2026-10-18 with QEMU 11.1.2, OVMF 2026.08, Clang/LLD 23.1.3, 4 GiB guest RAM and a 1280 × 800 framebuffer. The browser remains a single-process UEFI application. No production dependency was added. The final image and driver hashes are in `heavy-result.json` (local artifact).
 
 ## Findings and changes
 
@@ -25,7 +25,7 @@ These host-side measurements include QMP and screenshot polling, the site's colo
 
 Maximum recorded input-poll gap was 1242.1 ms before and 1127.4 ms after under TCG. The final KVM site run recorded 82.6 ms. Diagnostics log poll gaps above 50 ms, so these logs must not be used as complete latency distributions. The final TCG maximum individual raster slice was 68.3 ms; complete frame latency can still be much longer while other tasks run between slices.
 
-Screenshots inspected: [loading and address input](heavy-site-loading.png), [mouse theme activation](heavy-site-click.png), [keyboard theme activation](heavy-site-keyboard.png), and [scrolling](heavy-site-scroll.png).
+Screenshots inspected: loading and address input (`heavy-site-loading.png`; local artifact), mouse theme activation (`heavy-site-click.png`; local artifact), keyboard theme activation (`heavy-site-keyboard.png`; local artifact), and scrolling (`heavy-site-scroll.png`; local artifact).
 
 ## Controlled load and regressions
 

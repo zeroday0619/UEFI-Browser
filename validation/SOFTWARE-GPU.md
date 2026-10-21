@@ -43,7 +43,7 @@ The graphics dependency revisions come from the pinned Chromium gitlinks. `prepa
 - GLES context initialization used a generic OpenGL ES context for Blink WebGL. Explicit WebGL 1/2 context types preserve command validation and framebuffer behavior.
 - Pixel readback passed while the GOP canvas remained blank because foreign GPU layers were not painted. CPU canvas snapshots supply the actual displayed pixels.
 - ANGLE context disposal asserted when Blink cleared its lost-context callback. Empty callbacks are now passed through without binding them.
-- Context disposal then waited for ANGLE post-link tasks in an unstarted desktop thread pool. The [QEMU GDB stack](gpu-teardown.gdb.log) from the [pre-fix failing build](gpu-teardown-debug-suite.json) identifies `ProgramExecutableVk::waitForPostLinkTasksImpl`. Firmware now uses ANGLE's synchronous task pool.
+- Context disposal then waited for ANGLE post-link tasks in an unstarted desktop thread pool. The QEMU GDB stack (`gpu-teardown.gdb.log`; local artifact) from the pre-fix failing build (`gpu-teardown-debug-suite.json`; local artifact) identifies `ProgramExecutableVk::waitForPostLinkTasksImpl`. Firmware now uses ANGLE's synchronous task pool.
 - SwiftShader's default raster batch pool exceeded the tracked heap when devices overlapped. The firmware pool has two batches. Dawn service teardown also releases native resources immediately on disconnect, rather than retaining devices until surviving DOM handles are garbage-collected.
 
 ## Validation on 2026-10-20
@@ -62,7 +62,7 @@ The final EFI image SHA-256 is `865284006e9c7808c06b5b9954047e4659cf198a13f6c9f8
 
 The storage-binding test writes beyond a 16-byte GPU buffer binding and verifies that the remaining bytes in the underlying buffer are unchanged. This is one shader-boundary regression, not proof of a renderer or driver security sandbox.
 
-Results: [4-CPU suite](gpu-complete-suite.json), [1-CPU suite](gpu-complete-single-suite.json), [service details](gpu-complete-service-capabilities-service-capabilities-results.json), [native WebGPU screenshot](gpu-complete-webgpu-input-webgpu.png), [WebGL 2 screenshot](gpu-complete-webgl2-input-webgl2.png). The build, final EFI link and [binary validation](gpu-binary.log) passed. The binary check finds no required unresolved symbols, hosted imports or host syscall instructions; optional weak hooks are listed in its log.
+Results: 4-CPU suite (`gpu-complete-suite.json`; local artifact), 1-CPU suite (`gpu-complete-single-suite.json`; local artifact), service details (`gpu-complete-service-capabilities-service-capabilities-results.json`; local artifact), native WebGPU screenshot (`gpu-complete-webgpu-input-webgpu.png`; local artifact), WebGL 2 screenshot (`gpu-complete-webgl2-input-webgl2.png`; local artifact). The build, final EFI link and binary validation (`gpu-binary.log`; local artifact) passed. The binary check finds no required unresolved symbols, hosted imports or host syscall instructions; optional weak hooks are listed in its log.
 
 Reproduction commands, run from the project directory with the fixture server kept running:
 

@@ -20,7 +20,7 @@ Source changes are in `src/blink/scroll_snapshot.h`, `scroll_scene.h`, `scroll_s
 
 ## Controlled QEMU results
 
-The fixture blocks the renderer with uninterrupted JavaScript for 25 seconds. The harness sends real QMP mouse and keyboard events and checks framebuffer pixels before the JavaScript completion marker. It does not inject DOM state through a debugger. The [results](scroll-style-results.json) and [serial log](scroll-style.log) record:
+The fixture blocks the renderer with uninterrupted JavaScript for 25 seconds. The harness sends real QMP mouse and keyboard events and checks framebuffer pixels before the JavaScript completion marker. It does not inject DOM state through a debugger. The results (`scroll-style-results.json`; local artifact) and serial log (`scroll-style.log`; local artifact) record:
 
 | Check | Result |
 | --- | --- |
@@ -35,19 +35,19 @@ The fixture blocks the renderer with uninterrupted JavaScript for 25 seconds. Th
 | Renderer reconciliation | No RGB channel differed by more than 2 in rectangle `(60,230)` to `(1200,770)` |
 | Shutdown | EFI loader released payload, stack and TLS |
 
-Evidence: [pressed custom thumb](scroll-style-thumb-pressed-hover.png), [pressed outside](scroll-style-thumb-pressed-outside.png), [disabled control](scroll-style-disabled-pressed.png), [native end arrow](scroll-style-native-end.png), [toolbar departure](scroll-style-toolbar-leave.png), [last frame during JavaScript](scroll-style-final-busy.png) and [reconciled frame](scroll-style-reconciled.png).
+Evidence: pressed custom thumb (`scroll-style-thumb-pressed-hover.png`; local artifact), pressed outside (`scroll-style-thumb-pressed-outside.png`; local artifact), disabled control (`scroll-style-disabled-pressed.png`; local artifact), native end arrow (`scroll-style-native-end.png`; local artifact), toolbar departure (`scroll-style-toolbar-leave.png`; local artifact), last frame during JavaScript (`scroll-style-final-busy.png`; local artifact) and reconciled frame (`scroll-style-reconciled.png`; local artifact).
 
 Two runtime defects were reproduced and corrected during validation. A disabled scrollbar without a scroll translation initially rejected asynchronous scene capture; the stationary transform fixes that case. Native hover initially produced identical pixels because Blink's available hover capabilities were unset; initializing capabilities from actual mouse input fixes that case. The final dedicated scenario passed both checks.
 
 ## Regression coverage
 
-The [same-image suite](scroll-style-suite.json) passed all seven scenarios: `scroll-controls`, `scroll-input`, `scroll-site-input`, `scroll-tree`, `wheel-fixture`, `tabs-site` and `renderer-recovery`. These cover both-axis custom/native controls and RTL offsets, keyboard and listener exclusions, nested/sticky scrolling, cancelable wheel events, live-site tab switching and renderer termination/exception recovery. Each scenario completed EFI teardown.
+The same-image suite (`scroll-style-suite.json`; local artifact) passed all seven scenarios: `scroll-controls`, `scroll-input`, `scroll-site-input`, `scroll-tree`, `wheel-fixture`, `tabs-site` and `renderer-recovery`. These cover both-axis custom/native controls and RTL offsets, keyboard and listener exclusions, nested/sticky scrolling, cancelable wheel events, live-site tab switching and renderer termination/exception recovery. Each scenario completed EFI teardown.
 
-The live Python documentation [results](scroll-style-scroll-site-input-scroll-site-results.json) record independent sidebar and document scroll targets. Its [framebuffer](scroll-style-scroll-site-input-input-site-input-document-after.png) and the restored [zeroday0619.dev tab](scroll-style-tabs-site-input-tabs-site-restored.png) were visually inspected. The [recovery log](scroll-style-renderer-recovery.log) records the renderer fault and recovery checks. These site regressions complement the controlled long-task style test; they do not measure style latency across arbitrary websites.
+The live Python documentation results (`scroll-style-scroll-site-input-scroll-site-results.json`; local artifact) record independent sidebar and document scroll targets. Its framebuffer (`scroll-style-scroll-site-input-input-site-input-document-after.png`; local artifact) and the restored zeroday0619.dev tab (`scroll-style-tabs-site-input-tabs-site-restored.png`; local artifact) were visually inspected. The recovery log (`scroll-style-renderer-recovery.log`; local artifact) records the renderer fault and recovery checks. These site regressions complement the controlled long-task style test; they do not measure style latency across arbitrary websites.
 
 ## Build and checks
 
-Blink compilation and EFI linking passed. [Binary validation](scroll-style-binary.log) found no required unresolved symbols or OS syscall instructions. [Pump tests](scroll-style-pump.log), [EEVDF/network coroutine tests and 4,128 SIMD cases](scroll-style-scheduler.log) passed. [Static checks and source hashes](scroll-style-static-checks.json) record Python compilation, fixture JavaScript syntax and `git diff --check`. The persisted custom-scrollbar patch passed `git apply --reverse --check` against the compiled Chromium checkout.
+Blink compilation and EFI linking passed. Binary validation (`scroll-style-binary.log`; local artifact) found no required unresolved symbols or OS syscall instructions. Pump tests (`scroll-style-pump.log`; local artifact), EEVDF/network coroutine tests and 4,128 SIMD cases (`scroll-style-scheduler.log`; local artifact) passed. Static checks and source hashes (`scroll-style-static-checks.json`; local artifact) record Python compilation, fixture JavaScript syntax and `git diff --check`. The persisted custom-scrollbar patch passed `git apply --reverse --check` against the compiled Chromium checkout.
 
 ```sh
 python3 build-blink-libraries.py --resolve-inputs --jobs 20

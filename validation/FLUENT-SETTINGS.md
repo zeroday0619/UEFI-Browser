@@ -1,6 +1,6 @@
 # Fluent-style browser settings
 
-Validated on 2026-10-18 with QEMU 11.1.2, KVM, OVMF 2026.08, 4 GiB guest RAM and a 1280 × 800 framebuffer. The EFI image hash is recorded in [fluent-result.json](fluent-result.json). No production dependency was added.
+Validated on 2026-10-18 with QEMU 11.1.2, KVM, OVMF 2026.08, 4 GiB guest RAM and a 1280 × 800 framebuffer. The EFI image hash is recorded in `fluent-result.json` (local artifact). No production dependency was added.
 
 ## Interface and behavior
 
@@ -39,9 +39,9 @@ QEMU_TEST_ACCEL=kvm INPUT_SCENARIO=history python3 outputs/chromium-uefi/tests/b
 BUILD_DIRECTORY="$PWD/outputs/chromium-uefi/build/blink" python3 outputs/chromium-uefi/validate-binary.py
 ```
 
-The static ELF/EFI validation passed: no required unresolved symbols, Linux syscall instructions or PE imports. Shell syntax and Python compilation checks also passed. Logs: [settings](fluent-settings.log), [persistence and website behavior](fluent-settings-persist.log), [reset and internal history](fluent-settings-reset.log), [website history](fluent-history.log), [binary](fluent-binary.log).
+The static ELF/EFI validation passed: no required unresolved symbols, Linux syscall instructions or PE imports. Shell syntax and Python compilation checks also passed. Logs: settings (`fluent-settings.log`; local artifact), persistence and website behavior (`fluent-settings-persist.log`; local artifact), reset and internal history (`fluent-settings-reset.log`; local artifact), website history (`fluent-history.log`; local artifact), binary (`fluent-binary.log`; local artifact).
 
-Screenshots were visually inspected: [light settings](fluent-settings-light.png), [dark settings](fluent-settings-dark.png), [About](fluent-about.png) and [search](fluent-search.png).
+Screenshots were visually inspected: light settings (`fluent-settings-light.png`; local artifact), dark settings (`fluent-settings-dark.png`; local artifact), About (`fluent-about.png`; local artifact) and search (`fluent-search.png`; local artifact).
 
 ## Changed files and limits
 

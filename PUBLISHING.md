@@ -10,7 +10,7 @@ The Korean input path statically links libhangul under LGPL-2.1-or-later. Its so
 
 ## Repository contents
 
-Publish source, build scripts, patches, configuration, bundled fonts and certificate data, license notices, tests and validation documentation. The `build/` directory, downloaded upstream repositories, generated EFI/ELF files and firmware variable profiles are excluded. Bundled font binaries are intentional source assets and retain their OFL notices.
+Publish source, build scripts, patches, configuration, bundled fonts and certificate data, license notices, tests and Markdown validation summaries. The `build/` directory, downloaded upstream repositories, generated EFI/ELF files and firmware variable profiles are excluded. Bundled font binaries are intentional source assets and retain their OFL notices.
 
 The build scripts currently resolve the working directory two levels above the repository. Use this layout:
 
@@ -30,6 +30,8 @@ Running from an arbitrary checkout path has not been validated. See the README f
 3. Review any staged diff before creating the first commit. Follow the project's commit-message and human-review requirements.
 4. Configure the intended GitHub repository and visibility, then push the reviewed source commit. No remote URL or repository visibility is assumed by these documents.
 
-Validation logs contain historical development-host paths and website URLs. These are retained as test evidence and are not portable build instructions. Website screenshots demonstrate compatibility and do not grant rights to third-party website content or marks.
+Only top-level Markdown summaries in `validation/` are included in source publication. Screenshots, audio recordings, raw logs, JSON results, copied patches and other generated evidence remain local and are ignored. This also excludes first-party generated artifacts so new outputs cannot enter the repository without an explicit publication review. The summaries retain historical measurements and identify local artifact filenames without linking to files absent from source releases. See [validation artifact policy](validation/README.md).
 
-No build or QEMU rerun is required to validate documentation-only licensing changes. Existing execution evidence remains in `validation/`; a source release does not imply that every documented feature or dependency was revalidated for publication.
+Removing tracked files and adding ignore rules affects subsequent commits only. Earlier commits can still contain excluded evidence. Before publishing an existing history, inspect those commits and arrange a separate, reviewed history cleanup or publish a clean source snapshot. Do not assume that a deletion commit removes earlier copies from a remote repository.
+
+No build or QEMU rerun is required to validate documentation-only licensing changes. Written validation summaries remain in `validation/`, while raw execution evidence stays local; a source release does not imply that every documented feature or dependency was revalidated for publication.

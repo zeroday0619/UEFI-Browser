@@ -20,7 +20,7 @@ The ordinary viewport frame remains available independently of the scene. Naviga
 
 The UEFI specification website returned HTTP 403 and a Cloudflare challenge. Its JavaScript triggered a BSP page fault in firmware. A separate page containing `crypto.getRandomValues(new Uint8Array(65536))` reproduced the same fault. The entropy broker had passed an AP-only virtual buffer directly to a firmware driver executing with the BSP page table.
 
-`src/process/renderer_runtime.c` now obtains entropy in a 256-byte shared stack buffer and copies each block into the destination from the AP. `src/posix.c` also exercises entropy in a private virtual mapping during the runtime probes. The controlled JavaScript case passed after the fix. The challenge page is not counted as a successfully loaded specification document. Evidence: [before](scroll-entropy-before.log) and [after](scroll-entropy-after.log).
+`src/process/renderer_runtime.c` now obtains entropy in a 256-byte shared stack buffer and copies each block into the destination from the AP. `src/posix.c` also exercises entropy in a private virtual mapping during the runtime probes. The controlled JavaScript case passed after the fix. The challenge page is not counted as a successfully loaded specification document. Evidence: before (`scroll-entropy-before.log`; local artifact) and after (`scroll-entropy-after.log`; local artifact).
 
 ## QEMU evidence
 
@@ -32,7 +32,7 @@ The earlier UEFI specification request returned a challenge instead of the docum
 
 ### Delivered-image results
 
-The final EFI image passed both primary QEMU scenarios. Its SHA-256 is `7bd65421728e1c2213f849a7f74c26f5842a403ab33ed69a3def4e8ab7090657`. The [machine-readable results](scroll-results.json), [scenario exit statuses](scroll-delivered-suite.json) and [binary validation log](scroll-delivered-binary.log) identify the delivered build.
+The final EFI image passed both primary QEMU scenarios. Its SHA-256 is `7bd65421728e1c2213f849a7f74c26f5842a403ab33ed69a3def4e8ab7090657`. The machine-readable results (`scroll-results.json`; local artifact), scenario exit statuses (`scroll-delivered-suite.json`; local artifact) and binary validation log (`scroll-delivered-binary.log`; local artifact) identify the delivered build.
 
 | Check | Observed result |
 | --- | --- |
@@ -45,13 +45,13 @@ The final EFI image passed both primary QEMU scenarios. Its SHA-256 is `7bd65421
 | Live website | Python Event Loop documentation returned HTTP 200; sidebar and root used distinct scroll IDs |
 | Binary checks | Static x86-64 EFI image, bounded ELF loads, no required unresolved symbols or OS syscall instructions |
 
-Screenshots: [nested scrolling during JavaScript](scroll-delivered-scroll-tree-input-tree-nested-busy.png), [both distant markers and sticky headers](scroll-delivered-scroll-tree-input-tree-root-busy.png), [reconciled frame](scroll-delivered-scroll-tree-input-tree-reconciled.png), [live sidebar](scroll-delivered-scroll-site-input-scroll-site-sidebar.png) and [live document](scroll-delivered-scroll-site-input-scroll-site-document.png). Serial logs: [controlled page](scroll-delivered-scroll-tree.log) and [live website](scroll-delivered-scroll-site.log).
+Screenshots: nested scrolling during JavaScript (`scroll-delivered-scroll-tree-input-tree-nested-busy.png`; local artifact), both distant markers and sticky headers (`scroll-delivered-scroll-tree-input-tree-root-busy.png`; local artifact), reconciled frame (`scroll-delivered-scroll-tree-input-tree-reconciled.png`; local artifact), live sidebar (`scroll-delivered-scroll-site-input-scroll-site-sidebar.png`; local artifact) and live document (`scroll-delivered-scroll-site-input-scroll-site-document.png`; local artifact). Serial logs: controlled page (`scroll-delivered-scroll-tree.log`; local artifact) and live website (`scroll-delivered-scroll-site.log`; local artifact).
 
 The Korean-header fixture exposed repeated serialization of a large fallback font. Before AP resource reuse, 13 scene-recording samples exceeded 50 ms, ranging from 215,391 to 242,471 microseconds. The final run recorded one such sample at 218,571 microseconds during cold preparation and none thereafter. This comparison uses the same fixture and logged recording stage; it is not a general frame-latency benchmark.
 
 ### Regression coverage and build boundaries
 
-The [six-scenario regression suite](scroll-final-suite.json) passed controlled and live scrolling, the earlier long-task scroll test, cancelable wheel events, live-site tabs, and forced renderer recovery. Recovery exercised NMI, page-fault and invalid-opcode paths with matching tracked/reclaimed allocations. The subsequent [lifecycle suite](scroll-release-suite.json) passed scrolling, live-site tabs, 65,536-byte JavaScript entropy generation and the single-CPU wheel fallback after explicit publication cleanup. The [resource-reuse suite](scroll-resource-suite.json) repeated both primary scrolling scenarios after font/image reuse was added. The final image adds the strict 4,096-group guard and repeats both primary scenarios again.
+The six-scenario regression suite (`scroll-final-suite.json`; local artifact) passed controlled and live scrolling, the earlier long-task scroll test, cancelable wheel events, live-site tabs, and forced renderer recovery. Recovery exercised NMI, page-fault and invalid-opcode paths with matching tracked/reclaimed allocations. The subsequent lifecycle suite (`scroll-release-suite.json`; local artifact) passed scrolling, live-site tabs, 65,536-byte JavaScript entropy generation and the single-CPU wheel fallback after explicit publication cleanup. The resource-reuse suite (`scroll-resource-suite.json`; local artifact) repeated both primary scrolling scenarios after font/image reuse was added. The final image adds the strict 4,096-group guard and repeats both primary scenarios again.
 
 These image hashes and stages are recorded separately; the complete regression suite was not rerun on the final image. Host pump-loop sanitizer tests, EEVDF admission/fairness/overrun tests, coroutine cancellation and cleanup tests, and 4,128 SIMD cases passed. Python syntax checks, JavaScript fixture syntax checks and `git diff --check` also passed.
 

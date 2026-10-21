@@ -30,12 +30,12 @@ The page tests run through QEMU input devices against local HTTPS fixtures. They
 
 Reports and logs:
 
-- [Four-vCPU suite](worker-final-suite.json).
-- [One-vCPU suite](worker-final-single-suite.json).
-- [Service availability](worker-final-service-capabilities-service-capabilities-results.json).
-- [Binary validation](worker-final-binary.log) and [static checks](worker-final-static-checks.json).
-- [Build log](worker-final-build.log).
-- Earlier failing capacity evidence: [renderer OOM](worker-lifecycle-workers-limits.log). Later successful reproduction: [capacity recovery](worker-memory-fixed-workers-limits.log).
+- Four-vCPU suite (`worker-final-suite.json`; local artifact).
+- One-vCPU suite (`worker-final-single-suite.json`; local artifact).
+- Service availability (`worker-final-service-capabilities-service-capabilities-results.json`; local artifact).
+- Binary validation (`worker-final-binary.log`; local artifact) and static checks (`worker-final-static-checks.json`; local artifact).
+- Build log (`worker-final-build.log`; local artifact).
+- Earlier failing capacity evidence: renderer OOM (`worker-lifecycle-workers-limits.log`; local artifact). Later successful reproduction: capacity recovery (`worker-memory-fixed-workers-limits.log`; local artifact).
 
 ## Remaining limits
 

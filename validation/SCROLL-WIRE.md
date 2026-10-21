@@ -132,11 +132,11 @@ The normal image executes all logged Blink/V8 event loops at CPL3. The probe ima
 
 | Suite artifact | Result and scope |
 | --- | --- |
-| [Final normal-image rerun](scroll-wire-complete-suite.json) | 6/6 pass: iframe scroll-state, root scrolling, nested/sticky scrolling, keyboard/wheel/drag input, real-site interaction and real-site tabs. Every scenario verifies CPL3, the codec self-test and a wire publication. |
-| [Final probe-image rerun](scroll-wire-complete-isolation-suite.json) | 2/2 pass: hostile publication rejection/recovery and live supervisor-memory/page-table protection. |
-| [Hostile producer measurements](scroll-wire-complete-isolation-scroll-wire-boundary-scroll-wire-boundary-results.json) | Producer remains at CPL3; all 5 invalid publications rejected; forbidden native pointers ignored; valid cache accepted afterward; scrolling continues during the producer loop; click works after renderer restart. |
-| [Earlier normal-image regression](scroll-wire-verified-suite.json) | 7/7 pass before the final input-manager guards, including horizontal/native/custom controls and top-level scroll-state queries. |
-| [Earlier layout regression](scroll-wire-layouts-suite.json) | 5/6 pass: hover/pressed styles, scrollbar layout changes, container-query gutters, iframe gutters and stuck queries. The iframe scroll-state click fault was diagnosed, fixed and passed in the final rerun above. |
+| Final normal-image rerun (`scroll-wire-complete-suite.json`; local artifact) | 6/6 pass: iframe scroll-state, root scrolling, nested/sticky scrolling, keyboard/wheel/drag input, real-site interaction and real-site tabs. Every scenario verifies CPL3, the codec self-test and a wire publication. |
+| Final probe-image rerun (`scroll-wire-complete-isolation-suite.json`; local artifact) | 2/2 pass: hostile publication rejection/recovery and live supervisor-memory/page-table protection. |
+| Hostile producer measurements (`scroll-wire-complete-isolation-scroll-wire-boundary-scroll-wire-boundary-results.json`; local artifact) | Producer remains at CPL3; all 5 invalid publications rejected; forbidden native pointers ignored; valid cache accepted afterward; scrolling continues during the producer loop; click works after renderer restart. |
+| Earlier normal-image regression (`scroll-wire-verified-suite.json`; local artifact) | 7/7 pass before the final input-manager guards, including horizontal/native/custom controls and top-level scroll-state queries. |
+| Earlier layout regression (`scroll-wire-layouts-suite.json`; local artifact) | 5/6 pass: hover/pressed styles, scrollbar layout changes, container-query gutters, iframe gutters and stuck queries. The iframe scroll-state click fault was diagnosed, fixed and passed in the final rerun above. |
 
 | Controlled workload | JavaScript task | First observed pixel change | Reconciliation |
 | --- | ---: | ---: | --- |

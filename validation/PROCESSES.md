@@ -16,7 +16,7 @@ A null task register cannot be restored with LTR. At final teardown, MP timeout 
 
 ## Validation
 
-QEMU 11.1.2, OVMF 2026.08 and 4 GiB guest RAM were used. The final EFI hash is recorded in [process-result.json](process-result.json). No new production dependency was added.
+QEMU 11.1.2, OVMF 2026.08 and 4 GiB guest RAM were used. The final EFI hash is recorded in `process-result.json` (local artifact). No new production dependency was added.
 
 - KVM with 1, 2 and 4 CPUs: byte-identical settings framebuffer, actual device input, clean browser teardown and return to firmware.
 - Separate CR3 values and different private state at the same user virtual address.
@@ -42,7 +42,7 @@ BUILD_DIRECTORY="$PWD/outputs/chromium-uefi/build/blink" python3 outputs/chromiu
 QEMU_CPUS=4 outputs/chromium-uefi/run-qemu.sh
 ```
 
-Logs: [1 CPU](process-1cpu.log), [2 CPUs](process-2cpu.log), [4 CPUs](process-4cpu.log), [settings input](process-input.log), [TCG](process-tcg.log), [real website](process-site.log), [binary validation](process-binary.log).
+Logs: 1 CPU (`process-1cpu.log`; local artifact), 2 CPUs (`process-2cpu.log`; local artifact), 4 CPUs (`process-4cpu.log`; local artifact), settings input (`process-input.log`; local artifact), TCG (`process-tcg.log`; local artifact), real website (`process-site.log`; local artifact), binary validation (`process-binary.log`; local artifact).
 
 ## Performance and remaining work
 

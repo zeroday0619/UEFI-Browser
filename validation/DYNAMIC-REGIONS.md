@@ -72,8 +72,8 @@ complete sandbox coverage.
 
 The `dynamic-regions-youtube` run used the normal image in a fresh raw disk with
 four virtual CPUs and 4 GiB RAM. The observer reached 180 seconds without a
-renderer stop or OOM log. The [60-second capture](dynamic-regions-youtube-60.png)
-and [180-second capture](dynamic-regions-youtube-180.png) show different video
+renderer stop or OOM log. The 60-second capture (`dynamic-regions-youtube-60.png`; local artifact)
+and 180-second capture (`dynamic-regions-youtube-180.png`; local artifact) show different video
 frames; the later capture also shows the title, channel and related-video text.
 This establishes visible progression, not uninterrupted playback or a causal fix
 for the previous OOM.
@@ -87,7 +87,7 @@ synchronization, speaker output or audio quality.
 
 The observer exited with status 1 after the later Console-prompt deadline. The
 frontend loaded, and the harness adjusted its click after the language banner
-moved the tab strip. The [failure screenshot](dynamic-regions-youtube-console-ready.png)
+moved the tab strip. The failure screenshot (`dynamic-regions-youtube-console-ready.png`; local artifact)
 places the cursor on Console, but the panel has no prompt. No player-time
 expression was executed successfully.
 

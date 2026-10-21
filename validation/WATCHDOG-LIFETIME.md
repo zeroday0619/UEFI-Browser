@@ -36,7 +36,7 @@ and static binary validation passed. The default `build/blink` image is unchange
 checks Microsoft x64 ABI arguments, cancellation before allocation, unsupported
 firmware, missing service and error propagation without payload setup.
 `watchdog-post-qemu.json` records both normal POST and corrupted-ELF rejection
-with the new cancellation check. The [POST screenshot](watchdog-post-success.png)
+with the new cancellation check. The POST screenshot (`watchdog-post-success.png`; local artifact)
 was visually inspected.
 
 The `watchdog-media-suite.json` regression run also passed `mse-audio`
@@ -62,7 +62,7 @@ test cleanup stopped QEMU. This is not a passing overall playback benchmark.
 
 Commands were typed into the real DevTools Console through QEMU keyboard events.
 The video tab was selected during wait intervals and the inspector during
-commands. The [Console capture](watchdog-youtube-input-youtube-playback-final.png)
+commands. The Console capture (`watchdog-youtube-input-youtube-playback-final.png`; local artifact)
 shows pause, resume and seek commands and their returned samples.
 
 | Check | Observed result |
