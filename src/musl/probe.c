@@ -154,7 +154,9 @@ static int run_thread_checks(void) {
 }
 static int run_checks(void) {
   CHECK(thread_value++ == 17 && thread_value == 18);
-  CHECK(run_platform_probe() == 0);
+  int platform_result = run_platform_probe();
+  if (platform_result) printf("PLATFORM: probe failure=%d\n", platform_result);
+  CHECK(platform_result == 0);
 #ifdef ENABLE_BLINK_COMPAT
   CHECK(run_blink_compatibility_probe() == 0);
 #endif
@@ -237,6 +239,8 @@ static int run_checks(void) {
   errno = 0;
   CHECK(syscall(0x7fffffff) == -1 && errno == ENOSYS);
   struct utsname information;
+  CHECK(program_invocation_name && program_invocation_short_name &&
+        !strcmp(program_invocation_short_name, "uefi-browser"));
   CHECK(uname(&information) == 0 && !strcmp(information.sysname, "UEFI") &&
         !strcmp(information.machine, "x86_64"));
   CHECK(fabsl(expm1l(0.5L) - 0.64872127070012814684865L) < 1e-18L);
@@ -260,6 +264,11 @@ static void console_message(SystemTable *table, const char *text) {
 #endif
 int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstrap *bootstrap) {
   (void)image;
+  if (bootstrap && bootstrap->renderer == 2) {
+    extern void firmware_media_child(RendererBootstrap *);
+    firmware_media_child(bootstrap);
+    __builtin_trap();
+  }
 #ifdef ENABLE_CPL3_PROBE
   boundary_bootstrap=bootstrap;
   if (bootstrap && bootstrap->renderer && bootstrap->sandbox && bootstrap->boundary_test<=10) renderer_boundary_payload(bootstrap);
@@ -268,6 +277,10 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
   table = renderer_runtime_table(table);
   musl_initialize(table, stack, 4 * 1024 * 1024);
   runtime_initialize(table);
+#ifdef ENABLE_VENUS_RUNTIME
+  setvbuf(stdout, NULL, _IONBF, 0);
+  setvbuf(stderr, NULL, _IONBF, 0);
+#endif
   firmware_file_initialize(image);
   if (!renderer_runtime_is_child()) table->output->clear(table->output);
   if (!renderer_runtime_is_child()) console_message(table, "UEFI BROWSER\r\n\r\nRunning musl checks...\r\n");
@@ -277,8 +290,22 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
     (*callback)();
 #endif
   int result = run_checks();
+#ifdef ENABLE_MOZC_PROBE
+  extern int run_mozc_probe(void);
+  if (!result) result = run_mozc_probe();
+#endif
+#ifdef ENABLE_PANIC_PROBE
+  if (!result && !renderer_runtime_is_child()) {
+    graphics_log("PANIC PROBE: intentional privileged abort after runtime checks\n");
+    abort();
+  }
+#endif
+#ifdef ENABLE_MEMORY_PROBE
+  extern int run_dynamic_memory_probe(void);
+  if (!result) result=run_dynamic_memory_probe();
+#endif
 #ifdef ENABLE_CPL3_PROBE
-  if (!result && !renderer_runtime_is_child()) result=renderer_boundary_supervisor(bootstrap);
+  if (!result && !renderer_runtime_is_child()) result=renderer_boundary_supervisor(bootstrap,table);
 #endif
 #ifdef ENABLE_BROKER_PROBE
   extern int run_renderer_broker_probe(void);
@@ -286,7 +313,11 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
 #endif
   if(!result) {result=shared_memory_probe();if(result) printf("FAIL: shared memory probe %d\n",result);}
 #ifdef ENABLE_CPL3_PROBE
-  if (bootstrap && bootstrap->renderer && bootstrap->boundary_test==11) {
+  if (bootstrap && bootstrap->renderer &&
+      bootstrap->boundary_test>=11 && bootstrap->boundary_test<=14) {
+    extern int run_jit_memory_probe(unsigned);
+    if (!result) result=run_jit_memory_probe(bootstrap->boundary_test-11);
+    if (result) printf("FAIL: JIT probe stage=%d\n",result);
     fflush(NULL);
     renderer_system_call(RENDERER_SYSTEM_EXIT,result,0,0,0,0);
     __builtin_trap();
@@ -296,7 +327,47 @@ int engine_entry(Handle image, SystemTable *table, void *stack, RendererBootstra
   extern int run_firmware_io_probe(void);
   if (!result) result = run_firmware_io_probe();
 #endif
-#if defined(ENABLE_CPP) && !defined(ENABLE_BLINK)
+#ifdef ENABLE_VENUS_RUNTIME
+  extern int run_venus_runtime_probe(void);
+#ifdef ENABLE_VENUS_CPL3
+  if (!result && renderer_runtime_is_child()) {
+    unsigned short selector;
+    __asm__ volatile("mov %%cs,%0" : "=r"(selector));
+    printf("VENUS PROTECTED: runtime cpl=%u\n", selector & 3);
+    result = (selector & 3) == 3 ? run_venus_runtime_probe() : 1;
+    fflush(NULL);
+    renderer_system_call(RENDERER_SYSTEM_EXIT, result, 0, 0, 0, 0);
+    __builtin_trap();
+  }
+  if (!result) {
+    Status status=renderer_runtime_start(NULL);
+    if (status) { printf("FAIL: Venus renderer start=%llx\n", (unsigned long long)status); result=1; }
+    else {
+      struct timespec started, current;
+      clock_gettime(CLOCK_MONOTONIC, &started);
+      do {
+        renderer_runtime_service();
+        status=renderer_runtime_join();
+        clock_gettime(CLOCK_MONOTONIC, &current);
+        if (current.tv_sec - started.tv_sec > 120) {
+          printf("FAIL: Venus protected runtime deadline\n");
+          renderer_runtime_terminate();
+          result=1;
+        }
+      } while (status == ERROR(6));
+      if (status) result=1;
+      if (!result) puts("PASS: protected Mesa Venus runtime and broker cleanup");
+    }
+  }
+#else
+  if (!result) result = run_venus_runtime_probe();
+#endif
+  if (result) graphics_log("FAIL: Venus runtime probe\n");
+  fflush(NULL);
+  /* Firmware graphics queues were reset by the standalone device owner. */
+  for (;;) __asm__ volatile("cli; hlt");
+#endif
+#if defined(ENABLE_CPP) && !defined(ENABLE_BLINK) && !defined(ENABLE_VENUS_RUNTIME)
   if (!result)
     result = run_cxx_probe();
 #endif

@@ -65,4 +65,9 @@ Environment: Chromium 158.0.8110.0, Clang 23.1.3, musl 1.2.5, QEMU 11.1.2 with K
 
 CSS scrollbar geometry responds during the long task, but hover, pressed and disabled styling refreshes with renderer publications. Full-track clipping does not reproduce every gradient, image or border whose appearance depends on the changing size of an individual track piece. Arbitrary HTML/JavaScript scrollbar widgets still require their event handlers to run. Horizontal hardware-wheel reports, touchpad gestures and kinetic scrolling are not implemented; horizontal input uses the scrollbar or eligible Left/Right keys.
 
-Cancelable DOM handlers, editing, scroll snapping, non-translation transforms, path clips, filters and repaint-dependent backgrounds retain renderer fallback. New layout or style changes need a new scene. Individual Skia operations remain synchronous on the BSP. Physical hardware, all CSS scrollbar styles and worst-case latency have not been validated. Human review is required before merging the changes.
+Cancelable DOM handlers, editing, scroll snapping, perspective/3D transforms, path clips, filters and repaint-dependent backgrounds retain renderer fallback. New layout or style changes need a new scene. Individual Skia operations remain synchronous on the BSP. Physical hardware, all CSS scrollbar styles and worst-case latency have not been validated. Human review is required before merging the changes.
+
+The current source supports 2D affine transforms for painting, clipping, hit
+testing and scrollbar-local controls. `AFFINE-SCROLL.md` records the dedicated
+candidate, ordered input fix and QEMU coverage; the historical images above do
+not contain that extension.

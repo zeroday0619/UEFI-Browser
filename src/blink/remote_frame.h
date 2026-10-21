@@ -3,6 +3,7 @@
 #include "blink/browser_frame.h"
 namespace uefi_browser {
 bool StartRenderer(SystemTable*, int width, int height);
+void RequestRendererStop();
 void StopRenderer();
 void TerminateRenderer();
 bool PollRemoteFrames();
@@ -23,6 +24,7 @@ class RemoteFrame {
   Status GoBack();
   Status GoForward();
   Status Reload();
+  Status Inspect(RemoteFrame& target);
   bool CanAcceptInput() const;
   void Pointer(const PointerSample&);
   void PointerLeave();

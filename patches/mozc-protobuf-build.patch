@@ -1,0 +1,12 @@
+--- a/third_party/protobuf/BUILD.gn
++++ b/third_party/protobuf/BUILD.gn
+@@ -229,6 +229,9 @@
+       # Sync requires descriptors for testing.
+       "//components/sync:sync_full_proto_unittests",
+       "//components/sync/protocol:full_proto",
++
++      # The firmware Mozc engine uses descriptors for its configuration and dictionaries.
++      "//third_party/blink/uefi/mozc:*",
+ 
+       # third_party/federated_compute requires it for testing.
+       "//third_party/federated_compute:federated_compute_tests",

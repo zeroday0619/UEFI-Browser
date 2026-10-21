@@ -446,7 +446,7 @@ index c6a0767946..d064412045 100644
    CHECK(frame);
 +#if defined(UEFI_RUNTIME)
 +  if (firmware_loader_factory)
-+    return firmware_loader_factory(*window_->GetSecurityOrigin(),
++    return firmware_loader_factory(*window_,
 +                                   std::move(freezable_task_runner));
 +#endif
    if (std::unique_ptr<URLLoader> loader = frame->CreateURLLoaderForTesting()) {
@@ -474,7 +474,7 @@ index 9723c36b65..94f0f9e32d 100644
   public:
 +#if defined(UEFI_RUNTIME)
 +  using FirmwareLoaderFactory = std::unique_ptr<URLLoader> (*)(
-+      const SecurityOrigin&, scoped_refptr<base::SingleThreadTaskRunner>);
++      LocalDOMWindow&, scoped_refptr<base::SingleThreadTaskRunner>);
 +  // The embedder installs its transport before creating any frames.
 +  static void SetFirmwareLoaderFactory(FirmwareLoaderFactory);
 +#endif
@@ -1720,28 +1720,50 @@ diff --git a/third_party/blink/renderer/core/paint/video_painter.cc b/third_part
                                    !should_display_poster &&
 
 diff --git a/third_party/blink/renderer/core/html/media/html_media_element.cc b/third_party/blink/renderer/core/html/media/html_media_element.cc
-index 551e24456e..47381e0a33 100644
 --- a/third_party/blink/renderer/core/html/media/html_media_element.cc
 +++ b/third_party/blink/renderer/core/html/media/html_media_element.cc
-@@ -385,6 +385,20 @@ MIMETypeRegistry::SupportsType HTMLMediaElement::GetSupportsType(
+@@ -43,6 +43,7 @@
+ #include "base/time/time.h"
+ #include "cc/layers/layer.h"
+ #include "media/base/media_content_type.h"
++#include "media/base/mime_util.h"
+ #include "media/base/media_switches.h"
+ #include "media/base/media_track.h"
+ #include "services/media_session/public/mojom/media_session.mojom-blink.h"
+@@ -385,6 +386,35 @@
    // The codecs string is not lower-cased because MP4 values are case sensitive
    // per http://tools.ietf.org/html/rfc4281#page-7.
    String type_codecs = content_type.Parameter("codecs");
 +#if defined(UEFI_RUNTIME)
-+  // PCM WAV uses the firmware audio device; WebM remains video-only.
++  // WebM codec support includes the MSE Opus decoder and firmware PCM sink.
 +  if (type == "audio/wav" || type == "audio/x-wav" || type == "audio/wave")
 +    return type_codecs.empty() || type_codecs == "1"
 +               ? MIMETypeRegistry::kMaybeSupported : MIMETypeRegistry::kNotSupported;
-+  if (type != "video/webm")
++  if (type != "video/webm" && type != "audio/webm")
 +    return MIMETypeRegistry::kNotSupported;
 +  if (type_codecs.empty())
 +    return MIMETypeRegistry::kMaybeSupported;
-+  if (type_codecs == "vp8" || type_codecs == "vp8.0" ||
-+      type_codecs == "vp9" || type_codecs == "vp9.0")
-+    return MIMETypeRegistry::kSupported;
-+  return MIMETypeRegistry::kNotSupported;
++  unsigned video_codecs = 0, audio_codecs = 0;
++  for (const auto& token : type_codecs.Split(',')) {
++    String codec = token.StripWhiteSpace();
++    if (codec == "opus") ++audio_codecs;
++    else if (type == "video/webm") {
++      auto parsed = media::ParseVideoCodecString("video/webm", codec.Ascii(), true);
++      if (!parsed ||
++          (parsed->codec != media::VideoCodec::kVP8 &&
++           (parsed->codec != media::VideoCodec::kVP9 ||
++            (parsed->profile != media::VIDEO_CODEC_PROFILE_UNKNOWN &&
++             parsed->profile != media::VP9PROFILE_PROFILE0))) ||
++          (parsed->bit_depth && *parsed->bit_depth != 8) ||
++          (parsed->subsampling && *parsed->subsampling != media::VideoChromaSampling::k420))
++        return MIMETypeRegistry::kNotSupported;
++      ++video_codecs;
++    } else return MIMETypeRegistry::kNotSupported;
++  }
++  return video_codecs <= 1 && audio_codecs <= 1 && video_codecs + audio_codecs > 0
++             ? MIMETypeRegistry::kSupported : MIMETypeRegistry::kNotSupported;
 +#endif
-
+ 
    if (type.empty())
      return MIMETypeRegistry::kNotSupported;
 diff --git a/gpu/command_buffer/service/shared_image_interface_in_process_base.h b/gpu/command_buffer/service/shared_image_interface_in_process_base.h
@@ -1831,69 +1853,234 @@ diff --git a/gpu/command_buffer/service/shared_image_interface_in_process_base.c
      MarkContextLostOnGpuThread();
    }
  }
-diff --git a/gpu/ipc/gl_in_process_context.h b/gpu/ipc/gl_in_process_context.h
---- a/gpu/ipc/gl_in_process_context.h
-+++ b/gpu/ipc/gl_in_process_context.h
-@@ -34,7 +34,8 @@
-
-   ~GLInProcessContext();
-
--  ContextResult Initialize(CommandBufferTaskExecutor* task_executor);
-+  ContextResult Initialize(CommandBufferTaskExecutor* task_executor,
-+      ContextType context_type = CONTEXT_TYPE_OPENGLES2);
-
-   const Capabilities& GetCapabilities() const;
-   const GpuFeatureInfo& GetGpuFeatureInfo() const;
 diff --git a/gpu/ipc/gl_in_process_context.cc b/gpu/ipc/gl_in_process_context.cc
+index b92d9bcc82..91af8f1c2b 100644
 --- a/gpu/ipc/gl_in_process_context.cc
 +++ b/gpu/ipc/gl_in_process_context.cc
-@@ -54,7 +54,7 @@
+@@ -54,7 +54,7 @@ SharedImageInterface* GLInProcessContext::GetSharedImageInterface() {
  }
-
+ 
  ContextResult GLInProcessContext::Initialize(
 -    CommandBufferTaskExecutor* task_executor) {
 +    CommandBufferTaskExecutor* task_executor, ContextType context_type) {
    DCHECK(base::SingleThreadTaskRunner::GetCurrentDefault());
-
+ 
    command_buffer_ = std::make_unique<InProcessCommandBuffer>(
-@@ -62,6 +62,7 @@
-
+@@ -62,6 +62,7 @@ ContextResult GLInProcessContext::Initialize(
+ 
    auto attribs =
        mojom::ContextCreationAttribs::NewGles(mojom::GLESCreationAttribs::New());
 +  attribs->get_gles()->context_type = context_type;
-
+ 
    auto result = command_buffer_->Initialize(
        std::move(attribs), base::SingleThreadTaskRunner::GetCurrentDefault(),
+@@ -95,3 +96,8 @@ ContextResult GLInProcessContext::Initialize(
+ }
+ 
+ }  // namespace gpu
++
++uint64_t gpu::GLInProcessContext::FirmwareExportCanvas(uint32_t alpha) {
++  gles2_implementation_->Finish();
++  return command_buffer_->FirmwareExportCanvas(alpha);
++}
+diff --git a/gpu/ipc/gl_in_process_context.h b/gpu/ipc/gl_in_process_context.h
+index 8ea698d153..8ea2594a6e 100644
+--- a/gpu/ipc/gl_in_process_context.h
++++ b/gpu/ipc/gl_in_process_context.h
+@@ -34,7 +34,8 @@ class GL_IN_PROCESS_CONTEXT_EXPORT GLInProcessContext {
+ 
+   ~GLInProcessContext();
+ 
+-  ContextResult Initialize(CommandBufferTaskExecutor* task_executor);
++  ContextResult Initialize(CommandBufferTaskExecutor* task_executor,
++      ContextType context_type = CONTEXT_TYPE_OPENGLES2);
+ 
+   const Capabilities& GetCapabilities() const;
+   const GpuFeatureInfo& GetGpuFeatureInfo() const;
+@@ -44,6 +45,7 @@ class GL_IN_PROCESS_CONTEXT_EXPORT GLInProcessContext {
+   gles2::GLES2Implementation* GetImplementation();
+ 
+   SharedImageInterface* GetSharedImageInterface();
++  uint64_t FirmwareExportCanvas(uint32_t alpha);
+ 
+  private:
+   // The destruction order is important, don't reorder these member variables.
+diff --git a/gpu/ipc/in_process_command_buffer.cc b/gpu/ipc/in_process_command_buffer.cc
+index 5b97d1848c..60fc64a915 100644
+--- a/gpu/ipc/in_process_command_buffer.cc
++++ b/gpu/ipc/in_process_command_buffer.cc
+@@ -1078,3 +1078,21 @@ void InProcessCommandBuffer::UpdateActiveUrl() {
+ }
+ 
+ }  // namespace gpu
++
++#if defined(UEFI_RUNTIME)
++extern "C" uint64_t firmware_angle_export_canvas(uint32_t);
++#endif
++uint64_t gpu::InProcessCommandBuffer::FirmwareExportCanvas(uint32_t alpha) {
++#if defined(UEFI_RUNTIME)
++  base::WaitableEvent completion(base::WaitableEvent::ResetPolicy::MANUAL,base::WaitableEvent::InitialState::NOT_SIGNALED);
++  uint64_t token=0;
++  task_sequence_->ScheduleTask(base::BindOnce([](InProcessCommandBuffer* self,uint32_t alpha,uint64_t* result,base::WaitableEvent* event) {
++    if (self->MakeCurrent()) *result=firmware_angle_export_canvas(alpha);
++    event->Signal();
++  },base::Unretained(this),alpha,base::Unretained(&token),base::Unretained(&completion)),{},SyncToken());
++  completion.Wait();
++  return token;
++#else
++  return 0;
++#endif
++}
+diff --git a/gpu/ipc/in_process_command_buffer.h b/gpu/ipc/in_process_command_buffer.h
+index 35f8414b6a..f958ac2ac9 100644
+--- a/gpu/ipc/in_process_command_buffer.h
++++ b/gpu/ipc/in_process_command_buffer.h
+@@ -86,6 +86,7 @@ class GL_IN_PROCESS_CONTEXT_EXPORT InProcessCommandBuffer
+       public CommandBufferServiceClient,
+       public DecoderClient {
+  public:
++  uint64_t FirmwareExportCanvas(uint32_t alpha);
+   InProcessCommandBuffer(CommandBufferTaskExecutor* task_executor,
+                          const GURL& active_url);
+ 
+diff --git a/third_party/blink/public/platform/web_graphics_context_3d_provider.h b/third_party/blink/public/platform/web_graphics_context_3d_provider.h
+index 3fdd087472..3f28ac0a4f 100644
+--- a/third_party/blink/public/platform/web_graphics_context_3d_provider.h
++++ b/third_party/blink/public/platform/web_graphics_context_3d_provider.h
+@@ -84,6 +84,7 @@ struct WebglPreferences {
+ 
+ class WebGraphicsContext3DProvider {
+  public:
++  virtual uint64_t FirmwareExportTexture(void*, uint32_t) { return 0; }
+   virtual ~WebGraphicsContext3DProvider() = default;
+ 
+   virtual gpu::InterfaceBase* InterfaceBase() = 0;
 diff --git a/third_party/blink/renderer/core/paint/html_canvas_painter.cc b/third_party/blink/renderer/core/paint/html_canvas_painter.cc
+index aa1ed5af27..c9c44c8173 100644
 --- a/third_party/blink/renderer/core/paint/html_canvas_painter.cc
 +++ b/third_party/blink/renderer/core/paint/html_canvas_painter.cc
-@@ -66,6 +66,7 @@
+@@ -3,6 +3,9 @@
+ // found in the LICENSE file.
+ 
+ #include "third_party/blink/renderer/core/paint/html_canvas_painter.h"
++#if defined(UEFI_RUNTIME)
++#include "third_party/blink/uefi/src/blink/gpu_canvas.h"
++#endif
+ 
+ #include "third_party/blink/renderer/core/css/properties/longhands.h"
+ #include "third_party/blink/renderer/core/html/canvas/canvas_rendering_context.h"
+@@ -66,7 +69,13 @@ void HTMLCanvasPainter::PaintReplaced(const PaintInfo& paint_info,
      return;
    }
-
-+#if !defined(UEFI_RUNTIME)
+ 
++#if defined(UEFI_RUNTIME)
++  auto* firmware_layer=canvas->ContentsCcLayer();
++  if (firmware_layer && uefi_browser::GetGpuCanvasFrame(firmware_layer->id())) {
++    auto* layer=firmware_layer;
++#else
    if (auto* layer = canvas->ContentsCcLayer()) {
++#endif
      // TODO(crbug.com/705019): For a texture layer canvas, setting the layer
      // background color to an opaque color will cause the layer to be treated as
-@@ -91,6 +92,7 @@
-     }
-   }
-
+     // opaque. For a surface layer canvas, contents could be opaque, but that
+diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+index 4a0ae32e13..f3c3aa2a18 100644
+--- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
++++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
+@@ -24,6 +24,9 @@
+  */
+ 
+ #include "third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h"
++#if defined(UEFI_RUNTIME)
++#include "third_party/blink/uefi/src/blink/gpu_canvas.h"
 +#endif
-   if (DrawingRecorder::UseCachedDrawingIfPossible(context, layout_html_canvas_,
-                                                   paint_info.phase)) {
+ 
+ #include <inttypes.h>
+ 
+@@ -1627,6 +1630,12 @@ void WebGLRenderingContextBase::InitializeNewContext() {
+   // initialized. Restore it now.
+   GetDrawingBuffer()->RestoreAllState();
+   ActivateContext(this);
++#if defined(UEFI_RUNTIME)
++  // An initialized but not yet drawn canvas can be painted while script awaits
++  // another API. Publish its cleared GPU storage before that first paint.
++  must_paint_to_canvas_ = true;
++  FinalizeFrame(FlushReason::kOther);
++#endif
+ }
+ 
+ void WebGLRenderingContextBase::SetupFlags() {
+@@ -1694,6 +1703,10 @@ HTMLCanvasElement* WebGLRenderingContextBase::canvas() const {
+ }
+ 
+ void WebGLRenderingContextBase::DestroyContext() {
++#if defined(UEFI_RUNTIME)
++  if (firmware_layer_) uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),0);
++  firmware_layer_=nullptr;
++#endif
+   if (!GetDrawingBuffer())
      return;
+ 
+@@ -2071,6 +2084,13 @@ WebGLRenderingContextBase::PaintRenderingResultsToSnapshot(
+   }
+ 
+   bool cleared_content = ClearIfComposited(kClearCallerOther) != kSkipped;
++#if defined(UEFI_RUNTIME)
++  // Explicit snapshots and the software fallback require CPU pixels.
++  must_paint_to_canvas_ = false;
++  return CopyRenderingResultsToUnacceleratedStaticBitmapImage(
++      kBackBuffer, viz::SharedImageFormat::N32Format(), kPremul_SkAlphaType,
++      kTopLeft_GrSurfaceOrigin);
++#endif
+ 
+   if (Host()->LowLatencyEnabled() &&
+       GetDrawingBuffer()->SupportsNoCopyExportForLowLatency()) {
+@@ -7801,6 +7821,9 @@ void WebGLRenderingContextBase::ForceRestoreContext() {
+ }
+ 
+ cc::Layer* WebGLRenderingContextBase::CcLayer() const {
++#if defined(UEFI_RUNTIME)
++  return firmware_layer_.get();
++#endif
+   return isContextLost() ? nullptr : GetDrawingBuffer()->CcLayer();
+ }
+ 
+@@ -9546,3 +9569,23 @@ bool WebGLRenderingContextBase::checkProgramCompletionQueryAvailable(
+   return false;
+ }
+ }  // namespace blink
++
++#if defined(UEFI_RUNTIME)
++void blink::WebGLRenderingContextBase::FinalizeFrame(FlushReason) {
++  if (isContextLost() || !GetDrawingBuffer() || !must_paint_to_canvas_) return;
++  const auto& attributes=CreationAttributes();
++  ScopedPixelLocalStorageInterrupt interrupt(this);
++  ScopedFramebufferRestorer restore(this);
++  if (!GetDrawingBuffer()->ResolveAndBindForReadAndDraw()) return;
++  auto token=GetDrawingBuffer()->ContextProvider()->FirmwareExportTexture(nullptr,(attributes.alpha ? (attributes.premultiplied_alpha ? 1 : 5) : 0) | (static_cast<uint32_t>(drawing_buffer_color_space_)<<3));
++  if (!token) {
++    if (firmware_layer_) uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),0);
++    firmware_layer_=nullptr;
++    return;
++  }
++  if (!firmware_layer_) firmware_layer_=cc::Layer::Create();
++  uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),token);
++  must_paint_to_canvas_=false;
++  Host()->SetNeedsCompositingUpdate();
++}
++#endif
 diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
+index add96cfd87..2747145656 100644
 --- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
 +++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.h
-@@ -714,7 +714,13 @@
+@@ -714,7 +714,13 @@ class MODULES_EXPORT WebGLRenderingContextBase
        SourceDrawingBuffer);
-
+ 
    // CanvasRenderingContext implementation.
 -  bool IsComposited() const override { return true; }
 +  bool IsComposited() const override {
 +#if defined(UEFI_RUNTIME)
-+    return false;
++    return firmware_layer_!=nullptr;
 +#else
 +    return true;
 +#endif
@@ -1901,57 +2088,29 @@ diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_ba
    void PageVisibilityChanged() override;
    void SizeChanged() override;
    scoped_refptr<StaticBitmapImage> PaintRenderingResultsToSnapshot(
-diff --git a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
---- a/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-+++ b/third_party/blink/renderer/modules/webgl/webgl_rendering_context_base.cc
-@@ -2071,6 +2071,13 @@
-   }
-
-   bool cleared_content = ClearIfComposited(kClearCallerOther) != kSkipped;
+@@ -737,6 +743,10 @@ class MODULES_EXPORT WebGLRenderingContextBase
+       VideoFrameCopyCompletedCallback) override;
+ 
+   cc::Layer* CcLayer() const override;
 +#if defined(UEFI_RUNTIME)
-+  // GOP presentation consumes CPU pixels rather than compositor texture layers.
-+  must_paint_to_canvas_ = false;
-+  return CopyRenderingResultsToUnacceleratedStaticBitmapImage(
-+      kBackBuffer, viz::SharedImageFormat::N32Format(), kPremul_SkAlphaType,
-+      kTopLeft_GrSurfaceOrigin);
++  void FinalizeFrame(FlushReason) override;
++  scoped_refptr<cc::Layer> firmware_layer_;
 +#endif
-
-   if (Host()->LowLatencyEnabled() &&
-       GetDrawingBuffer()->SupportsNoCopyExportForLowLatency()) {
-diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
---- a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
-+++ b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
-@@ -82,7 +82,13 @@
-   void PageVisibilityChanged() override {}
-   void SizeChanged() override;
-   bool isContextLost() const override { return false; }
--  bool IsComposited() const final { return true; }
-+  bool IsComposited() const final {
-+#if defined(UEFI_RUNTIME)
-+    return false;
-+#else
-+    return true;
-+#endif
-+  }
-   bool IsPaintable() const final { return true; }
-   void Stop() final;
-   cc::Layer* CcLayer() const final;
-@@ -147,6 +153,9 @@
-   scoped_refptr<StaticBitmapImage> MakeFallbackStaticBitmapImage(
-       V8GPUCanvasAlphaMode::Enum alpha_mode);
-
-+#if defined(UEFI_RUNTIME)
-+  scoped_refptr<StaticBitmapImage> firmware_front_buffer_;
-+#endif
-   Member<GPUDevice> device_;
-
-   std::unique_ptr<CanvasNon2DResourceProvider> resource_provider_;
+   void Stop() override;
+   scoped_refptr<CanvasResource> GetResourceForPushFrame(
+       bool& should_call_push_frame) override;
 diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
+index 169a16c287..f7ac55e164 100644
 --- a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
 +++ b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc
-@@ -5,6 +5,10 @@
+@@ -3,8 +3,15 @@
+ // found in the LICENSE file.
+ 
  #include "third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h"
-
++#if defined(UEFI_RUNTIME)
++#include "third_party/blink/uefi/src/blink/gpu_canvas.h"
++#endif
+ 
  #include "base/metrics/histogram_functions.h"
 +#if defined(UEFI_RUNTIME)
 +#include "base/threading/platform_thread.h"
@@ -1960,20 +2119,41 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
  #include "components/viz/common/resources/shared_image_format_utils.h"
  #include "gpu/command_buffer/client/raster_interface.h"
  #include "gpu/config/gpu_finch_features.h"
-@@ -191,6 +195,12 @@
+@@ -83,6 +90,9 @@ GPUCanvasContext::GPUCanvasContext(
  }
-
+ 
+ GPUCanvasContext::~GPUCanvasContext() {
++#if defined(UEFI_RUNTIME)
++  if (firmware_layer_) uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),0);
++#endif
+   copy_to_swap_texture_required_ = false;
+ 
+   // Perform destruction that's safe to do inside a GC (as in it doesn't touch
+@@ -154,6 +164,9 @@ void GPUCanvasContext::Stop() {
+ }
+ 
+ cc::Layer* GPUCanvasContext::CcLayer() const {
++#if defined(UEFI_RUNTIME)
++  if (firmware_layer_ && uefi_browser::GetGpuCanvasFrame(firmware_layer_->id())) return firmware_layer_.get();
++#endif
+   if (swap_buffers_) {
+     return swap_buffers_->CcLayer();
+   }
+@@ -191,6 +204,13 @@ void GPUCanvasContext::Dispose() {
+ }
+ 
  scoped_refptr<StaticBitmapImage> GPUCanvasContext::GetImage() {
 +#if defined(UEFI_RUNTIME)
 +  if (!configured_ || !device_) return nullptr;
 +  if (texture_ && !texture_->IsDestroyed() && !device_->IsDestroyed())
 +    return SnapshotInternal(texture_->GetHandle());
++  if (firmware_front_texture_ && !device_->IsDestroyed()) return SnapshotInternal(firmware_front_texture_);
 +  return firmware_front_buffer_;
 +#endif
    if (!swap_buffers_) {
      return nullptr;
    }
-@@ -249,6 +259,9 @@
+@@ -249,6 +269,9 @@ GPUCanvasContext::GetOrCreateCanvasNon2DResourceProvider() {
  scoped_refptr<StaticBitmapImage>
  GPUCanvasContext::PaintRenderingResultsToSnapshot(
      SourceDrawingBuffer source_buffer) {
@@ -1983,7 +2163,7 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
    if (!swap_buffers_) {
      return resource_provider_ ? resource_provider_->Snapshot() : nullptr;
    }
-@@ -360,6 +373,11 @@
+@@ -360,6 +383,11 @@ scoped_refptr<CanvasResource> GPUCanvasContext::GetResourceForPushFrame(
  ImageBitmap* GPUCanvasContext::TransferToImageBitmap(
      ScriptState* script_state,
      ExceptionState& exception_state) {
@@ -1995,22 +2175,31 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
    // If the canvas configuration is invalid, WebGPU requires that we give a
    // fallback black ImageBitmap if possible.
    if (!swap_buffers_) {
-@@ -595,6 +613,14 @@
+@@ -595,6 +623,23 @@ void GPUCanvasContext::configure(const GPUCanvasConfiguration* descriptor,
    }
-
+ 
    ParseCanvasToneMapping(descriptor->toneMapping(), hdr_metadata_);
 +#if defined(UEFI_RUNTIME)
-+  // GOP consumes CPU pixels, so canvas textures do not require shared mailboxes.
++  // The firmware bridge exports textures without Chromium shared mailboxes.
 +  copy_to_swap_texture_required_ = false;
 +  texture_internal_usage_ = {{.internalUsage = wgpu::TextureUsage::CopySrc}};
++  if (alpha_mode_ == V8GPUCanvasAlphaMode::Enum::kOpaque) {
++    texture_internal_usage_.internalUsage |= wgpu::TextureUsage::RenderAttachment;
++    if (!alpha_clearer_ || !alpha_clearer_->IsCompatible(device_->GetHandle(), texture_descriptor_.format)) {
++      alpha_clearer_ = base::MakeRefCounted<WebGPUTextureAlphaClearer>(
++          device_->GetDawnControlClient(), device_->GetHandle(), texture_descriptor_.format);
++    }
++  } else {
++    alpha_clearer_ = nullptr;
++  }
 +  texture_descriptor_.nextInChain = &texture_internal_usage_;
 +  Host()->SetNeedsCompositingUpdate();
 +  return;
 +#endif
-
+ 
    const wgpu::DawnTextureInternalUsageDescriptor* internal_usage_desc = nullptr;
    if (const wgpu::ChainedStruct* next_in_chain =
-@@ -699,6 +725,15 @@
+@@ -699,6 +744,15 @@ GPUTexture* GPUCanvasContext::getCurrentTexture(
      return texture_.Get();
    }
    new_texture_required_ = false;
@@ -2023,31 +2212,60 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
 +  Host()->UpdateMemoryUsage();
 +  return texture_.Get();
 +#endif
-
+ 
    if (!swap_buffers_) {
      device_->InjectError(wgpu::ErrorType::Validation,
-@@ -792,6 +827,13 @@
+@@ -792,6 +846,15 @@ GPUCanvasContext::GetFrontBufferMailboxTexture() {
  }
-
+ 
  void GPUCanvasContext::ReplaceDrawingBuffer(bool destroy_swap_buffers) {
 +#if defined(UEFI_RUNTIME)
 +  if (texture_ && !texture_->IsDestroyed()) texture_->destroy();
 +  texture_ = nullptr;
 +  firmware_front_buffer_ = nullptr;
++  firmware_front_texture_ = nullptr;
++  if (firmware_layer_) uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),0);
 +  new_texture_required_ = true;
 +  return;
 +#endif
    if (!swap_buffers_) {
      return;
    }
-@@ -814,6 +856,14 @@
+@@ -814,6 +877,41 @@ void GPUCanvasContext::ReplaceDrawingBuffer(bool destroy_swap_buffers) {
  }
-
+ 
  void GPUCanvasContext::FinalizeFrame(FlushReason) {
 +#if defined(UEFI_RUNTIME)
 +  // Retain the presented pixels after the frame's texture expires.
 +  if (texture_ && !texture_->IsDestroyed() && !device_->IsDestroyed()) {
-+    firmware_front_buffer_ = SnapshotInternal(texture_->GetHandle());
++    // Opaque metadata alone does not replace alpha values stored by the page.
++    // Preserve RGB while making the exported GPU image opaque before sampling.
++    if (alpha_clearer_) alpha_clearer_->ClearAlpha(texture_->GetHandle());
++    uint64_t token=0;
++    auto provider=GetContextProviderWeakPtr();
++    if (provider) token=provider->ContextProvider().FirmwareExportTexture(texture_->GetHandle().Get(),
++        (alpha_mode_==V8GPUCanvasAlphaMode::Enum::kOpaque ? 0 : 1) | (static_cast<uint32_t>(color_space_)<<3));
++    if (token) {
++      // A private GPU texture preserves explicit snapshot APIs after the script's
++      // current texture expires, without reading pixels during presentation.
++      wgpu::TextureDescriptor front={.usage=wgpu::TextureUsage::CopySrc|wgpu::TextureUsage::CopyDst,
++          .size=texture_descriptor_.size,.format=texture_descriptor_.format};
++      firmware_front_texture_=device_->GetHandle().CreateTexture(&front);
++      wgpu::DawnEncoderInternalUsageDescriptor internal={{.useInternalUsages=true}};
++      wgpu::CommandEncoderDescriptor descriptor={.nextInChain=&internal};
++      auto encoder=device_->GetHandle().CreateCommandEncoder(&descriptor);
++      wgpu::TexelCopyTextureInfo source={.texture=texture_->GetHandle()}, destination={.texture=firmware_front_texture_};
++      encoder.CopyTextureToTexture(&source,&destination,&front.size);
++      auto command=encoder.Finish(); device_->queue()->GetHandle().Submit(1,&command);
++      if (!firmware_layer_) firmware_layer_=cc::Layer::Create();
++      uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),token);
++      firmware_front_buffer_=nullptr;
++      Host()->SetNeedsCompositingUpdate();
++    } else {
++      firmware_front_texture_=nullptr;
++      if (firmware_layer_) uefi_browser::SetGpuCanvasFrame(firmware_layer_->id(),0);
++      firmware_front_buffer_=SnapshotInternal(texture_->GetHandle());
++    }
 +    texture_->destroy();
 +    texture_ = nullptr;
 +  }
@@ -2055,8 +2273,8 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
    // In some cases, such as when a canvas is hidden or offscreen, compositing
    // will never happen and thus OnTextureTransferred will never be called. In
    // those cases, getCurrentTexture is still required to return a new texture
-@@ -1020,6 +1070,71 @@
-
+@@ -1020,6 +1118,72 @@ bool GPUCanvasContext::CopyTextureToResourceProvider(
+ 
  scoped_refptr<StaticBitmapImage> GPUCanvasContext::SnapshotInternal(
      const wgpu::Texture& texture) const {
 +#if defined(UEFI_RUNTIME)
@@ -2069,6 +2287,7 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
 +  const uint32_t row_bytes = (width * pixel_bytes + 255) & ~255u;
 +  const uint64_t length = uint64_t(row_bytes) * height;
 +  if (length > 32 * 1024 * 1024) return nullptr;
++  std::printf("GPU-CANVAS: readback api=webgpu bytes=%llu\n",static_cast<unsigned long long>(length));
 +  wgpu::BufferDescriptor buffer_descriptor = {
 +      .usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst,
 +      .size = length};
@@ -2125,13 +2344,69 @@ diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.cc b/t
 +  return UnacceleratedStaticBitmapImage::Create(SkImages::RasterFromBitmap(bitmap));
 +#else
    gfx::Size size(texture.GetWidth(), texture.GetHeight());
-
+ 
    // We tag the SharedImage inside the WebGPUImageProvider with display usages
-@@ -1039,6 +1154,7 @@
+@@ -1039,6 +1203,7 @@ scoped_refptr<StaticBitmapImage> GPUCanvasContext::SnapshotInternal(
    }
-
+ 
    return resource_provider->Snapshot();
 +#endif
  }
-
+ 
  base::WeakPtr<WebGraphicsContext3DProviderWrapper>
+diff --git a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
+index dc897bdc4b..e777de283f 100644
+--- a/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
++++ b/third_party/blink/renderer/modules/webgpu/gpu_canvas_context.h
+@@ -82,7 +82,13 @@ class GPUCanvasContext : public ScriptWrappable,
+   void PageVisibilityChanged() override {}
+   void SizeChanged() override;
+   bool isContextLost() const override { return false; }
+-  bool IsComposited() const final { return true; }
++  bool IsComposited() const final {
++#if defined(UEFI_RUNTIME)
++    return CcLayer()!=nullptr;
++#else
++    return true;
++#endif
++  }
+   bool IsPaintable() const final { return true; }
+   void Stop() final;
+   cc::Layer* CcLayer() const final;
+@@ -147,6 +153,11 @@ class GPUCanvasContext : public ScriptWrappable,
+   scoped_refptr<StaticBitmapImage> MakeFallbackStaticBitmapImage(
+       V8GPUCanvasAlphaMode::Enum alpha_mode);
+ 
++#if defined(UEFI_RUNTIME)
++  scoped_refptr<StaticBitmapImage> firmware_front_buffer_;
++  scoped_refptr<cc::Layer> firmware_layer_;
++  wgpu::Texture firmware_front_texture_;
++#endif
+   Member<GPUDevice> device_;
+ 
+   std::unique_ptr<CanvasNon2DResourceProvider> resource_provider_;
+diff --git a/third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.cc b/third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.cc
+index ef171d5dfd..9ee4b7adf1 100644
+--- a/third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.cc
++++ b/third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.cc
+@@ -29,6 +29,9 @@
+  */
+ 
+ #include "third_party/blink/renderer/platform/graphics/gpu/drawing_buffer.h"
++#if defined(UEFI_RUNTIME)
++#include <cstdio>
++#endif
+ 
+ #include <algorithm>
+ #include <cstddef>
+@@ -2022,6 +2025,10 @@ void DrawingBuffer::ReadBackFramebuffer(
+ 
+   DCHECK_EQ(expected_data_size.ValueOrDie(), pixels.size());
+ 
++#if defined(UEFI_RUNTIME)
++  std::printf("GPU-CANVAS: readback api=webgl bytes=%llu\n",
++              static_cast<unsigned long long>(pixels.size()));
++#endif
+   gl_->ReadPixels(0, 0, Size().width(), Size().height(), GL_RGBA, data_type,
+                   pixels.data());
+ 

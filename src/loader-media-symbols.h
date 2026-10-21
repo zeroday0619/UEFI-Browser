@@ -1,0 +1,22 @@
+/* A second supervisor instance must not share trap or escape state with Blink. */
+#define browser_setjmp media_setjmp
+#define browser_longjmp media_longjmp
+#define browser_call_on_stack media_call_on_stack
+#define renderer_trap_breakpoint media_trap_breakpoint
+#define renderer_trap_nmi media_trap_nmi
+#define renderer_trap_invalid media_trap_invalid
+#define renderer_trap_page media_trap_page
+#define renderer_trap_general media_trap_general
+#define renderer_trap_divide media_trap_divide
+#define renderer_escape_context media_escape_context
+#define renderer_fault media_fault
+#define renderer_escape_stack media_escape_stack
+#define renderer_supervisor_cs media_supervisor_cs
+#define renderer_supervisor_ss media_supervisor_ss
+#define renderer_trap_armed media_trap_armed
+#define renderer_nmi_seen media_nmi_seen
+#define renderer_system_dispatch media_system_dispatch
+#define renderer_enter_user media_enter_user
+#define renderer_system_interrupt media_system_interrupt
+#define renderer_exception_table media_exception_table
+#define renderer_escape media_escape

@@ -18,9 +18,14 @@ static volatile uint64_t sentinel=0x6b8c1eab00274d91ULL;
   if (!(test)) { printf("FAIL: broker probe line=%u\n",__LINE__); return 1; } \
   ++checks; \
 } while (0)
+#include "media_opus_probe.h"
+#include "media_queue_probe.h"
 int run_renderer_broker_probe(void) {
   if (!renderer_runtime_is_child()) return 0;
   unsigned checks=0;
+  unsigned media_checks=0;
+  if (run_media_opus_probe(&media_checks) || run_media_queue_probe()) return 1;
+  const int sandboxed = renderer_runtime_sandboxed();
   uint64_t pool=0, pages=0;
   VERIFY(!renderer_runtime_request(ALLOCATE_POOL,2,256,(uintptr_t)&pool,0,0) && pool);
   VERIFY(!renderer_runtime_request(ALLOCATE_PAGES,0,2,1,(uintptr_t)&pages,0) && pages);
@@ -40,10 +45,16 @@ int run_renderer_broker_probe(void) {
   VERIFY((int64_t)renderer_runtime_request(PROTECT,(uintptr_t)&sentinel,4096,PROT_READ|PROT_WRITE,0,0)==-1);
   VERIFY((int64_t)renderer_runtime_request(PROTECT,pool,4096,PROT_READ,0,0)==-1);
   VERIFY((int64_t)renderer_runtime_request(PROTECT,pages,4096,PROT_READ|PROT_WRITE|PROT_EXEC,0,0)==-1);
-  VERIFY(renderer_runtime_request(PROTECT,pages,4096,PROT_NONE,0,0)==0);
+  VERIFY((sandboxed ? mprotect((void*)(uintptr_t)pages,4096,PROT_READ) :
+      (int64_t)renderer_runtime_request(PROTECT,pages,4096,PROT_READ,0,0))==0);
+  VERIFY(renderer_runtime_request(ENTROPY,pages,4,0,0,0)==0);
+  VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,AUDIO_STREAM_WRITE,0,0,pages,4)==-EBADF);
+  VERIFY((sandboxed ? mprotect((void*)(uintptr_t)pages,4096,PROT_NONE) :
+      (int64_t)renderer_runtime_request(PROTECT,pages,4096,PROT_NONE,0,0))==0);
   VERIFY(renderer_runtime_request(ENTROPY,pages,1,0,0,0)==0);
   VERIFY(renderer_runtime_request(FREE_PAGES,pages,1,0,0,0)==ERROR(15));
-  VERIFY(renderer_runtime_request(PROTECT,pages,4096,PROT_READ|PROT_WRITE,0,0)==0);
+  VERIFY((sandboxed ? mprotect((void*)(uintptr_t)pages,4096,PROT_READ|PROT_WRITE) :
+      (int64_t)renderer_runtime_request(PROTECT,pages,4096,PROT_READ|PROT_WRITE,0,0))==0);
   VERIFY(renderer_runtime_request(MEMORY_MAP,0,0,0,0,0)==ERROR(15));
   VERIFY(renderer_runtime_request(GET_TIME,1,0,0,0,0)==ERROR(15));
   VERIFY((int64_t)renderer_runtime_request(LOG,1,8,0,0,0)==-EFAULT);
@@ -56,6 +67,9 @@ int run_renderer_broker_probe(void) {
   VERIFY((int64_t)renderer_runtime_request(RENDERER_DNS_REQUEST,0,0,1,0,0)==-EFAULT);
   VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,AUDIO_UPLOAD,1,0,1,4)==-EFAULT);
   VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,(1ULL<<32)|AUDIO_UPLOAD,1,0,1,4)==-EINVAL);
+  VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,AUDIO_STREAM_WRITE,1,0,1,4)==-EFAULT);
+  VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,(1ULL<<32)|AUDIO_STREAM_WRITE,1,0,1,4)==-EINVAL);
+  VERIFY((int64_t)renderer_runtime_request(RENDERER_AUDIO_REQUEST,AUDIO_STREAM_WRITE,1,0,1,16388)==-EINVAL);
   Character name[]={'B','o','o','t','O','r','d','e','r',0};
   Guid identifier={0x8be4df61,0x93ca,0x11d2,{0xaa,0x0d,0,0xe0,0x98,0x03,0x2b,0x8c}};
   VERIFY(renderer_runtime_request(SET_VARIABLE,(uintptr_t)name,(uintptr_t)&identifier,7,0,0)==ERROR(15));
@@ -104,7 +118,9 @@ int run_renderer_broker_probe(void) {
   VERIFY(!renderer_runtime_request(FREE_PAGES,pages,1,0,0,0));
   VERIFY(renderer_runtime_request(FREE_PAGES,pages,1,0,0,0)==ERROR(2));
   VERIFY(sentinel==0x6b8c1eab00274d91ULL);
-  printf("BROKER PROBE: passed checks=%u; renderer CPL0 isolation remains incomplete\n",checks);
+  unsigned short code_segment;
+  __asm__ volatile("mov %%cs,%0" : "=r"(code_segment));
+  printf("BROKER PROBE: passed checks=%u; renderer cpl=%u\n",checks,code_segment & 3);
   fflush(stdout);
   return 0;
 }

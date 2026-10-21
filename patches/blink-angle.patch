@@ -2,6 +2,18 @@ diff --git a/src/libANGLE/Display.cpp b/src/libANGLE/Display.cpp
 index 64071b7..6344a28 100644
 --- a/src/libANGLE/Display.cpp
 +++ b/src/libANGLE/Display.cpp
+@@ -541,7 +541,10 @@ EGLAttrib GetPlatformTypeFromEnvironment()
+ {
+-#if defined(ANGLE_USE_X11) || defined(ANGLE_USE_WAYLAND)
++#if defined(UEFI_RUNTIME)
++    // Firmware presents readback images through GOP without a Vulkan window system.
++    return EGL_PLATFORM_SURFACELESS_MESA;
++#elif defined(ANGLE_USE_X11) || defined(ANGLE_USE_WAYLAND)
+     // Reached when the caller supplied no native platform type, as EGL 1.4
+     // eglGetDisplay() cannot. Delegate to the shared policy so this implicit
+     // choice agrees with the util window layer (common/linux/window_system.h).
+ #    if defined(ANGLE_USE_X11)
+     constexpr bool kX11Compiled = true;
 @@ -1665,8 +1665,13 @@ Error Display::initialize()
  
      mState.singleThreadPool = angle::WorkerThreadPool::Create(angle::ThreadPoolType::Synchronous, 0,
@@ -25,7 +37,7 @@ index 03d8b5c..a8208a4 100644
  }  // anonymous namespace
  
 +#if defined(UEFI_RUNTIME)
-+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_swiftshader_vkGetInstanceProcAddr(VkInstance, const char*);
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_browser_vkGetInstanceProcAddr(VkInstance, const char*);
 +#endif
 +
  namespace rx
@@ -37,9 +49,78 @@ index 03d8b5c..a8208a4 100644
      bool canLoadDebugUtils = true;
 -#if defined(ANGLE_SHARED_LIBVULKAN)
 +#if defined(UEFI_RUNTIME)
-+    // Firmware has one statically linked Vulkan implementation.
-+    VK_CALL(volkInitializeCustom, uefi_swiftshader_vkGetInstanceProcAddr);
++    // Firmware selects its statically linked Vulkan implementation.
++    VK_CALL(volkInitializeCustom, uefi_browser_vkGetInstanceProcAddr);
 +#elif defined(ANGLE_SHARED_LIBVULKAN)
      {
          ANGLE_SCOPED_DISABLE_MSAN();
          mLibVulkanLibrary = angle::vk::OpenLibVulkan();
+diff --git a/src/libANGLE/Context.cpp b/src/libANGLE/Context.cpp
+index 5c0f686..466d873 100644
+--- a/src/libANGLE/Context.cpp
++++ b/src/libANGLE/Context.cpp
+@@ -11113,3 +11113,5 @@ void PrivateStateCache::updateVertexAttribTypesValidation(const Context *context
+     }
+ }
+ }  // namespace gl
++
++extern "C" bool firmware_angle_prepare_context(gl::Context* context) { return context->prepareForCopyImage()==angle::Result::Continue; }
+diff --git a/src/libANGLE/renderer/vulkan/FramebufferVk.cpp b/src/libANGLE/renderer/vulkan/FramebufferVk.cpp
+index acd396e..3e504c3 100644
+--- a/src/libANGLE/renderer/vulkan/FramebufferVk.cpp
++++ b/src/libANGLE/renderer/vulkan/FramebufferVk.cpp
+@@ -4348,3 +4348,21 @@ const vk::ImageHelper *FramebufferVk::getImageWithTileMemory() const
+     return nullptr;
+ }
+ }  // namespace rx
++
++#if defined(UEFI_RUNTIME)
++extern "C" uint64_t firmware_gpu_copy_canvas(VkInstance,VkPhysicalDevice,VkDevice,VkQueue,uint32_t,VkImage,VkImageLayout,uint32_t,uint32_t,VkFormat,uint32_t);
++uint64_t rx::FramebufferVk::firmwareExportCanvas(ContextVk *context,uint32_t alpha) {
++    if (flushDeferredClears(context)!=angle::Result::Continue ||
++        context->finishImpl(rx::QueueSubmitReason::GLFinish)!=angle::Result::Continue) return 0;
++    auto* target=getColorReadRenderTarget();
++    if (!target) return 0;
++    auto& image=target->getImageForCopy();
++    auto* renderer=context->getRenderer();
++    const auto extent=image.getExtents();
++    if (image.getVkImageCreateInfo().samples!=VK_SAMPLE_COUNT_1_BIT) return 0;
++    uint32_t flags=alpha | (context->isViewportFlipEnabledForReadFBO() ? 0 : 2);
++    return firmware_gpu_copy_canvas(renderer->getInstance(),renderer->getPhysicalDevice(),renderer->getDevice(),
++        renderer->getQueue(context->getPriority()),renderer->getQueueFamilyIndex(),image.getImage().getHandle(),
++        image.getCurrentLayout(renderer),extent.width,extent.height,image.getActualVkFormat(renderer),flags);
++}
++#endif
+diff --git a/src/libANGLE/renderer/vulkan/FramebufferVk.h b/src/libANGLE/renderer/vulkan/FramebufferVk.h
+index 011efed..04f1789 100644
+--- a/src/libANGLE/renderer/vulkan/FramebufferVk.h
++++ b/src/libANGLE/renderer/vulkan/FramebufferVk.h
+@@ -101,6 +101,7 @@ class FramebufferVk : public FramebufferImpl
+                                  RenderTargetVk *renderTarget,
+                                  void *pixels);
+ 
++    uint64_t firmwareExportCanvas(ContextVk *context, uint32_t alpha);
+     gl::Extents getReadImageExtents() const;
+     // Return the framebuffer's non-rotated render area.  This is a gl::Rectangle that is based on
+     // the dimensions of the framebuffer, IS NOT rotated, and IS NOT y-flipped
+diff --git a/src/libGLESv2/global_state.cpp b/src/libGLESv2/global_state.cpp
+index a6644a4..f900662 100644
+--- a/src/libGLESv2/global_state.cpp
++++ b/src/libGLESv2/global_state.cpp
+@@ -314,3 +314,16 @@ extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID)
+     return TRUE;
+ }
+ #endif  // defined(ANGLE_PLATFORM_WINDOWS) && !defined(ANGLE_STATIC)
++
++#if defined(UEFI_RUNTIME)
++#include "libANGLE/renderer/vulkan/ContextVk.h"
++#include "libANGLE/renderer/vulkan/FramebufferVk.h"
++#include "libANGLE/Framebuffer.h"
++extern "C" bool firmware_angle_prepare_context(gl::Context*);
++extern "C" uint64_t firmware_angle_export_canvas(uint32_t alpha) {
++    auto* context=gl::GetValidGlobalContext();
++    if (!context || !firmware_angle_prepare_context(context)) return 0;
++    auto* framebuffer=context->getState().getReadFramebuffer();
++    return framebuffer ? rx::vk::GetImpl(framebuffer)->firmwareExportCanvas(rx::vk::GetImpl(context),alpha) : 0;
++}
++#endif

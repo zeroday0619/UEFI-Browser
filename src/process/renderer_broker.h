@@ -122,14 +122,14 @@ static long broker_dns(unsigned operation, long handle, uint64_t address) {
   return result;
 }
 static long broker_audio(const uint64_t arguments[5]) {
-  if (arguments[0]<AUDIO_CREATE || arguments[0]>AUDIO_CLOSE) return -EINVAL;
-  if (arguments[0]!=AUDIO_UPLOAD)
+  if (arguments[0]<AUDIO_CREATE || arguments[0]>AUDIO_STREAM_RESET) return -EINVAL;
+  if (arguments[0]!=AUDIO_UPLOAD && arguments[0]!=AUDIO_STREAM_WRITE)
     return firmware_audio_service(1,arguments[0],arguments[1],arguments[2],arguments[3],arguments[4]);
   unsigned char buffer[16384];
   if (arguments[4]>sizeof(buffer)) return -EINVAL;
   if (!renderer_runtime_buffer(arguments[3],arguments[4],0)) return -EFAULT;
   if (arguments[4]) memcpy(buffer,(const void*)arguments[3],arguments[4]);
-  return firmware_audio_service(1,AUDIO_UPLOAD,arguments[1],arguments[2],(uintptr_t)buffer,arguments[4]);
+  return firmware_audio_service(1,arguments[0],arguments[1],arguments[2],(uintptr_t)buffer,arguments[4]);
 }
 static Status broker_variable(unsigned operation, const uint64_t arguments[5]) {
   Character name[64];

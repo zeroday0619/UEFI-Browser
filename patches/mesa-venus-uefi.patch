@@ -1,0 +1,192 @@
+--- a/meson.options
++++ b/meson.options
+@@ -915,3 +915,5 @@
+   value : false,
+   description : 'Build panfrost Rust components.'
+ )
++
++option('uefi', type : 'boolean', value : false, description : 'Build the static Venus firmware runtime without DRM or WSI')
+--- a/meson.build
++++ b/meson.build
+@@ -29,6 +29,10 @@
+ else
+   libname_prefix = 'lib'
+   libname_suffix = 'so'
++endif
++
++if get_option('uefi')
++  add_project_arguments('-DVN_USE_UEFI', language : ['c', 'cpp'])
+ endif
+ 
+ cc = meson.get_compiler('c')
+@@ -159,7 +163,7 @@
+ 
+ with_any_opengl = with_opengl or with_gles1 or with_gles2
+ 
+-system_has_kms_drm = ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm'].contains(host_machine.system())
++system_has_kms_drm = not get_option('uefi') and ['openbsd', 'netbsd', 'freebsd', 'gnu/kfreebsd', 'dragonfly', 'linux', 'sunos', 'android', 'managarm'].contains(host_machine.system())
+ 
+ gallium_drivers = get_option('gallium-drivers')
+ if gallium_drivers.contains('auto')
+@@ -1676,8 +1680,8 @@
+ 
+ with_c11_threads = false
+ if cc.has_function('thrd_create', prefix: '#include <threads.h>')
+-  if with_platform_android
+-    # Current only Android's c11 <threads.h> are verified
++  if with_platform_android or get_option('uefi')
++    # Firmware code must share the native musl C11 ABI with the driver.
+     pre_args += '-DHAVE_THRD_CREATE'
+     with_c11_threads = true
+   endif
+--- a/src/virtio/vulkan/meson.build
++++ b/src/virtio/vulkan/meson.build
+@@ -122,7 +122,9 @@
+ 
+ vn_libs = []
+ 
+-if not with_platform_windows
++if get_option('uefi')
++  libvn_files += files('vn_renderer_uefi.c')
++elif not with_platform_windows
+   libvn_files += files('vn_renderer_vtest.c')
+ endif
+ 
+@@ -154,9 +156,10 @@
+   vn_deps += [dep_android, idep_u_gralloc]
+ endif
+ 
+-libvulkan_virtio = shared_library(
++libvulkan_virtio = build_target(
+   'vulkan_virtio',
+   [libvn_files, vn_entrypoints, vn_drirc, sha1_h],
++  target_type : get_option('uefi') ? 'static_library' : 'shared_library',
+   include_directories : vn_incs,
+   link_with : vn_libs,
+   dependencies : vn_deps,
+--- a/src/virtio/vulkan/vn_renderer.h
++++ b/src/virtio/vulkan/vn_renderer.h
+@@ -225,12 +225,20 @@
+                          const VkAllocationCallbacks *alloc,
+                          struct vn_renderer **renderer);
+ 
++#ifdef VN_USE_UEFI
++VkResult vn_renderer_create_uefi(struct vn_instance *instance,
++                                const VkAllocationCallbacks *alloc,
++                                struct vn_renderer **renderer);
++#endif
++
+ static inline VkResult
+ vn_renderer_create(struct vn_instance *instance,
+                    const VkAllocationCallbacks *alloc,
+                    struct vn_renderer **renderer)
+ {
+-#ifdef HAVE_LIBDRM
++#ifdef VN_USE_UEFI
++   return vn_renderer_create_uefi(instance, alloc, renderer);
++#elif defined(HAVE_LIBDRM)
+    VkResult result;
+    if (VN_DEBUG(VTEST)) {
+       result = vn_renderer_create_vtest(instance, alloc, renderer);
+--- a/include/drm-uapi/drm.h
++++ b/include/drm-uapi/drm.h
+@@ -35,7 +35,23 @@
+ #ifndef _DRM_H_
+ #define _DRM_H_
+ 
+-#if   defined(__linux__)
++#if defined(VN_USE_UEFI)
++
++#include <stdint.h>
++#include <stddef.h>
++#include <sys/ioctl.h>
++typedef int8_t __s8;
++typedef uint8_t __u8;
++typedef int16_t __s16;
++typedef uint16_t __u16;
++typedef int32_t __s32;
++typedef uint32_t __u32;
++typedef long long __s64;
++typedef unsigned long long __u64;
++typedef size_t __kernel_size_t;
++typedef unsigned int drm_handle_t;
++
++#elif defined(__linux__)
+ 
+ #include <linux/types.h>
+ #include <asm/ioctl.h>
+--- a/src/util/cnd_monotonic.c
++++ b/src/util/cnd_monotonic.c
+@@ -107,6 +107,15 @@
+ #endif
+ }
+ 
++#ifdef VN_USE_UEFI
++/* musl implements C11 mutexes through its pthread mutex layout. */
++_Static_assert(sizeof(mtx_t) == sizeof(pthread_mutex_t), "musl mutex size");
++_Static_assert(_Alignof(mtx_t) == _Alignof(pthread_mutex_t), "musl mutex alignment");
++#define native_mutex(value) ((pthread_mutex_t *)(value))
++#else
++#define native_mutex(value) (value)
++#endif
++
+ int
+ u_cnd_monotonic_timedwait(struct u_cnd_monotonic *cond, mtx_t *mtx,
+                           const struct timespec *abs_time)
+@@ -132,7 +141,7 @@
+    timespec_sub_saturate(&rel_time, abs_time, &now_time);
+    int rt = pthread_cond_timedwait_relative_np(&cond->cond, mtx, &rel_time);
+ #else
+-   int rt = pthread_cond_timedwait(&cond->cond, mtx, abs_time);
++   int rt = pthread_cond_timedwait(&cond->cond, native_mutex(mtx), abs_time);
+ #endif
+    if (rt == ETIMEDOUT)
+       return thrd_timedout;
+@@ -151,6 +160,6 @@
+                             (PCRITICAL_SECTION)mtx, INFINITE);
+    return thrd_success;
+ #else
+-   return (pthread_cond_wait(&cond->cond, mtx) == 0) ? thrd_success : thrd_error;
++   return (pthread_cond_wait(&cond->cond, native_mutex(mtx)) == 0) ? thrd_success : thrd_error;
+ #endif
+ }
+--- a/src/virtio/vulkan/vn_device_memory.c
++++ b/src/virtio/vulkan/vn_device_memory.c
+@@ -639,3 +639,37 @@
+ 
+    return VK_SUCCESS;
+ }
++
++#ifdef VN_USE_UEFI
++extern VkResult firmware_venus_import_bo(struct vn_renderer *, uint32_t, uint64_t, struct vn_renderer_bo **);
++VkResult firmware_venus_import_memory(VkDevice, const VkMemoryAllocateInfo *, uint32_t, VkDeviceMemory *);
++VkResult firmware_venus_import_memory(VkDevice device, const VkMemoryAllocateInfo *info,
++                                     uint32_t resource, VkDeviceMemory *output)
++{
++   struct vn_device *dev=vn_device_from_handle(device);
++   struct vn_device_memory *mem=vk_device_memory_create(&dev->base.vk,info,NULL,sizeof(*mem));
++   if (!mem) return VK_ERROR_OUT_OF_HOST_MEMORY;
++   vn_object_set_id(mem,vn_get_next_obj_id(),VK_OBJECT_TYPE_DEVICE_MEMORY);
++   VkResult result=firmware_venus_import_bo(dev->renderer,resource,info->allocationSize,&mem->base_bo);
++   if (result!=VK_SUCCESS) {
++      vk_device_memory_destroy(&dev->base.vk,NULL,&mem->base.vk);
++      return result;
++   }
++   vn_ring_roundtrip(dev->primary_ring);
++   VkImportMemoryResourceInfoMESA import_info={
++      .sType=VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA,
++      .pNext=info->pNext,.resourceId=resource,
++   };
++   VkMemoryAllocateInfo allocation=*info;
++   allocation.pNext=&import_info;
++   VkDeviceMemory handle=vn_device_memory_to_handle(mem);
++   result=vn_call_vkAllocateMemory(dev->primary_ring,device,&allocation,NULL,&handle);
++   if (result!=VK_SUCCESS) {
++      vn_renderer_bo_unref(dev->renderer,mem->base_bo);
++      vk_device_memory_destroy(&dev->base.vk,NULL,&mem->base.vk);
++      return result;
++   }
++   *output=handle;
++   return VK_SUCCESS;
++}
++#endif

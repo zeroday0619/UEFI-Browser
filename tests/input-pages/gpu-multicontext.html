@@ -1,0 +1,34 @@
+<!doctype html><meta charset="utf-8"><title>Concurrent GPU contexts</title>
+<style>body{background:#10212c;color:#d7ebfa;font:22px sans-serif;padding:24px}canvas{width:128px;height:128px}iframe{width:128px;height:128px;border:0}</style>
+<h1 id="status">Concurrent GPU contexts running</h1><div id="canvases"></div><div id="frameContainer"></div><pre id="results"></pre>
+<script>
+(async()=>{
+  let checks=0;
+  const check=(value,label)=>{if(!value)throw Error(label);checks++;results.textContent+=label+'\n';console.log('GPU MULTICONTEXT CHECK '+label);};
+  const makeFrame=async()=>{
+    const frame=document.createElement('iframe');frame.src='/gpu-context-child.html';
+    const loaded=new Promise((resolve,reject)=>{frame.onload=resolve;frame.onerror=reject;});
+    document.getElementById('frameContainer').append(frame);await loaded;await frame.contentWindow.ready;return frame;
+  };
+  const first=await makeFrame();const second=await makeFrame();
+  check(true,'two independent frame WebGPU devices');
+  const makeGL=(version)=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=32;canvases.append(canvas);const gl=canvas.getContext(version,{antialias:false,preserveDrawingBuffer:true});if(!gl)throw Error('Missing '+version);return gl;};
+  const contexts=[makeGL('webgl'),makeGL('webgl2'),makeGL('webgl2')];
+  const draw=(gl,color)=>{gl.clearColor(...color,1);gl.clear(gl.COLOR_BUFFER_BIT);const pixel=new Uint8Array(4);gl.readPixels(0,0,1,1,gl.RGBA,gl.UNSIGNED_BYTE,pixel);return color.every((value,index)=>pixel[index]===value*255)&&pixel[3]===255&&gl.getError()===gl.NO_ERROR;};
+  for(let cycle=0;cycle<8;cycle++){
+    await Promise.all([first.contentWindow.probe(cycle*8),second.contentWindow.probe(cycle*8+4)]);
+    check(contexts.every((gl,index)=>draw(gl,[[1,0,0],[0,1,0],[0,0,1]][index])),'concurrent compute and isolated readback '+cycle);
+  }
+  await first.contentWindow.dispose();first.remove();
+  await second.contentWindow.probe(123);check(draw(contexts[1],[0,1,0]),'WebGPU frame removal preserves siblings');
+  const extension=contexts[0].getExtension('WEBGL_lose_context');check(!!extension,'WebGL context loss extension');
+  await new Promise(resolve=>{contexts[0].canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();resolve();},{once:true});extension.loseContext();});
+  await second.contentWindow.probe(456);check(draw(contexts[1],[0,1,0])&&draw(contexts[2],[0,0,1]),'WebGL context loss preserves WebGPU and WebGL siblings');
+  const replacement=await makeFrame();await replacement.contentWindow.probe(789);
+  check(draw(contexts[1],[0,1,0]),'WebGPU recreation while ANGLE remains active');
+  await replacement.contentWindow.dispose();replacement.remove();
+  await second.contentWindow.probe(999);await second.contentWindow.dispose();second.remove();
+  check(draw(contexts[1],[0,1,0])&&draw(contexts[2],[0,0,1]),'last WebGPU removal preserves ANGLE');
+  document.getElementById('status').textContent='Concurrent GPU contexts passed';console.log('GPU MULTICONTEXT PASS checks='+checks);
+})().catch(error=>{document.getElementById('status').textContent='Concurrent GPU contexts failed';console.log('GPU MULTICONTEXT FAILURE '+error.stack);});
+</script>

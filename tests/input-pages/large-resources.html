@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>Large network resources</title>
+<h1>Large network resources</h1><pre id="results"></pre>
+<script>
+let checks = 0;
+function check(condition, name) {
+  if (!condition) throw Error(name);
+  ++checks;
+  document.querySelector('#results').textContent += name + '\n';
+  console.log('LARGE RESOURCE CHECK ' + name);
+}
+(async () => {
+  await new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = '/large-resource.js';
+    script.onload = resolve; script.onerror = reject;
+    document.head.append(script);
+  });
+  check(window.largeResourceLoaded === true, '11 MiB script executes');
+  const response = await fetch('/large-resource-chunked');
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  check(bytes.length === 11 * 1024 * 1024 &&
+      bytes.every((value, index) => value === (index & 255)), '11 MiB chunked body preserves every byte');
+  let rejected = false;
+  try { await fetch('/large-resource-excess'); } catch { rejected = true; }
+  check(rejected, 'Responses exceeding 32 MiB are rejected');
+  const small = await fetch('/cache-resource-a.txt');
+  check(small.ok && (await small.text()).length > 0, 'Small requests succeed after rejection');
+  console.log('LARGE RESOURCE PASS checks=' + checks);
+})().catch(error => console.error('LARGE RESOURCE FAILURE ' + error.stack));
+</script>

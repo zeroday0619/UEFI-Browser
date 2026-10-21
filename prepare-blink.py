@@ -15,9 +15,11 @@ root = project.parents[1] / 'work/chromium-build/chromium'
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--resolve-inputs', action='store_true',
                     help='Fetch missing tracked inputs and exact Git dependencies required by GN.')
+parser.add_argument('--mozc', action='store_true', help='Include the experimental Mozc firmware engine.')
 parser.add_argument('--firmware', action='store_true', help='Generate the musl firmware object build graph.')
 options = parser.parse_args()
 subprocess.run([str(project / 'fetch-blink.sh')], check=True)
+subprocess.run(['python3', str(project / 'prepare-libhangul.py')], check=True)
 if options.resolve_inputs:
     subprocess.run(['git', '-C', str(root), 'sparse-checkout', 'add', '--skip-checks',
                     'build_overrides', 'tools/rust', 'tools/clang'], check=True)
@@ -43,11 +45,23 @@ if options.firmware:
     subprocess.run(['python3', str(project / 'tools/ca_bundle.py'),
                     os.environ.get('UEFI_CA_BUNDLE', str(project / 'trust/mozilla-ca.pem')),
                     str(project / 'build/ca.esl')], check=True)
+if options.mozc:
+    protoc = root / 'out/uefi-blink-native/clang_x64/protoc'
+    if not protoc.is_file():
+        # Mozc messages must use Chromium's Protobuf ABI rather than the host Bazel version.
+        bootstrap = ['python3', str(project / 'prepare-blink.py'), '--firmware']
+        if options.resolve_inputs:
+            bootstrap.append('--resolve-inputs')
+        subprocess.run(bootstrap, check=True)
+        subprocess.run(['ninja', '-C', str(protoc.parent.parent), 'clang_x64/protoc'], check=True)
+    subprocess.run(['python3', str(project / 'prepare-mozc.py')], check=True)
 shutil.copyfile(project / 'config/blink-navigation.gn', target / 'BUILD.gn')
 shutil.copyfile(project / 'config/blink-gclient.gni', root / 'build/config/gclient_args.gni')
 build = root / ('out/uefi-blink-native' if options.firmware else 'out/uefi-blink')
 build.mkdir(parents=True, exist_ok=True)
 shutil.copyfile(project / 'config/blink-host.gn', build / 'args.gn')
+with (build / 'args.gn').open('a') as output:
+    output.write('\nuefi_enable_mozc = ' + ('true' if options.mozc else 'false') + '\n')
 if options.firmware:
     toolchain = root / 'build/toolchain/uefi'
     toolchain.mkdir(exist_ok=True)
@@ -74,17 +88,31 @@ for section in patch.read_text().split('diff --git ')[1:]:
 for content in pending:
     subprocess.run(['git', '-C', str(root), 'apply', '-'], input=content,
                    text=True, check=True)
+for section in (project / 'patches/blink-devtools.patch').read_text().split('diff --git ')[1:]:
+    content = 'diff --git ' + section
+    if subprocess.run(['git', '-C', str(root), 'apply', '--reverse', '--check', '-'],
+                      input=content, text=True, stdout=subprocess.DEVNULL,
+                      stderr=subprocess.DEVNULL).returncode:
+        subprocess.run(['git', '-C', str(root), 'apply', '--check', '-'], input=content, text=True, check=True)
+        subprocess.run(['git', '-C', str(root), 'apply', '-'], input=content, text=True, check=True)
+opus_patch = project / 'patches/blink-opus-service.patch'
+if subprocess.run(['git', '-C', str(root), 'apply', '--reverse', '--check', str(opus_patch)],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+    subprocess.run(['git', '-C', str(root), 'apply', '--check', str(opus_patch)], check=True)
+    subprocess.run(['git', '-C', str(root), 'apply', str(opus_patch)], check=True)
+
 # The host snapshot generator keeps its native address-space behavior.
 v8 = root / 'v8'
-v8_patch = project / 'patches/blink-v8.patch'
-if (v8 / 'BUILD.gn').exists():
-    if subprocess.run(['patch', '--batch', '--force', '--silent', '--dry-run', '--reverse',
-                       '-p1', '-i', str(v8_patch)], cwd=v8,
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
-        subprocess.run(['patch', '--batch', '--forward', '--dry-run', '-p1',
-                        '-i', str(v8_patch)], cwd=v8, check=True)
-        subprocess.run(['patch', '--batch', '--forward', '-p1',
-                        '-i', str(v8_patch)], cwd=v8, check=True)
+for name in ('blink-v8.patch', 'blink-v8-jit.patch', 'blink-v8-metadata.patch', 'blink-v8-inspector-diagnostics.patch'):
+    v8_patch = project / 'patches' / name
+    if (v8 / 'BUILD.gn').exists():
+        if subprocess.run(['patch', '--batch', '--force', '--silent', '--dry-run', '--reverse',
+                           '-p1', '-i', str(v8_patch)], cwd=v8,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+            subprocess.run(['patch', '--batch', '--forward', '--dry-run', '-p1',
+                            '-i', str(v8_patch)], cwd=v8, check=True)
+            subprocess.run(['patch', '--batch', '--forward', '-p1',
+                            '-i', str(v8_patch)], cwd=v8, check=True)
 modules = configparser.ConfigParser()
 modules.read(root / '.gitmodules')
 urls = {modules[section]['path']: modules[section]['url'] for section in modules.sections()}

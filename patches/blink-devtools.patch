@@ -1,0 +1,121 @@
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+@@ -5402,7 +5402,10 @@
+ 
+ const cc::LayerTreeDebugState* WebFrameWidgetImpl::GetLayerTreeDebugState() {
+   if (!View()->does_composite()) {
+-    return nullptr;
++    // Inspector retains debug state even when no compositor host exists.
++    if (!non_composited_debug_state_)
++      non_composited_debug_state_ = std::make_unique<cc::LayerTreeDebugState>();
++    return non_composited_debug_state_.get();
+   }
+   return &widget_base_->LayerTreeHost()->GetDebugState();
+ }
+@@ -5410,6 +5413,8 @@
+ void WebFrameWidgetImpl::SetLayerTreeDebugState(
+     const cc::LayerTreeDebugState& state) {
+   if (!View()->does_composite()) {
++    non_composited_debug_state_ =
++        std::make_unique<cc::LayerTreeDebugState>(state);
+     return;
+   }
+   widget_base_->LayerTreeHost()->SetDebugState(state);
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+@@ -1345,6 +1345,7 @@
+   raw_ptr<WebNonCompositedWidgetClient,
+           UnprotectedInRelease | DanglingUntriaged>
+       non_composited_client_ = nullptr;
++  std::unique_ptr<cc::LayerTreeDebugState> non_composited_debug_state_;
+ 
+   // This struct contains data that is only valid for child local root widgets.
+   // You should use `child_data()` to access it.
+diff --git a/third_party/blink/renderer/core/css/css_style_declaration.cc b/third_party/blink/renderer/core/css/css_style_declaration.cc
+--- a/third_party/blink/renderer/core/css/css_style_declaration.cc
++++ b/third_party/blink/renderer/core/css/css_style_declaration.cc
+@@ -75,7 +75,10 @@
+   unsigned i = 0;
+   bool has_seen_dash = false;
+ 
+-  if (HasWebkitPrefix(property_name)) {
++  // Generated EPUB aliases use camel-case names without their leading dash.
++  // Query and enumeration must resolve the same exposed CSS attributes.
++  if (HasWebkitPrefix(property_name) ||
++      property_name.starts_with("epub")) {
+     builder.Append('-');
+   } else if (IsAsciiUpper(property_name[0])) {
+     return CSSPropertyID::kInvalid;
+diff --git a/third_party/blink/renderer/core/inspector/devtools_session.cc b/third_party/blink/renderer/core/inspector/devtools_session.cc
+index ce4da6905a..a482d171d4 100644
+--- a/third_party/blink/renderer/core/inspector/devtools_session.cc
++++ b/third_party/blink/renderer/core/inspector/devtools_session.cc
+@@ -8,6 +8,15 @@
+ #include <utility>
+ #include <vector>
+ 
++#if defined(UEFI_RUNTIME)
++#include <algorithm>
++#include <cstdint>
++#include <cstdio>
++#include "base/time/time.h"
++extern "C" const int firmware_task_diagnostics;
++extern "C" void firmware_jit_diagnostics(uint64_t*, uint64_t*);
++#endif
++
+ #include "base/compiler_specific.h"
+ #include "base/notimplemented.h"
+ #include "base/notreached.h"
+@@ -331,7 +340,18 @@ void DevToolsSession::DispatchProtocolCommandImpl(
+   if (IsDetached()) {
+     return;
+   }
++#if defined(UEFI_RUNTIME)
++  uint64_t jit_calls_before = 0, jit_time_before = 0;
++  if (firmware_task_diagnostics)
++    firmware_jit_diagnostics(&jit_calls_before, &jit_time_before);
++  const auto diagnostic_start = firmware_task_diagnostics
++      ? base::TimeTicks::Now() : base::TimeTicks();
++#endif
+   agent_->client_->DebuggerTaskStarted();
++#if defined(UEFI_RUNTIME)
++  const auto diagnostic_dispatch = firmware_task_diagnostics
++      ? base::TimeTicks::Now() : base::TimeTicks();
++#endif
+   if (v8_inspector::V8InspectorSession::canDispatchMethod(
+           ToV8InspectorStringView(method))) {
+     // Binary protocol messages are passed using 8-bit StringView.
+@@ -347,7 +367,31 @@ void DevToolsSession::DispatchProtocolCommandImpl(
+     DCHECK(dispatchable.ok());
+     inspector_backend_dispatcher_->Dispatch(dispatchable);
+   }
++#if defined(UEFI_RUNTIME)
++  const auto diagnostic_finish = firmware_task_diagnostics
++      ? base::TimeTicks::Now() : base::TimeTicks();
++#endif
+   agent_->client_->DebuggerTaskFinished();
++#if defined(UEFI_RUNTIME)
++  if (firmware_task_diagnostics) {
++    const auto ended = base::TimeTicks::Now();
++    if (ended - diagnostic_start >= base::Milliseconds(50)) {
++      // Method names identify expensive handlers without logging inspected data.
++      uint64_t jit_calls_after = 0, jit_time_after = 0;
++      firmware_jit_diagnostics(&jit_calls_after, &jit_time_after);
++      StringUtf8Adaptor name(method);
++      std::printf("PERF: inspector_command_us=%lld enter_us=%lld dispatch_us=%lld leave_us=%lld jit_calls=%llu jit_us=%llu call=%d bytes=%zu method=%.*s\n",
++          static_cast<long long>((ended-diagnostic_start).InMicroseconds()),
++          static_cast<long long>((diagnostic_dispatch-diagnostic_start).InMicroseconds()),
++          static_cast<long long>((diagnostic_finish-diagnostic_dispatch).InMicroseconds()),
++          static_cast<long long>((ended-diagnostic_finish).InMicroseconds()),
++          static_cast<unsigned long long>(jit_calls_after-jit_calls_before),
++          static_cast<unsigned long long>((jit_time_after-jit_time_before)/1000),
++          call_id, data.size(), static_cast<int>(std::min(name.size(), size_t{256})),
++          name.data());
++    }
++  }
++#endif
+ }
+ 
+ void DevToolsSession::DidStartProvisionalLoad(LocalFrame* frame) {

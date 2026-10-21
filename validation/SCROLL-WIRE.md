@@ -10,17 +10,33 @@ The BSP reads the length once, checks its capacity and heap headroom, and copies
 
 The renderer rasterizes at most 512×256 pixels at once. It reuses the original captured image and typeface references within its own address space. Re-deserializing typefaces on every publication created duplicate glyph-cache entries and exhausted the 128 MiB C heap during development; retaining the original references fixes that growth. These references are excluded from the wire format.
 
-Chromium's existing zlib compresses each tile. The BSP validates every compressed stream with exact input consumption and output length. It retains compressed bytes and expands only visible tiles into the existing 32 MiB / 1,024-entry raster cache. Eviction of visible pixels does not discard recorded offscreen content. Hidden tabs release expanded raster tiles. Encoding releases the acknowledged temporary buffer before allocating its replacement. Tile-cache growth evicts existing tiles when tracked heap headroom is low. Source capture and encoding still run on the renderer and are not preemptible.
+Chromium's existing zlib compresses each tile. The BSP validates every compressed stream with exact input consumption and output length. It retains compressed bytes and expands only visible tiles into the existing 32 MiB / 1,024-entry raster cache. Eviction of visible pixels does not discard recorded offscreen content. Hidden tabs release expanded raster tiles. Encoding releases the acknowledged temporary buffer before allocating its replacement. Tile-cache growth evicts existing tiles when tracked heap headroom is low. Source capture and encoding run on the renderer. Ordinary picture serialization yields between records. The current source also encodes wire pixels in cooperative tile tasks before viewport publication; see `SCROLL-WIRE-SLICES.md`. Individual Skia/zlib calls, layout and paint remain synchronous. See `SCROLL-ENCODING.md` and `SHARED-PAINT.md`.
 
-Boundary wheel input is consumed even when no ancestor can move. Previously, those wheel events entered Blink's deferred relative-input queue and could run after newer absolute scroll commands, changing the final offset after JavaScript resumed. The scroll-state reconciliation regression covers this ordering.
+Boundary wheel input is consumed even when no ancestor can move. Previously, those wheel events entered Blink's deferred relative-input queue and could run after newer absolute scroll commands, changing the final offset after JavaScript resumed. The scroll-state reconciliation regression covers boundary consumption. A later affine fixture exposed overtaking of an earlier blocking wheel event by a later absolute scroll update. The current source queues pointer, keyboard, scroll and scrollbar-state operations together; see `AFFINE-SCROLL.md`.
 
 The iframe regression exposed a separate null input-manager dereference in `WebFrameWidgetImpl::SetMouseCapture`. The fault stack passed through `EventHandler::CaptureMouseEventsToWidget`, `WidgetInputHandlerManager::GetWidgetInputHandlerHost` and `pthread_mutex_trylock`. The non-composited embedder now guards mouse capture, mouse-lock and selection-autoscroll host notifications when the manager is absent. Local selection-autoscroll cleanup still runs. This fixes iframe pointer delivery; it does not add a pointer-lock host implementation.
 
-## Version 2 format and limits
+## Version 4 source format and limits
 
 Integers and IEEE-754 floats use explicit little-endian 32-bit words. Element IDs use two words. Booleans accept only 0 or 1. There is no native structure layout, padding, pointer, vtable or function address in the message.
 
-The header contains magic `0x5343524c`, version `2`, and a reflow-scene count. The base scene is followed by flat reflow scenes. Each scene contains wheel flags and counted transform, clip, effect, wheel-region, scrollbar, gutter, query and picture records. Each picture then contains its appearance count and raster references. A zero raster reference introduces bounds and compressed tiles; a nonzero reference selects a previously decoded raster. Tile coordinates and dimensions derive from the validated bounds and fixed tile grid. A tile contains a byte length followed by one zlib stream. Trailing bytes are rejected.
+The header contains magic `0x5343524c`, version `4`, and a reflow-scene count. The base scene is followed by flat reflow scenes. Each scene contains wheel flags and counted transform, clip, effect, wheel-region, scrollbar, gutter, query and picture records. Each picture then contains its appearance count and raster references. A zero raster reference introduces bounds and compressed tiles; a nonzero reference selects a previously decoded raster. Tile coordinates and dimensions derive from the validated bounds and fixed tile grid. A tile contains a byte length followed by one zlib stream. Trailing bytes are rejected.
+
+Version 3 added `scale_x`, `skew_x`, `skew_y` and `scale_y` after the transform's
+translation fields. The matrix includes the CSS transform origin. Version 4 adds
+effect-local transforms and counted value records for supported CSS filters.
+Both sides must use version 4; earlier messages are rejected by this decoder.
+The default `build/blink` image remains on its previously tested source until
+explicitly rebuilt or replaced. The affine candidate and evidence are described
+in `AFFINE-SCROLL.md`. The filter candidate is described in `SCROLL-FILTERS.md`.
+
+Each affine coefficient and each composed ancestor matrix must be finite and
+bounded by 1,000,000 in absolute value. The compositor also checks the matrix and
+its inverse after applying dynamic scroll/sticky offsets. Noninvertible or
+out-of-budget transforms cannot participate in drawing or hit testing. Singular
+CSS transforms are valid messages and produce no painted or hit-testable area.
+A synthetic scrollbar-thumb transform must be a direct translation child of
+its scrollbar transform, without scroll or sticky metadata.
 
 | Limit or invariant | Enforcement |
 | --- | --- |
@@ -30,12 +46,14 @@ The header contains magic `0x5343524c`, version `2`, and a reflow-scene count. T
 | Unique rasters / tiles | At most 4,096 each across the message |
 | Metadata / appearance references | Shared budget of 32,768 records |
 | Scene graph | At most 2,048 pictures and 4,096 transforms/clips/regions per scene; 128 effects, scrollbars, queries, gutters or layouts per corresponding vector |
+| Filters | At most 16 operations per effect, 32 per ancestor chain and 1,024 per scene; explicit kind, finite scalar/color/matrix values, bounded blur and shadow offsets |
+| Filter layers | At most 512 pixels accumulated device-space outset and 64 MiB estimated concurrent layer storage, with tracked-heap headroom checked at installation |
 | Reflows | At most 32 flat variants; no recursive object graphs |
 | Raster extent | Width ≤ 8,192; height ≤ 32,768; nonnegative dimensions |
 | Coordinates | Finite floats and bounded integers within ±1,000,000; sorted rectangles; valid radii |
 | Parent chains | Parent precedes child; depth ≤ 64; every cross-vector index checked |
 | Scroll state | Ordered minimum/current/maximum, nonnegative viewport, validated appearance/layout counts and enum ranges |
-| Heap headroom | Checked before encoding growth, publication copy and decoding; the tracked C heap remains 128 MiB |
+| Heap headroom | Checked before encoding growth, publication copy and decoding against the current runtime heap budget |
 
 The initial capture has its own eligibility and resource limits. Scenes that exceed either capture or transport limits use renderer dispatch. The limits do not guarantee a worst-case UI latency against a renderer deliberately generating expensive valid messages.
 
@@ -52,7 +70,7 @@ The initial capture has its own eligibility and resource limits. Scenes that exc
 
 ## Verification method
 
-The startup self-test round-trips a raster and rejects every truncated prefix, invalid magic/version/count/boolean, NaN coordinates, cyclic or invalid parents, invalid raster references, oversized extents/lengths, corrupted compressed bytes and trailing data. The QEMU suite requires both this marker and a validated CPL3 wire publication.
+The startup self-test round-trips a raster and a blur effect. It rejects invalid filter kinds, counts, NaN/infinite values, negative/excessive blur, shadow offsets, tile modes, color alpha, matrix values and an overlong filter chain in an otherwise valid message. It also rejects every truncated prefix, invalid magic/version/count/boolean, NaN coordinates, cyclic or invalid parents, invalid raster references, oversized extents/lengths, corrupted compressed bytes and trailing data. The QEMU suite requires both this marker and a validated CPL3 wire publication.
 
 The hostile-producer test redirects a user-mode AP instruction to a test-only entry. The entry aligns its own user stack and publishes five invalid messages: an oversized length, truncation, bad version, NaN coordinate and damaged compressed data. It also replaces the shared native-pointer fields with forbidden addresses. The BSP must reject all five, accept a following valid cache, scroll while the producer remains in a busy loop, and recover interactive page input after NMI termination. This test does not execute the producer at CPL0.
 

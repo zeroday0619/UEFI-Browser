@@ -67,7 +67,7 @@ static void remote_response_destroy(RemoteResponse *entry) {
 }
 static int remote_response_export(RemoteResponse *entry) {
   ResourceResponse *source=&entry->response;
-  if (source->length>RESOURCE_BODY_LIMIT || source->header_count>1024) return 0;
+  if (source->length>RESOURCE_RESPONSE_LIMIT || source->header_count>1024) return 0;
   size_t size=source->header_count*sizeof(Header)+source->length+1;
   for (size_t index=0;index<source->header_count;++index) {
     size_t name=strnlen(source->headers[index].name,16384),value=strnlen(source->headers[index].value,65536);

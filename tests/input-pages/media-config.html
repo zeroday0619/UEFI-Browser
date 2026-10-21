@@ -1,0 +1,38 @@
+<!doctype html><meta charset="utf-8"><title>MSE Opus configuration transition</title>
+<style>body{font:20px sans-serif;padding:24px}button{position:absolute;left:380px;top:180px;padding:20px}pre{white-space:pre-wrap}</style>
+<h1>MSE Opus configuration transition</h1><audio id="audio"></audio>
+<button id="start" disabled>Play both configurations</button><pre id="results"></pre>
+<script>
+const audio=document.querySelector('#audio');
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function event(target,name,action){return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>{cleanup();reject(Error('Timeout '+name))},30000);
+  function cleanup(){clearTimeout(timeout);target.removeEventListener(name,done);audio.removeEventListener('error',failure)}
+  function done(){cleanup();resolve()}
+  function failure(){cleanup();reject(Error('Media error '+audio.error?.message))}
+  target.addEventListener(name,done);audio.addEventListener('error',failure);action();
+})}
+function failure(error){document.querySelector('#results').textContent=error.stack;console.error('MSE CONFIG FAILURE '+error.stack)}
+(async()=>{try{
+  const source=new MediaSource();
+  await event(source,'sourceopen',()=>audio.src=URL.createObjectURL(source));
+  const buffer=source.addSourceBuffer('audio/webm; codecs="opus"');
+  const mono=await(await fetch('/media-config-mono.webm')).arrayBuffer();
+  const stereo=await(await fetch('/media-config-stereo.webm')).arrayBuffer();
+  await event(buffer,'updateend',()=>buffer.appendBuffer(mono));
+  buffer.timestampOffset=8;
+  await event(buffer,'updateend',()=>buffer.appendBuffer(stereo));source.endOfStream();
+  for(let attempt=0;audio.readyState<2;++attempt){if(attempt>300)throw Error('Readiness timeout');await wait(50)}
+  document.querySelector('#start').disabled=false;console.log('MSE CONFIG READY');
+}catch(error){failure(error)}})();
+document.querySelector('#start').onclick=async()=>{try{
+  document.querySelector('#start').disabled=true;
+  const clock=performance.now();
+  await event(audio,'ended',()=>audio.play().catch(failure));
+  const result={position:audio.currentTime,duration:audio.duration,elapsed:(performance.now()-clock)/1000,error:audio.error?.code??null};
+  document.querySelector('#results').textContent=JSON.stringify(result,null,2);
+  if(result.error||result.position<15.9||result.duration>16.1||result.elapsed<15.5||result.elapsed>20)
+    throw Error('Configuration transition clock failed '+JSON.stringify(result));
+  console.log('MSE CONFIG PASS '+JSON.stringify(result));
+}catch(error){failure(error)}};
+</script>

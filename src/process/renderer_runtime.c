@@ -1,6 +1,8 @@
 #include "renderer_runtime.h"
 #include "renderer_sandbox.h"
 #include "firmware_audio.h"
+#include "firmware_media.h"
+#include "venus_broker.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -15,25 +17,26 @@ static SystemTable proxy;
 static BootServices boot;
 static struct { TableHeader header; void *function[14]; } runtime;
 static uint64_t requests, operations[256];
-typedef struct Allocation Allocation;
-struct Allocation { uint64_t address; size_t backing_pages, pages, size; Allocation *next; };
+#include "allocation_index.h"
 static Allocation *allocations;
-static size_t allocation_count, allocation_bytes;
+static size_t allocation_bytes;
 static size_t application_size;
 #define BROKER_MEMORY_LIMIT (2ULL * 1024 * 1024 * 1024)
-#define BROKER_ALLOCATION_LIMIT 16384
-static Allocation *owned_buffer(uint64_t address, size_t size) {
-  if (!address || size > UINT64_MAX-address) return NULL;
-  for (Allocation *entry=allocations; entry; entry=entry->next)
-    if (address>=entry->address && address-entry->address<=entry->size &&
-        size<=entry->size-(address-entry->address)) return entry;
-  return NULL;
+uint64_t renderer_runtime_memory_statistic(unsigned field) {
+  if (field>2) return UINT64_MAX;
+  if (renderer_runtime_is_child())
+    return renderer_runtime_request(RENDERER_MEMORY_STATISTICS,field,0,0,0,0);
+  return field==0 ? allocation_bytes : field==1 ? BROKER_MEMORY_LIMIT : allocation_count;
 }
 int renderer_runtime_buffer(uint64_t address, size_t size, unsigned writable) {
   if (!size) return 1;
-  if (renderer_runtime_is_child() || !address || size>UINT64_MAX-address ||
-      (!owned_buffer(address,size) &&
-       (!bootstrap || !bootstrap->buffer || !bootstrap->buffer(address,size,writable)))) return 0;
+  if (renderer_runtime_is_child() || !address || size>UINT64_MAX-address) return 0;
+  Allocation* owned = owned_buffer(address, size);
+  /* A page grant must not widen a tracked allocation's byte extent. */
+  if (!owned && allocation_overlaps(address,size)) return 0;
+  /* CPL3 permission changes must also constrain writes performed by the BSP. */
+  if ((!owned || renderer_runtime_sandboxed()) &&
+      (!bootstrap || !bootstrap->buffer || !bootstrap->buffer(address,size,writable))) return 0;
   /* Ownership alone does not make a PROT_NONE mapping safe for the BSP to access. */
   uint64_t root;
   __asm__ volatile("mov %%cr3,%0" : "=r"(root));
@@ -71,8 +74,9 @@ static void release_allocations(void) {
     } else ((Status(UEFI_API *)(void*))firmware->boot->function[6])((void*)entry->address);
     free(entry); ++reclaimed;
   }
-  printf("RENDERER: reclaimed broker allocations=%zu tracked=%zu after AP quiescence\n",reclaimed,allocation_count);
-  allocation_count=allocation_bytes=0;
+  printf("RENDERER: reclaimed broker allocations=%zu tracked=%zu bytes=%zu after AP quiescence\n",reclaimed,allocation_count,allocation_bytes);
+  clear_allocation_index();
+  allocation_bytes=0;
 }
 
 static volatile unsigned private_data_probe=17;
@@ -93,6 +97,9 @@ void renderer_runtime_initialize(RendererBootstrap *value) {
   }
 }
 int renderer_runtime_sandboxed(void) { return bootstrap && bootstrap->sandbox; }
+RendererBootstrap *renderer_runtime_media_bootstrap(void) {
+  return bootstrap && !bootstrap->renderer ? bootstrap->media : NULL;
+}
 int renderer_runtime_is_child(void) { return bootstrap && bootstrap->renderer; }
 int renderer_runtime_available(void) { return channel && !renderer_runtime_is_child(); }
 void *renderer_runtime_channel(void) { return renderer_runtime_is_child() && renderer_runtime_sandboxed() ? bootstrap->application : channel ? channel->application : NULL; }
@@ -141,6 +148,16 @@ void renderer_runtime_export_free(void *address,size_t size) {
   if (bootstrap->grant) bootstrap->grant((uintptr_t)address,(size+4095)&~4095ULL,0);
   renderer_runtime_shared_free(address,size);
 }
+int renderer_runtime_device_grant(uint64_t address, size_t size, unsigned cache_type) {
+  if (renderer_runtime_is_child() || !bootstrap || !bootstrap->sandbox || !bootstrap->grant)
+    return 0;
+  return bootstrap->grant(address, size, cache_type ? 11 | (cache_type << 4) : 0);
+}
+__attribute__((__weak__)) long firmware_venus_broker(const uint64_t arguments[5]) {
+  (void)arguments;
+  return -ENOSYS;
+}
+__attribute__((__weak__)) void firmware_venus_reset(void) {}
 Status renderer_runtime_start(void *application) {
   if (!bootstrap || !bootstrap->start || channel) return ERROR(3);
   channel=calloc(1,sizeof(*channel));
@@ -164,7 +181,9 @@ Status renderer_runtime_join(void) {
         (unsigned long long)result,(unsigned long long)bootstrap->fault[0],
         (unsigned long long)bootstrap->fault[1],(unsigned long long)bootstrap->fault[2],
         (unsigned long long)bootstrap->fault[3],(unsigned long long)bootstrap->fault[4]);
+    firmware_venus_reset();
     renderer_network_reset();
+    firmware_media_reset();
     firmware_audio_reset(1);
     release_allocations();
     printf("RENDERER: runtime service requests=%llu\n",(unsigned long long)requests);
@@ -274,6 +293,16 @@ __attribute__((__weak__)) uint64_t renderer_network_service(unsigned operation, 
 static uint64_t broker_dispatch(unsigned operation, const uint64_t arguments[5]) {
   uint64_t address=arguments[0];
   switch (operation) {
+    case RENDERER_MEMORY_STATISTICS:
+      if (arguments[0]>2 || arguments[1] || arguments[2] || arguments[3] || arguments[4])
+        return UINT64_MAX;
+      return renderer_runtime_memory_statistic((unsigned)arguments[0]);
+    case RENDERER_TABLE_RESERVE:
+      if (arguments[0] || arguments[1] || arguments[2] || arguments[3] || arguments[4] ||
+          !renderer_runtime_sandboxed() || !bootstrap->reserve_tables) return 0;
+      return bootstrap->reserve_tables(16);
+    case RENDERER_VENUS_REQUEST: return firmware_venus_broker(arguments);
+    case RENDERER_MEDIA_REQUEST: return firmware_media_broker(arguments);
     case RENDERER_AUDIO_REQUEST: return broker_audio(arguments);
     case RENDERER_DNS_REQUEST: return broker_dns(arguments[0],arguments[1],arguments[2]);
     case RENDERER_FILE_REQUEST: return broker_file(arguments[0],arguments[1]);
@@ -287,16 +316,25 @@ static uint64_t broker_dispatch(unsigned operation, const uint64_t arguments[5])
           (!pages && arguments[0]!=2)) return ERROR(2);
       if (allocation_count>=BROKER_ALLOCATION_LIMIT || count>BROKER_MEMORY_LIMIT/(pages ? 4096 : 1)) return ERROR(9);
       size_t size=count*(pages ? 4096 : 1);
-      if (allocation_bytes>BROKER_MEMORY_LIMIT-size) return ERROR(9);
+      size_t backing_pages=renderer_runtime_sandboxed() ? (size+4095)/4096 : (pages ? count : 0);
+      size_t charged_size=backing_pages ? backing_pages*4096 : size;
+      if (charged_size>BROKER_MEMORY_LIMIT || allocation_bytes>BROKER_MEMORY_LIMIT-charged_size) {
+        printf("BROKER: memory quota rejected request=%zu used=%zu count=%zu limit=%llu\n",
+               charged_size,allocation_bytes,allocation_count,(unsigned long long)BROKER_MEMORY_LIMIT);
+        return ERROR(9);
+      }
       Allocation *entry=calloc(1,sizeof(*entry));
       if (!entry) return ERROR(9);
       uint64_t allocated=0;
-      size_t backing_pages=renderer_runtime_sandboxed() ? (size+4095)/4096 : (pages ? count : 0);
       Status result=backing_pages ?
           ((Status(UEFI_API *)(uint32_t,uint32_t,size_t,uint64_t*))firmware->boot->function[2])(
               0,2,backing_pages,&allocated) :
           ((Status(UEFI_API *)(uint32_t,size_t,void**))firmware->boot->function[5])(2,size,(void**)&allocated);
-      if (result) { free(entry); return result; }
+      if (result) {
+        printf("BROKER: firmware allocation rejected request=%zu used=%zu count=%zu status=%llx\n",
+               charged_size,allocation_bytes,allocation_count,(unsigned long long)result);
+        free(entry); return result;
+      }
       if (renderer_runtime_sandboxed()) {
         memset((void*)allocated,0,backing_pages*4096);
         if (!bootstrap->grant || !bootstrap->grant(allocated,backing_pages*4096,3)) {
@@ -306,7 +344,7 @@ static uint64_t broker_dispatch(unsigned operation, const uint64_t arguments[5])
       }
       entry->backing_pages=backing_pages;
       entry->address=allocated; entry->pages=pages ? count : 0; entry->size=size;
-      entry->next=allocations; allocations=entry; ++allocation_count; allocation_bytes+=size;
+      entry->next=allocations; allocations=entry; index_allocation(entry); allocation_bytes+=charged_size;
       memcpy((void*)output,&allocated,sizeof(allocated));
       return 0;
     }
@@ -322,7 +360,11 @@ static uint64_t broker_dispatch(unsigned operation, const uint64_t arguments[5])
       Status result=entry->backing_pages ?
           ((Status(UEFI_API *)(uint64_t,size_t))firmware->boot->function[3])(address,entry->backing_pages) :
           ((Status(UEFI_API *)(void*))firmware->boot->function[6])((void*)address);
-      if (!result) { *position=entry->next; --allocation_count; allocation_bytes-=entry->size; free(entry); }
+      if (!result) {
+        *position=entry->next; unindex_allocation(entry);
+        allocation_bytes-=entry->backing_pages ? entry->backing_pages*4096 : entry->size;
+        free(entry);
+      }
       return result;
     }
     case MEMORY_MAP: return ERROR(15);

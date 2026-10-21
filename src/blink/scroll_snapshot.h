@@ -1,6 +1,8 @@
 #ifndef UEFI_SCROLL_SNAPSHOT_H
 #define UEFI_SCROLL_SNAPSHOT_H
 #include <cstdint>
+#include <cmath>
+#include "third_party/skia/include/core/SkMatrix.h"
 #include <array>
 #include "third_party/skia/include/core/SkBlendMode.h"
 #include <memory>
@@ -15,6 +17,7 @@ struct ScrollPosition { int x=0, y=0; };
 struct ScrollTransform {
   int parent=-1;
   float x=0, y=0;
+  float scale_x=1, skew_x=0, skew_y=0, scale_y=1;
   uint64_t element=0, scroll_parent=0, sticky_element=0;
   int position=0, minimum=0, maximum=0, viewport=0;
   int position_x=0, minimum_x=0, maximum_x=0, viewport_x=0;
@@ -22,13 +25,62 @@ struct ScrollTransform {
   bool chain=true, sticky=false;
   cc::StickyPositionConstraint constraint;
 };
+inline SkMatrix ScrollMatrix(const ScrollTransform& value, float x, float y) {
+  return SkMatrix::MakeAll(value.scale_x,value.skew_x,x,value.skew_y,value.scale_y,y,0,0,1);
+}
+inline bool BoundedScrollMatrix(const SkMatrix& matrix) {
+  // Bounded components can still overflow when ancestors are multiplied together.
+  SkScalar components[9]; matrix.get9(components);
+  for (float value:components)
+    if (!std::isfinite(value) || std::abs(value)>1000000) return false;
+  return !matrix.hasPerspective();
+}
 struct ScrollClip { int parent=-1, transform=-1; SkRRect rectangle; };
-struct ScrollEffect { int parent=-1, clip=-1; float opacity=1; SkBlendMode blend=SkBlendMode::kSrcOver; };
+enum class ScrollFilterKind : unsigned {
+  Grayscale, Sepia, Saturate, HueRotate, Invert, Brightness, Contrast, Opacity,
+  Blur, DropShadow, ColorMatrix
+};
+struct ScrollFilter {
+  ScrollFilterKind kind=ScrollFilterKind::Grayscale;
+  float amount=0;
+  int offset_x=0, offset_y=0;
+  unsigned tile_mode=3;
+  std::array<float,4> color{};
+  std::array<float,20> matrix{};
+};
+inline bool ValidScrollFilter(const ScrollFilter& value) {
+  if (static_cast<unsigned>(value.kind)>static_cast<unsigned>(ScrollFilterKind::ColorMatrix) ||
+      !std::isfinite(value.amount) || value.offset_x < -4096 || value.offset_x > 4096 || value.offset_y < -4096 || value.offset_y > 4096 ||
+      value.tile_mode>3) return false;
+  for (float channel:value.color) if (!std::isfinite(channel) || std::abs(channel)>16) return false;
+  if (value.color[3]<0 || value.color[3]>1) return false;
+  for (float coefficient:value.matrix) if (!std::isfinite(coefficient) || std::abs(coefficient)>10000) return false;
+  switch (value.kind) {
+    case ScrollFilterKind::HueRotate: return std::abs(value.amount)<=360000;
+    // Filters that create alpha from transparent input require an explicit filter region.
+    case ScrollFilterKind::ColorMatrix: return value.amount==0 && value.matrix[19]==0;
+    case ScrollFilterKind::Blur:
+    case ScrollFilterKind::DropShadow: return value.amount>=0 && value.amount<=128;
+    case ScrollFilterKind::Saturate:
+    case ScrollFilterKind::Brightness:
+    case ScrollFilterKind::Contrast: return value.amount>=0 && value.amount<=256;
+    default: return value.amount>=0 && value.amount<=1;
+  }
+}
+struct ScrollEffect {
+  int parent=-1, clip=-1, transform=-1;
+  float opacity=1;
+  SkBlendMode blend=SkBlendMode::kSrcOver;
+  std::vector<ScrollFilter> filters;
+};
 struct ScrollRaster {
   SkIRect bounds;
   std::vector<sk_sp<SkData>> tiles;
 };
+struct GpuCanvasFrame;
 struct ScrollPicture {
+  uint64_t gpu_token=0;
+  std::shared_ptr<GpuCanvasFrame> gpu_frame;
   int transform=-1, clip=-1, effect=-1;
   SkRect bounds;
   int scrollbar=-1, track_piece=0;
@@ -81,6 +133,8 @@ struct ScrollScene {
 struct ScrollSnapshot {
   uint64_t acknowledgement=0;
   std::shared_ptr<ScrollScene> scene;
+  // Only the producer retains this buffer; publication copies its bytes into the mailbox.
+  std::shared_ptr<const std::vector<uint8_t>> encoded;
 };
 }
 #endif

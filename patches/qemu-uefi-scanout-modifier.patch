@@ -1,0 +1,167 @@
+--- a/include/hw/virtio/virtio-gpu.h
++++ b/include/hw/virtio/virtio-gpu.h
+@@ -132,6 +132,7 @@
+     uint32_t xres;
+     uint32_t yres;
+     uint64_t hostmem;
++    bool uefi_scanout_modifier;
+     VirtIOGPUOutputList *outputs;
+ };
+ 
+@@ -171,6 +172,7 @@
+ };
+ 
+ #define VIRTIO_GPU_BASE_PROPERTIES(_state, _conf)                       \
++    DEFINE_PROP_BOOL("uefi-scanout-modifier", _state, _conf.uefi_scanout_modifier, false), \
+     DEFINE_PROP_UINT32("max_outputs", _state, _conf.max_outputs, 1),    \
+     DEFINE_PROP_VIRTIO_GPU_OUTPUT_LIST("outputs", _state, _conf.outputs), \
+     DEFINE_PROP_BIT("edid", _state, _conf.flags, \
+@@ -397,6 +399,10 @@
+                              struct virtio_gpu_framebuffer *fb,
+                              struct virtio_gpu_rect *r);
+ 
++int virtio_gpu_update_dmabuf_modifier(VirtIOGPU *g, uint32_t scanout_id,
++    struct virtio_gpu_simple_resource *res, struct virtio_gpu_framebuffer *fb,
++    struct virtio_gpu_rect *r, uint64_t modifier);
++
+ void virtio_gpu_update_scanout(VirtIOGPU *g,
+                                uint32_t scanout_id,
+                                struct virtio_gpu_simple_resource *res,
+--- a/hw/display/virtio-gpu-base.c
++++ b/hw/display/virtio-gpu-base.c
+@@ -267,6 +267,10 @@
+     if (virtio_gpu_edid_enabled(g->conf)) {
+         features |= (1 << VIRTIO_GPU_F_EDID);
+     }
++    /* Bit 15 is a private opt-in extension, not an upstream Virtio feature. */
++    if (g->conf.uefi_scanout_modifier && virtio_gpu_blob_enabled(g->conf)) {
++        features |= (1ULL << 15);
++    }
+     if (virtio_gpu_blob_enabled(g->conf)) {
+         features |= (1 << VIRTIO_GPU_F_RESOURCE_BLOB);
+     }
+--- a/hw/display/virtio-gpu-udmabuf.c
++++ b/hw/display/virtio-gpu-udmabuf.c
+@@ -192,11 +192,20 @@
+                           uint32_t scanout_id,
+                           struct virtio_gpu_simple_resource *res,
+                           struct virtio_gpu_framebuffer *fb,
+-                          struct virtio_gpu_rect *r)
++                          struct virtio_gpu_rect *r, uint64_t modifier)
+ {
+     VGPUDMABuf *dmabuf;
+     uint32_t offset = 0;
+ 
++    if (modifier != DRM_FORMAT_MOD_INVALID) {
++        /* The import starts at the plane origin, before the scanout crop. */
++        uint64_t crop = (uint64_t)r->x * DIV_ROUND_UP(PIXMAN_FORMAT_BPP(fb->format), 8) +
++                        (uint64_t)r->y * fb->stride;
++        if (crop > fb->offset) {
++            return NULL;
++        }
++        offset = fb->offset - crop;
++    }
+     if (res->dmabuf_fd < 0) {
+         return NULL;
+     }
+@@ -206,7 +215,7 @@
+                                   &offset, &fb->stride,
+                                   r->x, r->y, fb->width, fb->height,
+                                   qemu_pixman_to_drm_format(fb->format),
+-                                  DRM_FORMAT_MOD_INVALID, &res->dmabuf_fd,
++                                  modifier, &res->dmabuf_fd,
+                                   1, true, false);
+     dmabuf->scanout_id = scanout_id;
+     QTAILQ_INSERT_HEAD(&g->dmabuf.bufs, dmabuf, next);
+@@ -214,17 +223,17 @@
+     return dmabuf;
+ }
+ 
+-int virtio_gpu_update_dmabuf(VirtIOGPU *g,
++int virtio_gpu_update_dmabuf_modifier(VirtIOGPU *g,
+                              uint32_t scanout_id,
+                              struct virtio_gpu_simple_resource *res,
+                              struct virtio_gpu_framebuffer *fb,
+-                             struct virtio_gpu_rect *r)
++                             struct virtio_gpu_rect *r, uint64_t modifier)
+ {
+     struct virtio_gpu_scanout *scanout = &g->parent_obj.scanout[scanout_id];
+     VGPUDMABuf *new_primary, *old_primary = NULL;
+     uint32_t width, height;
+ 
+-    new_primary = virtio_gpu_create_dmabuf(g, scanout_id, res, fb, r);
++    new_primary = virtio_gpu_create_dmabuf(g, scanout_id, res, fb, r, modifier);
+     if (!new_primary) {
+         return -EINVAL;
+     }
+@@ -245,3 +254,11 @@
+ 
+     return 0;
+ }
++
++int virtio_gpu_update_dmabuf(VirtIOGPU *g, uint32_t scanout_id,
++    struct virtio_gpu_simple_resource *res, struct virtio_gpu_framebuffer *fb,
++    struct virtio_gpu_rect *r)
++{
++    return virtio_gpu_update_dmabuf_modifier(g, scanout_id, res, fb, r,
++                                            DRM_FORMAT_MOD_INVALID);
++}
+--- a/hw/display/virtio-gpu-udmabuf-stubs.c
++++ b/hw/display/virtio-gpu-udmabuf-stubs.c
+@@ -26,3 +26,10 @@
+     /* nothing (stub) */
+     return 0;
+ }
++
++int virtio_gpu_update_dmabuf_modifier(VirtIOGPU *g, uint32_t scanout_id,
++    struct virtio_gpu_simple_resource *res, struct virtio_gpu_framebuffer *fb,
++    struct virtio_gpu_rect *r, uint64_t modifier)
++{
++    return -EINVAL;
++}
+--- a/hw/display/virtio-gpu-virgl.c
++++ b/hw/display/virtio-gpu-virgl.c
+@@ -21,6 +21,7 @@
+ #include "hw/virtio/virtio-gpu-pixman.h"
+ 
+ #include "ui/egl-helpers.h"
++#include "standard-headers/drm/drm_fourcc.h"
+ 
+ #include <virglrenderer.h>
+ 
+@@ -522,6 +523,10 @@
+     }
+ 
+     qemu_console_gl_update(g->parent_obj.scanout[idx].con, x, y, width, height);
++    if (virtio_has_feature(VIRTIO_DEVICE(g)->guest_features, 15)) {
++        /* Completion releases the previous scanout buffer for guest reuse. */
++        glFinish();
++    }
+ }
+ 
+ static void virgl_cmd_resource_flush(VirtIOGPU *g,
+@@ -978,6 +983,15 @@
+     struct virtio_gpu_virgl_resource *res;
+     struct virtio_gpu_set_scanout_blob ss;
+ 
++    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
++    if (virtio_has_feature(VIRTIO_DEVICE(g)->guest_features, 15)) {
++        if (iov_to_buf(cmd->elem.out_sg, cmd->elem.out_num, sizeof(ss),
++                       &modifier, sizeof(modifier)) != sizeof(modifier)) {
++            cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;
++            return;
++        }
++        modifier = le64_to_cpu(modifier);
++    }
+     VIRTIO_GPU_FILL_CMD(ss);
+     virtio_gpu_scanout_blob_bswap(&ss);
+     trace_virtio_gpu_cmd_set_scanout_blob(ss.scanout_id, ss.resource_id,
+@@ -1022,7 +1036,7 @@
+     }
+ 
+     g->parent_obj.enable = 1;
+-    if (virtio_gpu_update_dmabuf(g, ss.scanout_id, &res->base, &fb, &ss.r)) {
++    if (virtio_gpu_update_dmabuf_modifier(g, ss.scanout_id, &res->base, &fb, &ss.r, modifier)) {
+         qemu_log_mask(LOG_GUEST_ERROR, "%s: failed to update dmabuf\n",
+                       __func__);
+         cmd->error = VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER;

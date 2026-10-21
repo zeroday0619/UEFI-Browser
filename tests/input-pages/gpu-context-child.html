@@ -1,0 +1,29 @@
+<!doctype html><meta charset="utf-8"><title>Independent WebGPU context</title>
+<canvas id="output" width="32" height="32"></canvas>
+<script>
+window.ready=(async()=>{
+  const adapter=await navigator.gpu.requestAdapter();
+  if(!adapter)throw Error('Missing child adapter');
+  const device=await adapter.requestDevice();
+  const pipeline=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:`
+    @group(0) @binding(0) var<storage,read_write> values:array<u32>;
+    @compute @workgroup_size(4) fn main(@builtin(global_invocation_id) id:vec3u){values[id.x]=values[id.x]*5u+3u;}`}),entryPoint:'main'}});
+  const source=device.createBuffer({size:16,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC});
+  const readback=device.createBuffer({size:16,usage:GPUBufferUsage.COPY_DST|GPUBufferUsage.MAP_READ});
+  const group=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source}}]});
+  const context=output.getContext('webgpu');
+  context.configure({device,format:navigator.gpu.getPreferredCanvasFormat(),alphaMode:'opaque'});
+  window.probe=async(seed)=>{
+    device.queue.writeBuffer(source,0,new Uint32Array([seed,seed+1,seed+2,seed+3]));
+    const encoder=device.createCommandEncoder();const compute=encoder.beginComputePass();
+    compute.setPipeline(pipeline);compute.setBindGroup(0,group);compute.dispatchWorkgroups(1);compute.end();
+    encoder.copyBufferToBuffer(source,0,readback,0,16);
+    const draw=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store',clearValue:[0,0,1,1]}]});draw.end();
+    device.queue.submit([encoder.finish()]);await readback.mapAsync(GPUMapMode.READ);
+    const correct=new Uint32Array(readback.getMappedRange()).every((value,index)=>value===(seed+index)*5+3);
+    readback.unmap();if(!correct)throw Error('Child compute readback mismatch');
+  };
+  window.dispose=async()=>{context.unconfigure();source.destroy();readback.destroy();device.destroy();await device.lost;};
+  await window.probe(7);
+})();
+</script>

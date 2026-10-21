@@ -1,0 +1,49 @@
+<!doctype html><meta charset="utf-8"><title>Authenticator availability</title>
+<h1>Authenticator availability</h1><pre id="results"></pre>
+<script>
+let checks = 0;
+function check(condition, name) {
+  if (!condition) throw Error(name);
+  ++checks;
+  document.querySelector('#results').textContent += name + '\n';
+  console.log('AUTHENTICATOR CHECK ' + name);
+}
+async function bounded(promise) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Error('Unresolved authenticator request')), 5000);
+    })]);
+  } finally { clearTimeout(timer); }
+}
+(async () => {
+  check(await bounded(PublicKeyCredential.isConditionalMediationAvailable()) === false,
+      'Conditional mediation completes as unavailable');
+  check(await bounded(PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable()) === false,
+      'Platform authenticator completes as unavailable');
+  const capabilities = await bounded(PublicKeyCredential.getClientCapabilities());
+  check(['conditionalCreate', 'conditionalGet', 'hybridTransport',
+      'userVerifyingPlatformAuthenticator', 'passkeyPlatformAuthenticator'].every(
+      name => capabilities[name] === false), 'No unavailable backend is advertised');
+  const results = await bounded(Promise.all(Array.from({length: 32}, () =>
+      PublicKeyCredential.isConditionalMediationAvailable())));
+  check(results.length === 32 && results.every(value => value === false),
+      'Concurrent availability queries settle');
+  const child = document.createElement('iframe');
+  document.body.append(child);
+  check(await bounded(child.contentWindow.PublicKeyCredential.isConditionalMediationAvailable()) === false,
+      'Child frame has an availability service');
+  child.remove();
+  for (let index = 0; index < 8; ++index) {
+    const detached = document.createElement('iframe');
+    document.body.append(detached);
+    detached.contentWindow.PublicKeyCredential.isConditionalMediationAvailable().catch(() => {});
+    detached.remove();
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  check(await bounded(PublicKeyCredential.isConditionalMediationAvailable()) === false,
+      'Frame teardown preserves the parent service');
+  document.querySelector('h1').textContent = 'Authenticator availability: passed';
+  console.log('AUTHENTICATOR PASS checks=' + checks);
+})().catch(error => console.error('AUTHENTICATOR FAILURE ' + error.stack));
+</script>

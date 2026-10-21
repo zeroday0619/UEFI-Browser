@@ -1,0 +1,47 @@
+<!doctype html><meta charset="utf-8"><title>Queued Opus during six-second JavaScript</title>
+<style>body{font:20px sans-serif;padding:24px}button{position:absolute;left:380px;top:180px;padding:20px}pre{white-space:pre-wrap}</style>
+<h1>Queued Opus during six-second JavaScript</h1><audio id="audio"></audio>
+<button id="start" disabled>Measure audio continuity</button><pre id="results"></pre>
+<script>
+const audio=document.querySelector('#audio');
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function event(target,name,action){return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>{cleanup();reject(Error('Timeout '+name))},15000);
+  function cleanup(){clearTimeout(timeout);target.removeEventListener(name,done)}
+  function done(){cleanup();resolve()}
+  target.addEventListener(name,done);action();
+})}
+async function until(predicate){for(let attempt=0;attempt<300;++attempt){if(predicate())return;await wait(50)}throw Error('Playback condition timeout')}
+function failure(error){document.querySelector('#results').textContent=error.stack;console.error('MSE RESERVOIR FAILURE '+error.stack)}
+(async()=>{try{
+  const source=new MediaSource();
+  await event(source,'sourceopen',()=>audio.src=URL.createObjectURL(source));
+  const buffer=source.addSourceBuffer('audio/webm; codecs="opus"');
+  const bytes=await(await fetch('/media-opus-long.webm')).arrayBuffer();
+  await event(buffer,'updateend',()=>buffer.appendBuffer(bytes));source.endOfStream();
+  await until(()=>audio.readyState>=2);
+  document.querySelector('#start').disabled=false;console.log('MSE RESERVOIR READY');
+}catch(error){failure(error)}})();
+document.querySelector('#start').onclick=async()=>{try{
+  document.querySelector('#start').disabled=true;
+  await audio.play();await until(()=>audio.currentTime>.25);await wait(1000);
+  console.log('MSE RESERVOIR BLOCK BEGIN');
+  const position=audio.currentTime,clock=performance.now();
+  while(performance.now()-clock<6000){}
+  // A new task observes the media position after the blocked task has finished.
+  await wait(0);
+  const elapsed=(performance.now()-clock)/1000,advanced=audio.currentTime-position;
+  console.log('MSE RESERVOIR BLOCK END');
+  await wait(250);audio.pause();const paused=audio.currentTime;
+  await wait(300);const pauseDelta=audio.currentTime-paused;
+  await audio.play();await wait(300);const resumed=audio.currentTime-paused;audio.pause();
+  await event(audio,'seeked',()=>audio.currentTime=12);
+  await audio.play();await wait(300);const seeked=audio.currentTime;audio.pause();
+  const result={elapsed,advanced,ratio:advanced/elapsed,pauseDelta,resumed,seeked,error:audio.error?.code??null};
+  document.querySelector('#results').textContent=JSON.stringify(result,null,2);
+  console.log('MSE RESERVOIR RESULT '+JSON.stringify(result));
+  if(result.error||result.ratio<.95||result.ratio>1.05||pauseDelta>.03||resumed<.2||seeked<12.1||seeked>13)
+    throw Error('Retained audio continuity or pause/resume failed');
+  console.log('MSE QUEUE PASS');
+}catch(error){failure(error)}};
+</script>

@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8"><title>GPU canvas composition</title>
+<style>body{margin:0;background:#000;color:#fff;font:20px sans-serif}canvas{position:absolute;width:120px;height:120px;top:50px}#clip{position:absolute;left:650px;top:50px;width:80px;height:80px;overflow:hidden;transform:translate(20px,10px)}#clip canvas{left:0;top:0}#cover{position:absolute;left:690px;top:80px;width:20px;height:20px;background:#fff;z-index:3}</style>
+<div id="status">Preparing composition</div><div id="clip"></div><div id="cover"></div>
+<script>
+(async()=>{
+  function make(left){const canvas=document.createElement('canvas');canvas.width=canvas.height=16;canvas.style.left=left+'px';document.body.append(canvas);return canvas;}
+  for(let index=0;index<3;index++){
+    const canvas=make(20+index*150), gl=canvas.getContext(index===1?'webgl2':'webgl',{alpha:index!==2,premultipliedAlpha:index!==1,antialias:true,preserveDrawingBuffer:true});
+    if(!gl)throw Error('WebGL unavailable');
+    gl.enable(gl.SCISSOR_TEST);gl.scissor(0,0,16,8);gl.clearColor(index===1?1:.5,0,0,.5);gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.scissor(0,8,16,8);gl.clearColor(0,1,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice();
+  for(let index=0;index<3;index++){
+    const canvas=make(20+index*150);canvas.style.top='230px';const context=canvas.getContext('webgpu');
+    const format=['rgba8unorm','bgra8unorm','rgba16float'][index];context.configure({device,format,alphaMode:'premultiplied'});
+    const encoder=device.createCommandEncoder(),pass=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[0,0,.5,.5],loadOp:'clear',storeOp:'store'}]});pass.end();device.queue.submit([encoder.finish()]);
+  }
+  for(let index=0;index<3;index++){
+    const backing=document.createElement('div');backing.style.cssText='position:absolute;left:'+(20+index*150)+'px;top:410px;width:120px;height:120px;background:rgb(20,40,60)';document.body.append(backing);
+    const canvas=make(20+index*150);canvas.style.top='410px';canvas.style.zIndex='1';
+    const context=canvas.getContext('webgpu'),format=['rgba8unorm','bgra8unorm','rgba16float'][index];context.configure({device,format,alphaMode:'opaque'});
+    const encoder=device.createCommandEncoder(),pass=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[0,1,0,0],loadOp:'clear',storeOp:'store'}]});pass.end();device.queue.submit([encoder.finish()]);
+  }
+  const clipped=make(0);document.getElementById('clip').append(clipped);const gl=clipped.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true});gl.clearColor(1,0,1,1);gl.clear(gl.COLOR_BUFFER_BIT);
+  document.getElementById('status').textContent='Composition ready';console.log('GPU COLORS READY');
+})().catch(error=>console.log('GPU COLORS FAILURE '+error.stack));
+</script>

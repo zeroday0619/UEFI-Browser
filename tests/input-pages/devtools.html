@@ -1,0 +1,76 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>UEFI Inspector integration</title>
+<style>
+body { font: 22px sans-serif; margin: 40px; }
+input, button { font: inherit; padding: 12px; }
+#text { position: absolute; top: 100px; left: 40px; width: 260px; }
+#check { position: absolute; top: 100px; left: 340px; }
+#pause { position: absolute; top: 155px; left: 340px; }
+#result { position: absolute; top: 200px; white-space: pre-wrap; }
+</style>
+<h1 id="heading">Inspectable document</h1>
+<input id="text" value="original">
+<button id="check">Check inspected state</button>
+<button id="pause">Pause in debugger</button>
+<pre id="result"></pre>
+<script>
+const require = (condition, description) => {
+  if (!condition) throw new Error(description);
+};
+const hex = buffer => Array.from(new Uint8Array(buffer), byte => byte.toString(16).padStart(2, '0')).join('');
+pause.onclick = () => {
+  console.log('DEVTOOLS BREAKPOINT ENTER');
+  debugger;
+  heading.textContent = 'Debugger resumed';
+  console.log('DEVTOOLS BREAKPOINT RESUMED');
+};
+check.onclick = async () => {
+  const response = await fetch('/ime.html?devtools-network');
+  require(response.ok, 'The inspected fetch must complete.');
+  const state = {value: text.value, color: getComputedStyle(heading).color};
+  result.textContent = JSON.stringify(state);
+  console.log('DEVTOOLS INSPECTED ' + JSON.stringify(state));
+};
+(async () => {
+  require(typeof DevToolsHost === 'undefined', 'A normal page must not receive DevToolsHost.');
+  require(typeof InspectorFrontendHost === 'undefined', 'A normal page must not receive inspector bindings.');
+  const style = heading.style;
+  const properties = Object.getOwnPropertyNames(style);
+  for (const name of properties) {
+    require(Reflect.has(style, name), 'Enumerated CSS property is missing: ' + name);
+    require(Object.getOwnPropertyDescriptor(style, name) !== undefined,
+        'Enumerated CSS property has no descriptor: ' + name);
+  }
+  require(properties.includes('epubCaptionSide'), 'The EPUB alias must remain exposed.');
+  style.epubCaptionSide = 'bottom';
+  require(style.getPropertyValue('caption-side') === 'bottom', 'EPUB alias assignment failed.');
+  console.log('DEVTOOLS CSS PROPERTIES ' + properties.length + ' descriptors verified');
+  const data = new TextEncoder().encode('abc');
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  require(hex(digest) === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+      'SHA-256 known-answer mismatch.');
+  const hmac = await crypto.subtle.importKey('raw', new TextEncoder().encode('key'),
+      {name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify']);
+  const signature = await crypto.subtle.sign('HMAC', hmac, data);
+  require(hex(signature) === '9c196e32dc0175f86f4b1cb89289d6619de6bee699e4c378e68309ed97a1a6ab',
+      'HMAC-SHA256 known-answer mismatch.');
+  require(await crypto.subtle.verify('HMAC', hmac, signature, data), 'HMAC verification failed.');
+  const key = await crypto.subtle.importKey('raw', new Uint8Array(16), 'AES-GCM', true,
+      ['encrypt', 'decrypt']);
+  const algorithm = {name: 'AES-GCM', iv: new Uint8Array(12)};
+  const ciphertext = await crypto.subtle.encrypt(algorithm, key, data);
+  require(new TextDecoder().decode(await crypto.subtle.decrypt(algorithm, key, ciphertext)) === 'abc',
+      'AES-GCM round trip failed.');
+  const corrupted = new Uint8Array(ciphertext);
+  corrupted[corrupted.length - 1] ^= 1;
+  let rejected = false;
+  try { await crypto.subtle.decrypt(algorithm, key, corrupted); } catch { rejected = true; }
+  require(rejected, 'AES-GCM must reject a modified authentication tag.');
+  let inaccessible = false;
+  try { await fetch('https://devtools.uefi.invalid/front_end/inspector.html'); }
+  catch { inaccessible = true; }
+  require(inaccessible, 'Remote pages must not fetch internal DevTools resources.');
+  console.log('DEVTOOLS FIXTURE READY: crypto vectors, authentication rejection and binding isolation passed');
+})().catch(error => console.error('DEVTOOLS FIXTURE FAILURE ' + error.stack));
+</script>

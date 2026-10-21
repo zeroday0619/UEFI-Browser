@@ -27,7 +27,7 @@ index 1406c7633..b92ea9a1f 100644
  #include "src/dawn/native/vulkan/VulkanInfo.h"
 
 +#if defined(UEFI_RUNTIME)
-+extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_swiftshader_vkGetInstanceProcAddr(VkInstance, const char*);
++extern "C" VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL uefi_browser_vkGetInstanceProcAddr(VkInstance, const char*);
 +#endif
 +
  namespace dawn::native::vulkan {
@@ -38,8 +38,8 @@ index 1406c7633..b92ea9a1f 100644
 
  MaybeError VulkanFunctions::LoadGlobalProcs(const DynamicLib& vulkanLib) {
 +#if defined(UEFI_RUNTIME)
-+    // Firmware links its sole Vulkan driver statically.
-+    GetInstanceProcAddr = &uefi_swiftshader_vkGetInstanceProcAddr;
++    // Firmware selects its statically linked Vulkan implementation.
++    GetInstanceProcAddr = &uefi_browser_vkGetInstanceProcAddr;
 +#else
      if (!vulkanLib.GetProc(&GetInstanceProcAddr, "vkGetInstanceProcAddr")) {
          return DAWN_UNRECOVERABLE_ERROR("Couldn't get vkGetInstanceProcAddr");
@@ -49,3 +49,129 @@ index 1406c7633..b92ea9a1f 100644
      GET_GLOBAL_PROC(CreateInstance);
      GET_GLOBAL_PROC(EnumerateInstanceExtensionProperties);
      GET_GLOBAL_PROC(EnumerateInstanceLayerProperties);
+diff --git a/include/dawn/wire/WireClient.h b/include/dawn/wire/WireClient.h
+index fca0bece0..5cb1f67ea 100644
+--- a/include/dawn/wire/WireClient.h
++++ b/include/dawn/wire/WireClient.h
+@@ -92,6 +92,7 @@ class DAWN_WIRE_EXPORT WireClient : public CommandHandler {
+     void ReclaimInstanceReservation(const ReservedInstance& reservation);
+ 
+     Handle GetWireHandle(WGPUDevice device) const;
++    Handle GetWireHandle(WGPUTexture texture) const;
+ 
+     // Disconnects the client.
+     // Commands allocated after this point will not be sent.
+diff --git a/include/dawn/wire/WireServer.h b/include/dawn/wire/WireServer.h
+index 2a2209f32..f7ad74f24 100644
+--- a/include/dawn/wire/WireServer.h
++++ b/include/dawn/wire/WireServer.h
+@@ -71,6 +71,7 @@ class DAWN_WIRE_EXPORT WireServer : public CommandHandler {
+     // work is made. Getting this list can be done by tracking the (id, generation) of
+     // previously injected devices, and observing if GetDevice(id, generation) returns non-null.
+     WGPUDevice GetDevice(uint32_t id, uint32_t generation);
++    WGPUTexture GetTexture(uint32_t id, uint32_t generation);
+ 
+     // Check if a device handle is known by the wire.
+     // In Chrome, we need to know the list of live devices so we can call device.Tick() on all of
+diff --git a/src/dawn/native/vulkan/TextureVk.cpp b/src/dawn/native/vulkan/TextureVk.cpp
+index 0686ef93e..a4584f0b2 100644
+--- a/src/dawn/native/vulkan/TextureVk.cpp
++++ b/src/dawn/native/vulkan/TextureVk.cpp
+@@ -2304,3 +2304,30 @@ void TextureView::SetLabelImpl() {
+ }
+ 
+ }  // namespace dawn::native::vulkan
++
++#if defined(UEFI_RUNTIME)
++extern "C" uint64_t firmware_gpu_copy_canvas(VkInstance,VkPhysicalDevice,VkDevice,VkQueue,uint32_t,VkImage,VkImageLayout,uint32_t,uint32_t,VkFormat,uint32_t);
++extern "C" uint64_t firmware_dawn_export_canvas(WGPUTexture handle,uint32_t alpha) {
++    using namespace dawn::native;
++    using namespace dawn::native::vulkan;
++    auto* base=reinterpret_cast<TextureBase*>(handle);
++    if (!base || base->IsError() || base->IsDestroyed()) return 0;
++    auto* texture=ToBackend(base);
++    auto* device=ToBackend(texture->GetDevice());
++    auto* queue=ToBackend(device->GetQueue());
++    auto* recording=queue->GetPendingRecordingContext();
++    auto range=texture->GetAllSubresources();
++    auto initialized=texture->EnsureSubresourceContentInitialized(recording,range);
++    if (initialized.IsError()) { initialized.AcquireError(); return 0; }
++    texture->TransitionUsageNow(recording,wgpu::TextureUsage::CopySrc,wgpu::ShaderStage::None,range);
++    auto submitted=queue->SubmitPendingCommands();
++    if (submitted.IsError()) { submitted.AcquireError(); return 0; }
++    auto size=texture->GetSize(Aspect::Color);
++    auto format=texture->GetFormat().format==wgpu::TextureFormat::BGRA8Unorm ? VK_FORMAT_B8G8R8A8_UNORM :
++        texture->GetFormat().format==wgpu::TextureFormat::RGBA8Unorm ? VK_FORMAT_R8G8B8A8_UNORM :
++        texture->GetFormat().format==wgpu::TextureFormat::RGBA16Float ? VK_FORMAT_R16G16B16A16_SFLOAT : VK_FORMAT_UNDEFINED;
++    return firmware_gpu_copy_canvas(device->GetVkInstance(),ToBackend(device->GetPhysicalDevice())->GetVkPhysicalDevice(),
++        device->GetVkDevice(),queue->GetVkQueue(),device->GetGraphicsQueueFamily(),texture->GetHandle(),
++        texture->GetCurrentLayout(Aspect::Color),size.width,size.height,format,alpha);
++}
++#endif
+diff --git a/src/dawn/wire/WireClient.cpp b/src/dawn/wire/WireClient.cpp
+index e3ee211e0..ff84ac3c0 100644
+--- a/src/dawn/wire/WireClient.cpp
++++ b/src/dawn/wire/WireClient.cpp
+@@ -30,6 +30,7 @@
+ #include <memory>
+ 
+ #include "src/dawn/wire/client/Client.h"
++#include "src/dawn/wire/client/Texture.h"
+ 
+ // Inline the autogenerated code for client/ApiProcs that's part of the module interface for
+ // dawn::wire::client, both for GetProcs, but also for the entrypoints of the C API that's
+@@ -93,6 +94,10 @@ Handle WireClient::GetWireHandle(WGPUDevice device) const {
+     return wireDevice->GetWireHandle(mImpl.get());
+ }
+ 
++Handle WireClient::GetWireHandle(WGPUTexture texture) const {
++    return client::FromAPI(texture)->GetWireHandle(mImpl.get());
++}
++
+ client::Client* WireClient::GetImplForTesting() {
+     return mImpl.get();
+ }
+diff --git a/src/dawn/wire/WireServer.cpp b/src/dawn/wire/WireServer.cpp
+index 42d5004fb..02c77d9a1 100644
+--- a/src/dawn/wire/WireServer.cpp
++++ b/src/dawn/wire/WireServer.cpp
+@@ -65,6 +65,10 @@ bool WireServer::InjectInstance(WGPUInstance instance, const Handle& handle) {
+     return mImpl->InjectInstance(instance, handle) == WireResult::Success;
+ }
+ 
++WGPUTexture WireServer::GetTexture(uint32_t id, uint32_t generation) {
++    return mImpl->GetTexture(id,generation);
++}
++
+ WGPUDevice WireServer::GetDevice(uint32_t id, uint32_t generation) {
+     return mImpl->GetDevice(id, generation);
+ }
+diff --git a/src/dawn/wire/server/Server.cpp b/src/dawn/wire/server/Server.cpp
+index 3fedd52ae..ef3149d0a 100644
+--- a/src/dawn/wire/server/Server.cpp
++++ b/src/dawn/wire/server/Server.cpp
+@@ -159,6 +159,12 @@ WireResult Server::InjectInstance(WGPUInstance instance, const Handle& handle) {
+     return WireResult::Success;
+ }
+ 
++WGPUTexture Server::GetTexture(uint32_t id, uint32_t generation) {
++    Known<WGPUTexture> texture;
++    if (Get(id,&texture)!=WireResult::Success || texture->generation!=generation) return nullptr;
++    return texture->handle;
++}
++
+ WGPUDevice Server::GetDevice(uint32_t id, uint32_t generation) {
+     Known<WGPUDevice> device;
+     if (Get(id, &device) != WireResult::Success || device->generation != generation) {
+diff --git a/src/dawn/wire/server/Server.h b/src/dawn/wire/server/Server.h
+index 0a69c3219..f0a3f9ec3 100644
+--- a/src/dawn/wire/server/Server.h
++++ b/src/dawn/wire/server/Server.h
+@@ -208,6 +208,7 @@ class Server : public ServerBase {
+     WireResult InjectInstance(WGPUInstance instance, const Handle& handle);
+ 
+     WGPUDevice GetDevice(uint32_t id, uint32_t generation);
++    WGPUTexture GetTexture(uint32_t id, uint32_t generation);
+     using ServerBase::IsDeviceKnown;
+ 
+     // Flushes the command serialized from server->client if spontaneous callbacks are enabled.

@@ -3,13 +3,15 @@
 The GPU availability statements below describe this report's recorded build. See [software GPU validation](SOFTWARE-GPU.md) for the subsequent ANGLE, Dawn and SwiftShader implementation.
 
 This report records the earlier TCP/file implementation. WebSocket, WSS, DNS, shared-memory data pipes and Web Storage were connected subsequently; see [WebSocket and storage validation](WEB-SERVICES.md) for their current status. Remaining-work statements below describe the image hashes recorded in this report.
+The subsequent [response-policy integration](RESPONSE-POLICY.md) permits checked cross-origin no-cors resources and applies document/worker COEP subresource policies. The earlier limitations below remain a record of the original image.
+
 ## Scope
 
 This change adds buffered HTTP methods, CORS and redirects to the Blink loader, plus BSP-owned TCP and profile-file services to the musl syscall bridge. It does not complete the Chromium browser port. WebSocket, worker hosts, browser storage, media devices, GPU services and a hostile-renderer sandbox remain absent.
 
 ## Implemented behavior
 
-- HTTP GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS use the cooperative firmware queue. Request and response bodies are bounded at 8 MiB. The EDK II HTTP patch now accepts and serializes OPTIONS.
+- HTTP GET, HEAD, POST, PUT, PATCH, DELETE and OPTIONS use the cooperative firmware queue. Uploads remain bounded at 8 MiB; subsequent [large-resource work](LARGE-RESOURCES.md) increases the response bound to 32 MiB with demand-sized allocation and corrects partial TLS parsing. The EDK II HTTP patch now accepts and serializes OPTIONS.
 - The Blink loader uses Chromium CORS access and preflight helpers. It checks allowed origins, methods, headers and credentials; exposes permitted headers; and supplies opaque no-cors fetch results. Redirects are limited to 20, preserve or rewrite methods as required by their status, remove cross-origin Authorization and use Chromium redirect/referrer calculations.
 - Main and local-frame navigation accept buffered GET/POST requests. POST forms preserve their bodies through 307/308 redirects. New-window POST and POST replay through history/reload remain unsupported.
 - `src/network/sockets.c` implements IPv4 TCP connection, nonblocking send/receive, readiness polling, EOF, address queries, descriptor flags and abortive close. The BSP owns all EFI TCP4 protocol objects and token buffers. The service has 32 descriptors with 64 KiB transmit and receive buffers per descriptor.

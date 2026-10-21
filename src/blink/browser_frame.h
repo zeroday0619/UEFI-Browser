@@ -32,6 +32,7 @@ class BrowserFrame {
   Status GoBack();
   Status GoForward();
   Status Reload();
+  Status Inspect(BrowserFrame& target);
   bool CanAcceptInput() const;
   void Pointer(const PointerSample&);
   void PointerLeave();

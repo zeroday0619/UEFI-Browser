@@ -1,5 +1,11 @@
 /* This loader-side supervisor stays outside both payload data mappings. */
 #include "renderer_runtime.h"
+#ifndef RENDERER_PAYLOAD_ROLE
+#define RENDERER_PAYLOAD_ROLE 1
+#endif
+#ifndef RENDERER_PROCESSOR_SKIP
+#define RENDERER_PROCESSOR_SKIP 0
+#endif
 typedef struct RendererMp RendererMp;
 struct RendererMp {
   Status(UEFI_API *count)(RendererMp*, size_t*, size_t*);
@@ -33,8 +39,8 @@ static struct {
   struct RendererGate *idt;
   void *escape_stack;
 #ifdef ENABLE_RENDERER_CPL3
-  uint64_t *page_tables;
-  size_t page_table_count;
+  uint64_t *page_table_chunks[16];
+  size_t page_table_count, page_table_capacity;
   void *gdt, *task, *kernel_stack, *exception_stack, *user_bootstrap;
   uint64_t user_code, user_data;
 #endif
@@ -45,14 +51,29 @@ static int renderer_contains(uint64_t base, size_t length, uint64_t address, siz
 }
 #ifdef ENABLE_RENDERER_CPL3
 static int renderer_granted_buffer(uint64_t,size_t,unsigned);
+static int renderer_user_buffer(uint64_t,uint64_t,int);
 #endif
 static int UEFI_API renderer_buffer(uint64_t address, size_t size, unsigned writable) {
   if (!size || !address || size > UINT64_MAX - address || !renderer.event) return 0;
   if (renderer_contains(renderer.bootstrap.data_physical,
-          renderer.bootstrap.data_end-renderer.bootstrap.data_start, address, size) ||
-      renderer_contains((uintptr_t)renderer.stack,4*1024*1024,address,size)) return 1;
+          renderer.bootstrap.data_end-renderer.bootstrap.data_start, address, size)) {
+#ifdef ENABLE_RENDERER_CPL3
+    /* Physical broker aliases retain the permissions of the private image. */
+    return renderer_user_buffer(renderer.bootstrap.data_start +
+        address - renderer.bootstrap.data_physical, size, writable);
+#else
+    return 1;
+#endif
+  }
   size_t tls_size=renderer.tls ? (renderer.tls->memory_size+4095)&~(size_t)4095 : 0;
-  if (renderer_contains((uintptr_t)renderer.thread_allocation,tls_size+4096,address,size)) return 1;
+  if (renderer_contains((uintptr_t)renderer.stack,4*1024*1024,address,size) ||
+      renderer_contains((uintptr_t)renderer.thread_allocation,tls_size+4096,address,size)) {
+#ifdef ENABLE_RENDERER_CPL3
+    return renderer_user_buffer(address, size, writable);
+#else
+    return 1;
+#endif
+  }
 #ifdef ENABLE_RENDERER_CPL3
   if (renderer_granted_buffer(address,size,writable)) return 1;
 #endif
@@ -60,7 +81,13 @@ static int UEFI_API renderer_buffer(uint64_t address, size_t size, unsigned writ
   if (!writable) for (unsigned index=0; index<renderer.header->program_count; ++index) {
     const ElfProgram *program=renderer.programs+index;
     if (program->type==1 && !(program->flags&2) &&
-        renderer_contains(program->address,program->memory_size,address,size)) return 1;
+        renderer_contains(program->address,program->memory_size,address,size)) {
+#ifdef ENABLE_RENDERER_CPL3
+      return renderer_user_buffer(address, size, 0);
+#else
+      return 1;
+#endif
+    }
   }
   return 0;
 }
@@ -78,17 +105,33 @@ static void *renderer_pages(size_t count) {
 }
 static int renderer_owned(uint64_t address) {
 #ifdef ENABLE_RENDERER_CPL3
-  if (renderer.page_tables && address >= (uintptr_t)renderer.page_tables &&
-      address - (uintptr_t)renderer.page_tables < 2048*4096) return 1;
+  for (size_t index=0; index<renderer.page_table_capacity/1024; ++index)
+    if (address >= (uintptr_t)renderer.page_table_chunks[index] &&
+        address - (uintptr_t)renderer.page_table_chunks[index] < 1024*4096) return 1;
 #endif
   for (size_t index=0; index<renderer.allocation_count; ++index)
     if (renderer.allocations[index] == address) return 1;
   return 0;
 }
+#ifdef ENABLE_RENDERER_CPL3
+static int UEFI_API renderer_reserve_tables(size_t minimum) {
+  /* Only the BSP allocates firmware pages; the AP consumes this protected reserve. */
+  if (minimum>16384 || renderer.page_table_count>16384-minimum) return 0;
+  while (renderer.page_table_capacity-renderer.page_table_count<minimum) {
+    if (renderer.page_table_capacity==16384) return 0;
+    uint64_t *chunk=renderer_pages(1024);
+    if (!chunk) return 0;
+    renderer.page_table_chunks[renderer.page_table_capacity/1024]=chunk;
+    renderer.page_table_capacity+=1024;
+  }
+  return 1;
+}
+#endif
 static uint64_t *renderer_new_table(void) {
 #ifdef ENABLE_RENDERER_CPL3
-  if (renderer.page_table_count == 2048) return 0;
-  return renderer.page_tables + 512*renderer.page_table_count++;
+  if (renderer.page_table_count == renderer.page_table_capacity) return 0;
+  size_t index=renderer.page_table_count++;
+  return renderer.page_table_chunks[index/1024]+512*(index%1024);
 #else
   return renderer_pages(1);
 #endif
@@ -233,9 +276,11 @@ static Status UEFI_API renderer_start(void *channel) {
   if (renderer.mp->count(renderer.mp,&total,&enabled) || enabled<2 ||
       renderer.mp->who(renderer.mp,&current)) return ERROR(3);
   renderer.processor = (size_t)-1;
+  size_t skipped = 0;
   for (size_t index=0; index<total; ++index) {
     struct { uint64_t identifier; uint32_t flags, package, core, thread; } information;
     if (index!=current && !renderer.mp->information(renderer.mp,index,&information) && (information.flags&2)) {
+      if (skipped++ < RENDERER_PROCESSOR_SKIP) continue;
       renderer.processor=index; renderer.apic_identifier=information.identifier; break;
     }
   }
@@ -251,8 +296,8 @@ static Status UEFI_API renderer_start(void *channel) {
 #endif
 #ifdef ENABLE_RENDERER_CPL3
   renderer.page_table_count=0;
-  renderer.page_tables=renderer_pages(2048);
-  if (!renderer.page_tables) goto failure;
+  renderer.page_table_capacity=0;
+  if (!renderer_reserve_tables(1024)) goto failure;
 #endif
   renderer.root=renderer_pages(1);
   if (!renderer.root) goto failure;
@@ -287,7 +332,7 @@ static Status UEFI_API renderer_start(void *channel) {
     copy((unsigned char*)renderer.thread-length,payload_start+renderer.tls->offset,renderer.tls->file_size);
   }
   *(void**)renderer.thread=renderer.thread;
-  renderer.bootstrap.renderer=1;
+  renderer.bootstrap.renderer=RENDERER_PAYLOAD_ROLE;
   renderer.bootstrap.channel=channel;
 #ifdef ENABLE_RENDERER_CPL3
   if (!renderer_sandbox_prepare()) goto failure;

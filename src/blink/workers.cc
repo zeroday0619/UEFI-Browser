@@ -14,15 +14,19 @@
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader.h"
 #include "third_party/blink/renderer/platform/loader/fetch/url_loader/url_loader_factory.h"
+#include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"
+#include "third_party/blink/renderer/core/frame/local_frame.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/frame/policy_container.h"
 #include "url/origin.h"
 
 namespace uefi_browser {
 namespace {
 class WorkerLoaderFactory final : public blink::URLLoaderFactory {
 public:
-  WorkerLoaderFactory(SystemTable *table, url::Origin origin,
+  WorkerLoaderFactory(SystemTable *table, std::shared_ptr<ResourceSecurityContext> security,
                       base::WaitableEvent *termination_event)
-      : table_(table), origin_(std::move(origin)),
+      : table_(table), security_(std::move(security)),
         termination_event_(termination_event) {}
   std::unique_ptr<blink::URLLoader> CreateURLLoader(
       const network::ResourceRequest &,
@@ -31,27 +35,30 @@ public:
       mojo::PendingRemote<blink::mojom::blink::KeepAliveHandle>,
       blink::BackForwardCacheLoaderHelper *,
       blink::Vector<std::unique_ptr<blink::URLLoaderThrottle>>) override {
-    return CreateResourceLoader(table_, origin_, std::move(runner),
+    return CreateResourceLoader(table_, security_, std::move(runner),
                                 termination_event_);
   }
 
 private:
   SystemTable *table_;
-  url::Origin origin_;
+  std::shared_ptr<ResourceSecurityContext> security_;
   base::WaitableEvent *termination_event_;
 };
 class WorkerFetchContext final : public blink::WebWorkerFetchContext {
 public:
   WorkerFetchContext(SystemTable *table, url::Origin origin,
-                     net::SiteForCookies cookies, url::Origin top)
+                     net::SiteForCookies cookies, url::Origin top,
+                     network::mojom::CrossOriginEmbedderPolicyValue policy)
       : WebWorkerFetchContext(blink::RendererPreferences()), table_(table),
         origin_(std::move(origin)), cookies_(std::move(cookies)),
-        top_(std::move(top)) {}
+        top_(std::move(top)), policy_(policy) {}
   void SetTerminateSyncLoadEvent(base::WaitableEvent *event) override {
     termination_event_ = event;
   }
   void InitializeOnWorkerThread(blink::AcceptLanguagesWatcher *) override {
-    factory_ = std::make_unique<WorkerLoaderFactory>(table_, origin_,
+    // Workers keep their ORB media history on their own loading sequence.
+    security_ = std::make_shared<ResourceSecurityContext>(origin_, policy_);
+    factory_ = std::make_unique<WorkerLoaderFactory>(table_, security_,
                                                      termination_event_);
   }
   blink::URLLoaderFactory *GetURLLoaderFactory() override {
@@ -60,7 +67,7 @@ public:
   std::unique_ptr<blink::URLLoaderFactory> WrapURLLoaderFactory(
       blink::CrossVariantMojoRemote<
           network::mojom::URLLoaderFactoryInterfaceBase>) override {
-    return std::make_unique<WorkerLoaderFactory>(table_, origin_,
+    return std::make_unique<WorkerLoaderFactory>(table_, security_,
                                                  termination_event_);
   }
   void FinalizeRequest(blink::WebURLRequest &request) override {
@@ -88,7 +95,7 @@ public:
   bool IsOnSubframe() const override { return subframe_; }
   scoped_refptr<WorkerFetchContext> Clone() const {
     auto copy =
-        base::AdoptRef(new WorkerFetchContext(table_, origin_, cookies_, top_));
+        base::AdoptRef(new WorkerFetchContext(table_, origin_, cookies_, top_, policy_));
     copy->subframe_ = subframe_;
     return copy;
   }
@@ -98,6 +105,8 @@ private:
   url::Origin origin_;
   net::SiteForCookies cookies_;
   url::Origin top_;
+  const network::mojom::CrossOriginEmbedderPolicyValue policy_;
+  std::shared_ptr<ResourceSecurityContext> security_;
   bool subframe_ = false;
   base::WaitableEvent *termination_event_ = nullptr;
   std::unique_ptr<WorkerLoaderFactory> factory_;
@@ -149,6 +158,8 @@ CreateWorkerFetchContext(SystemTable *table, blink::WebLocalFrame *frame) {
   auto top_origin =
       top ? url::Origin(top->GetDocument().GetSecurityOrigin()) : origin;
   return base::AdoptRef(new WorkerFetchContext(
-      table, origin, net::SiteForCookies::FromOrigin(top_origin), top_origin));
+      table, origin, net::SiteForCookies::FromOrigin(top_origin), top_origin,
+      static_cast<blink::WebLocalFrameImpl*>(frame)->GetFrame()->DomWindow()
+          ->GetPolicyContainer()->GetPolicies().cross_origin_embedder_policy.value));
 }
 } // namespace uefi_browser

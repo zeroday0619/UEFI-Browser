@@ -1,15 +1,21 @@
 # Copyright 2026 The Chromium Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
+declare_args() { uefi_enable_mozc = false }
 source_set("navigation") {
   sources = [
     "src/blink/navigation.cc",
+    "src/blink/devtools_resources.cc",
+    "src/blink/korean_input.cc",
+    "src/blink/text_composer.cc",
+    "src/blink/ime_popup.cc",
     "src/blink/cookies.cc",
     "src/blink/web_storage.cc",
     "src/blink/blob_service.cc",
     "src/blink/cache_storage.cc",
     "src/blink/indexed_db.cc",
     "src/blink/media_player.cc",
+    "src/blink/firmware_audio_timeline.cc",
     "src/blink/web_socket.cc",
     "src/blink/web_socket.h",
     "src/blink/web_storage.h",
@@ -27,6 +33,7 @@ source_set("navigation") {
     "src/blink/scheduler.h",
     "src/blink/frame_loop.cc",
     "src/blink/scroll_scene.cc",
+    "src/blink/gpu_canvas.cc",
     "src/blink/scroll_wire.cc",
     "src/blink/scroll_scene.h",
     "src/blink/scroll_snapshot.h",
@@ -37,10 +44,11 @@ source_set("navigation") {
     "src/network/chunks.c",
   ]
   if (use_uefi_runtime && current_toolchain == default_toolchain) {
-    sources += [ "src/blink/workers.cc", "src/blink/browser_frame.cc", "src/blink/browser_frame.h", "src/blink/remote_frame.cc", "src/blink/remote_frame.h" ]
+    sources += [ "src/blink/devtools.cc", "src/blink/workers.cc", "src/blink/browser_frame.cc", "src/blink/browser_frame.h", "src/blink/remote_frame.cc", "src/blink/remote_frame.h" ]
   }
-  include_dirs = [ "src", "runtime" ]
+  include_dirs = [ "src", "runtime", "libhangul/hangul" ]
   deps = [
+    ":hangul",
     "//base",
     "//media",
     "//third_party/libvpx",
@@ -49,17 +57,26 @@ source_set("navigation") {
     "//cc/paint",
     "//net",
     "//third_party/blink/renderer/core",
+    "//third_party/blink/renderer/controller",
+    "//third_party/inspector_protocol:crdtp",
     "//ui/gfx/geometry",
     "//url",
   ]
+  if (uefi_enable_mozc) {
+    defines = [ "UEFI_ENABLE_MOZC" ]
+    deps += [ "mozc:engine" ]
+  }
 }
 
 if (use_uefi_runtime && current_toolchain == default_toolchain) {
   static_library("browser") {
     complete_static_lib = true
+    data_deps = [ "//third_party/devtools-frontend/src:devtools_frontend_resources" ]
     sources = [
       "src/blink/browser_entry.cc",
+      "src/blink/gpu_compositor.cc",
       "src/blink/gpu_context.cc",
+      "src/blink/gpu_dispatch.cc",
       "src/blink/webgl_context.cc",
       "//gpu/ipc/gl_in_process_context.cc",
       "//gpu/ipc/in_process_command_buffer.cc",
@@ -70,9 +87,14 @@ if (use_uefi_runtime && current_toolchain == default_toolchain) {
       "src/blink/input.cc",
       "//third_party/skia/src/ports/SkFontMgr_custom_embedded.cpp",
     ]
+    if (uefi_enable_mozc) {
+      deps = [ "mozc:engine" ]
+      defines = [ "UEFI_ENABLE_MOZC" ]
+    } else { deps = [] }
     include_dirs = [ "src", "runtime" ]
-    deps = [
+    deps += [
       ":navigation",
+      "//components/webcrypto",
       "//base:i18n",
       "//third_party/brotli:dec",
       "//third_party/zlib/google:compression_utils",
@@ -93,4 +115,13 @@ if (use_uefi_runtime && current_toolchain == default_toolchain) {
       "//ui/ozone",
     ]
   }
+}
+
+static_library("hangul") {
+  sources = [
+    "libhangul/hangul/hangulctype.c",
+    "libhangul/hangul/hangulinputcontext.c",
+    "libhangul/hangul/hangulkeyboard.c",
+  ]
+  defines = [ "ENABLE_EXTERNAL_KEYBOARDS=0" ]
 }

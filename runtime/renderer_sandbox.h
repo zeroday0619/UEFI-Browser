@@ -1,6 +1,7 @@
 #ifndef UEFI_RENDERER_SANDBOX_H
 #define UEFI_RENDERER_SANDBOX_H
 #include <stdint.h>
+#define RENDERER_TABLE_RESERVE 254u
 /* The interrupt ABI uses registers so the entry path never trusts a user stack. */
 enum {
   RENDERER_SYSTEM_ABI = 0x1000,
@@ -9,7 +10,8 @@ enum {
   RENDERER_SYSTEM_EXIT,
   RENDERER_SYSTEM_MAP,
   RENDERER_SYSTEM_PROTECT,
-  RENDERER_SYSTEM_BROKER
+  RENDERER_SYSTEM_BROKER,
+  RENDERER_SYSTEM_JIT_SCOPE
 };
 static inline uint64_t renderer_system_call(uint64_t operation, uint64_t first,
     uint64_t second, uint64_t third, uint64_t fourth, uint64_t fifth) {

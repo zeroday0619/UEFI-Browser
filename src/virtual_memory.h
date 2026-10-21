@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 size_t virtual_memory_reservation_limit(void);
+size_t virtual_memory_renderer_backing_size(void);
 int virtual_memory_contains(const void *address);
 void *virtual_memory_map(void *hint, size_t length, int protection, int flags,
                          int descriptor, off_t offset);
@@ -12,4 +13,5 @@ int virtual_memory_unmap(void *address, size_t length);
 int virtual_memory_discard(void *address, size_t length);
 void virtual_memory_release(void);
 void *virtual_memory_alias(uintptr_t physical,size_t length,int protection,int writable);
+void *virtual_memory_device_alias(uintptr_t physical, size_t length, unsigned cache_type);
 #endif

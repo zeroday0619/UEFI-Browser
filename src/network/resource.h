@@ -3,6 +3,7 @@
 #include "uefi.h"
 #define RESOURCE_URL_LIMIT 4096
 #define RESOURCE_BODY_LIMIT (8 * 1024 * 1024)
+#define RESOURCE_RESPONSE_LIMIT (32 * 1024 * 1024)
 #ifdef __cplusplus
 extern "C" {
 #endif

@@ -12,7 +12,11 @@ import wave
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('wave',type=Path)
 parser.add_argument('report',type=Path)
+parser.add_argument('--mse', action='store_true')
+parser.add_argument('--reservoir', action='store_true')
 options=parser.parse_args()
+if options.mse and options.reservoir:
+    parser.error('Select one audio scenario.')
 raw = options.wave.read_bytes()
 assert raw[:4] == b'RIFF' and raw[8:16] == b'WAVEfmt ' and raw[36:40] == b'data', 'Unexpected QEMU WAV header'
 assert struct.unpack_from('<I', raw, 16)[0] == 16 and struct.unpack_from('<H', raw, 20)[0] == 1
@@ -55,10 +59,36 @@ report={'raw_header_finalized': data_size != 0, 'raw_capture_sha256':hashlib.sha
         'first_stereo_tone_windows':len(first),'second_stereo_tone_windows':len(second),
         'mono8_windows':len(mono8),'mono16_windows':len(mono16),'attenuated_tone_windows':len(quiet),'silent_windows':len(silence),'windows':records}
 options.report.write_text(json.dumps(report,indent=2)+'\n')
-assert len(mono8)>=6 and len(mono16)>=6, 'Mono conversion or native sample-rate playback failed'
-assert len(first)>=12, 'Missing first stereo tone during normal and busy-JavaScript playback'
-assert len(second)>=4, 'Missing second stereo tone after seeking'
-assert len(quiet)>=3, 'Volume attenuation not observed in device output'
-assert len([record for record in silence if second and quiet and second[0]['start_seconds'] < record['start_seconds'] < quiet[0]['start_seconds']])>=3, 'Mute not observed between loud and quiet output'
-assert first[0]['start_seconds']<second[0]['start_seconds']<quiet[0]['start_seconds'], 'Unexpected tone order'
-print('PASS: actual AC97 stereo output, seek frequencies, mute and volume attenuation')
+if options.reservoir:
+    longest = current = 0
+    for record in records:
+        current = current + 1 if all(value > 100 for value in record['rms']) else 0
+        longest = max(longest, current)
+    report['reservoir_nonsilent_pcm_seconds'] = longest / 10
+    report['wall_clock_continuity_verified'] = False
+    options.report.write_text(json.dumps(report, indent=2) + '\n')
+    assert longest >= 25, 'AC97 capture contains less than 2.5 seconds of consecutive non-silent PCM'
+    assert len(first) >= 12, 'The expected Opus stereo tone was not decoded'
+    print('PASS: at least 2.5 seconds of consecutive non-silent PCM; timing requires the live output observer')
+elif options.mse:
+    middle=[record for record in records if tone(record,660,880,4500,9000)]
+    assert len(first)>=12 and len(middle)>=12 and len(second)>=4, 'Missing decoded Opus tone sequence'
+    assert len(quiet)>=3, 'Opus gain attenuation not captured'
+    assert len(silence)>=3, 'Opus mute or pause silence not captured'
+    longest=0
+    current=0
+    for record in records:
+        current=current+1 if tone(record,440,660,4500,9000) else 0
+        longest=max(longest,current)
+    report.update(mse_middle_tone_windows=len(middle), mse_longest_continuous_windows=longest)
+    options.report.write_text(json.dumps(report,indent=2)+'\n')
+    assert longest>=15, 'DMA ring playback did not sustain a 1.5-second tone'
+    print('PASS: actual Opus AC97 stereo tones, DMA continuity, mute and attenuation')
+else:
+    assert len(mono8)>=6 and len(mono16)>=6, 'Mono conversion or native sample-rate playback failed'
+    assert len(first)>=12, 'Missing first stereo tone during normal and busy-JavaScript playback'
+    assert len(second)>=4, 'Missing second stereo tone after seeking'
+    assert len(quiet)>=3, 'Volume attenuation not observed in device output'
+    assert len([record for record in silence if second and quiet and second[0]['start_seconds'] < record['start_seconds'] < quiet[0]['start_seconds']])>=3, 'Mute not observed between loud and quiet output'
+    assert first[0]['start_seconds']<second[0]['start_seconds']<quiet[0]['start_seconds'], 'Unexpected tone order'
+    print('PASS: actual AC97 stereo output, seek frequencies, mute and volume attenuation')

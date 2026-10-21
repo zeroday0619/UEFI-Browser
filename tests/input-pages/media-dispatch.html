@@ -1,0 +1,90 @@
+<!doctype html><meta charset="utf-8"><title>MSE audio dispatch under load</title>
+<style>body{font:20px sans-serif;padding:24px}button{position:absolute;left:380px;top:180px;padding:20px}pre{white-space:pre-wrap}</style>
+<h1>MSE audio dispatch under load</h1><audio id="audio"></audio>
+<button id="start" disabled>Measure playback</button><pre id="results"></pre>
+<script>
+const audio=document.querySelector('#audio');
+const animationWork=location.search==='?animation=120'?120:40;
+const queuedTaskSources=location.search==='?queue=4'?4:0;
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function event(target,name,action){return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>{cleanup();reject(Error('Timeout '+name))},15000);
+  function cleanup(){clearTimeout(timeout);target.removeEventListener(name,done)}
+  function done(){cleanup();resolve()}
+  target.addEventListener(name,done);action?.();
+})}
+async function until(predicate){for(let attempt=0;attempt<300;++attempt){if(predicate())return;await wait(50)}throw Error('Playback condition timeout')}
+function failure(error){document.querySelector('#results').textContent=error.stack;console.error('MSE DISPATCH FAILURE '+error.stack)}
+(async()=>{try{
+  const source=new MediaSource();
+  await event(source,'sourceopen',()=>audio.src=URL.createObjectURL(source));
+  const buffer=source.addSourceBuffer('audio/webm; codecs="opus"');
+  const bytes=await(await fetch('/media-opus.webm')).arrayBuffer();
+  await event(buffer,'updateend',()=>buffer.appendBuffer(bytes));
+  source.endOfStream();await until(()=>audio.readyState>=2);
+  document.querySelector('#start').disabled=false;console.log('MSE DISPATCH READY');
+}catch(error){failure(error)}})();
+document.querySelector('#start').onclick=async()=>{
+  let timer=null,animation=null,queuedRunning=false,ports=[];
+  function stopQueuedWork(){queuedRunning=false;for(const channel of ports){channel.port1.close();channel.port2.close()}ports=[]}
+  try{
+    document.querySelector('#start').disabled=true;
+    await audio.play();await until(()=>audio.currentTime>.3);
+    async function measure(milliseconds){
+      const clock=performance.now(),position=audio.currentTime;
+      await wait(milliseconds);
+      const elapsed=(performance.now()-clock)/1000,advanced=audio.currentTime-position;
+      return {elapsed,advanced,ratio:advanced/elapsed};
+    }
+    const idle=await measure(1000);audio.pause();
+    await event(audio,'seeked',()=>audio.currentTime=0);
+    await audio.play();await until(()=>audio.currentTime>.3);
+    let tasks=0,occupied=0;
+    timer=setInterval(()=>{
+      const started=performance.now();
+      while(performance.now()-started<40){}
+      occupied+=performance.now()-started;++tasks;
+    },80);
+    const busy=await measure(4000);
+    clearInterval(timer);timer=null;audio.pause();
+    await event(audio,'seeked',()=>audio.currentTime=0);
+    await audio.play();await until(()=>audio.currentTime>.3);
+    let frames=0,animationOccupied=0,queuedCallbacks=0,queuedOccupied=0;
+    queuedRunning=true;
+    for(let index=0;index<queuedTaskSources;++index){
+      const channel=new MessageChannel();ports.push(channel);
+      channel.port1.onmessage=()=>{
+        if(!queuedRunning)return;
+        const started=performance.now();
+        while(performance.now()-started<20){}
+        queuedOccupied+=performance.now()-started;++queuedCallbacks;
+        channel.port2.postMessage(0);
+      };
+      channel.port2.postMessage(0);
+    }
+    function animate(){
+      const started=performance.now();
+      while(performance.now()-started<animationWork){}
+      animationOccupied+=performance.now()-started;++frames;
+      document.body.style.backgroundColor=frames%2?'#eef6ff':'#fff7ef';
+      animation=requestAnimationFrame(animate);
+    }
+    animation=requestAnimationFrame(animate);
+    const painted=await measure(4000);
+    cancelAnimationFrame(animation);animation=null;stopQueuedWork();audio.pause();
+    const result={idle,busy,painted,tasks,frames,animationWorkMilliseconds:animationWork,occupiedMilliseconds:occupied,
+      animationOccupiedMilliseconds:animationOccupied,queuedTaskSources,queuedCallbacks,
+      queuedOccupiedMilliseconds:queuedOccupied,error:audio.error?.code??null};
+    document.querySelector('#results').textContent=JSON.stringify(result,null,2);
+    console.log('MSE DISPATCH RESULT '+JSON.stringify(result));
+    if(audio.error||tasks<20||frames<(queuedTaskSources?5:20))throw Error('Media failed or JavaScript load did not execute');
+    if(queuedTaskSources&&queuedCallbacks<40)throw Error('Queued JavaScript load did not execute');
+    if([idle,busy,painted].some(sample=>sample.ratio<.95||sample.ratio>1.05))throw Error('Audio did not maintain real-time playback');
+    console.log('MSE DISPATCH PASS');
+  }catch(error){failure(error)}finally{
+    if(timer!==null)clearInterval(timer);
+    if(animation!==null)cancelAnimationFrame(animation);
+    stopQueuedWork();
+  }
+};
+</script>

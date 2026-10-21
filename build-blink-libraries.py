@@ -9,6 +9,7 @@ import subprocess
 
 project = Path(__file__).resolve().parent
 parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--mozc', action='store_true', help='Build the experimental Mozc firmware engine.')
 parser.add_argument('--host', action='store_true', help='Build Linux host libraries instead of musl firmware objects.')
 parser.add_argument('--resolve-inputs', action='store_true', help='Resolve the pinned GN inputs before building.')
 parser.add_argument('--jobs', type=int, default=min(8, os.cpu_count() or 1))
@@ -16,6 +17,7 @@ options = parser.parse_args()
 if options.jobs < 1:
     parser.error('--jobs must be positive')
 preparation = ['python3', str(project / 'prepare-blink.py')]
+if options.mozc: preparation.append('--mozc')
 if not options.host:
     preparation.append('--firmware')
 if options.resolve_inputs:

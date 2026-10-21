@@ -19,6 +19,8 @@
 #include "gpu/config/gpu_feature_info.h"
 #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
 
+extern "C" uint64_t firmware_dawn_export_canvas(WGPUTexture,uint32_t);
+extern "C" int firmware_gpu_canvas_enabled(void) __attribute__((weak));
 namespace uefi_browser {
 namespace {
 const DawnProcTable& FirmwareProcs() {
@@ -115,6 +117,13 @@ class FirmwareGPUChannel final : public gpu::webgpu::APIChannel {
     flushing_ = false;
     if (disconnected_) ReleaseNativeService();
   }
+  uint64_t ExportTexture(WGPUTexture texture,uint32_t alpha) {
+    Flush();
+    if (disconnected_ || !server_) return 0;
+    auto handle=client_.GetWireHandle(texture);
+    auto native=server_->GetTexture(handle.id,handle.generation);
+    return native ? firmware_dawn_export_canvas(native,alpha) : 0;
+  }
   dawn::wire::WireClient& client() { return client_; }
  private:
   ~FirmwareGPUChannel() override {
@@ -127,6 +136,9 @@ class FirmwareGPUChannel final : public gpu::webgpu::APIChannel {
     commands_.destination = nullptr;
     replies_.destination = nullptr;
     server_.reset();
+    // Device destruction queues lost callbacks that retain native devices and adapters.
+    // The wire server is already gone, so these callbacks only release their userdata.
+    dawn::native::InstanceProcessEvents(native_->Get());
     native_.reset();
     commands_.Clear();
     replies_.Clear();
@@ -165,6 +177,7 @@ class FirmwareWebGPU final : public gpu::webgpu::WebGPUInterface {
     channel_->SetLostCallback(std::move(callback));
   }
   bool lost() const { return channel_->lost(); }
+  uint64_t ExportTexture(WGPUTexture texture,uint32_t alpha) { return channel_->ExportTexture(texture,alpha); }
   void FlushCommands() override { awaiting_ = false; channel_->Flush(); }
   bool EnsureAwaitingFlush() override { bool previous = awaiting_; awaiting_ = true; return !previous; }
   void FlushAwaitingCommands() override { if (awaiting_) FlushCommands(); }
@@ -196,6 +209,7 @@ class FirmwareWebGPU final : public gpu::webgpu::WebGPUInterface {
 
 class FirmwareGPUProvider final : public blink::WebGraphicsContext3DProvider {
  public:
+  uint64_t FirmwareExportTexture(void* texture,uint32_t alpha) override { if (!firmware_gpu_canvas_enabled || !firmware_gpu_canvas_enabled()) return 0; return webgpu_.ExportTexture(static_cast<WGPUTexture>(texture),alpha); }
   gpu::InterfaceBase* InterfaceBase() override { return &webgpu_; }
   gpu::gles2::GLES2Interface* ContextGL() override { return nullptr; }
   gpu::raster::RasterInterface* RasterInterface() override { return nullptr; }
@@ -220,7 +234,7 @@ class FirmwareGPUProvider final : public blink::WebGraphicsContext3DProvider {
 };
 }
 std::unique_ptr<blink::WebGraphicsContext3DProvider> CreateWebGPUProvider() {
-  std::printf("GPU: creating Dawn wire channel with static SwiftShader Vulkan\n");
+  std::printf("GPU: creating Dawn wire channel with firmware Vulkan\n");
   return std::make_unique<FirmwareGPUProvider>();
 }
 }

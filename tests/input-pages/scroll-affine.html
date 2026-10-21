@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8"><title>Affine scroll compositor</title>
+<style>
+body{margin:0;height:4000px;background:linear-gradient(#ccddee,#224466);font:18px sans-serif}
+#run{position:fixed;left:20px;top:20px;width:180px;height:42px;z-index:10}
+#nested{position:fixed;left:400px;top:180px;width:400px;height:300px;overflow:auto;transform:matrix(1.2,.3,-.2,.8,0,0);transform-origin:0 0;background:white;border-radius:24px}
+.content{position:relative;width:1000px;height:3000px;background:repeating-linear-gradient(#dd6633 0 100px,#33aa66 100px 200px)}
+.sticky{position:sticky;top:0;height:40px;background:#8844cc;z-index:1}
+#blocker{position:absolute;left:20px;top:90px;width:100px;height:70px;background:#112233}
+#nested::-webkit-scrollbar{width:20px;height:20px}
+#nested::-webkit-scrollbar-track{background:#99bbdd}
+#nested::-webkit-scrollbar-thumb{background:#2255aa}
+#nested::-webkit-scrollbar-thumb:hover{background:#dd3377}
+#nested::-webkit-scrollbar-thumb:active{background:#7733cc}
+#nested::-webkit-scrollbar-button{display:block;height:20px;width:20px;background:#eeaa22}
+#nested::-webkit-scrollbar-button:hover{background:#cc44aa}
+#nested::-webkit-scrollbar-button:active{background:#663399}
+#nested::-webkit-scrollbar-corner{background:#555555}
+#reflected{position:fixed;left:1020px;top:100px;width:120px;height:80px;transform:scaleX(-1);background:linear-gradient(90deg,#ff2222 50%,#22cc88 50%)}
+#collapsed{position:fixed;left:0;top:0;width:1000px;height:700px;transform:scale(0);background:black;z-index:20}
+iframe{position:fixed;left:50px;top:400px;width:200px;height:120px;border:0;transform:rotate(-10deg) scale(.8);transform-origin:0 0}
+</style>
+<button id="run">Run 20 seconds</button>
+<div id="nested"><div class="content"><div class="sticky"></div><div id="blocker"></div></div></div>
+<div id="reflected"></div><div id="collapsed"></div>
+<iframe srcdoc="<style>body{margin:0;background:#22cc88}div{height:100px;background:#ff2222;transform:skewX(15deg)}</style><div></div>"></iframe>
+<script>
+blocker.addEventListener('wheel',event=>{event.preventDefault();console.log('AFFINE blocked wheel '+event.cancelable)}, {passive:false});
+run.onclick=()=>setTimeout(()=>{console.log('AFFINE begin');const end=performance.now()+20000;while(performance.now()<end){}console.log('AFFINE end')},200);
+addEventListener('scroll',()=>console.log('AFFINE root '+scrollY));
+nested.addEventListener('scroll',()=>console.log('AFFINE nested '+nested.scrollLeft+' '+nested.scrollTop));
+addEventListener('load',()=>console.log('AFFINE ready'));
+</script>

@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Media Source streaming</title>
+<style>body{font:18px sans-serif;background:#10202b;color:#dcefff;padding:24px}video{width:320px;height:240px;background:#222}button{position:absolute;left:380px;top:180px;padding:16px;margin:10px}pre{white-space:pre-wrap}</style>
+<h1>Media Source streaming</h1><video id="video" muted playsinline></video><br>
+<button id="run" disabled>Run streaming checks</button><pre id="results"></pre>
+<script>
+const video=document.querySelector('#video'),results=document.querySelector('#results');let checks=0,source,buffer,url;
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function check(condition,name){if(!condition)throw Error(name);++checks;results.textContent+=name+'\n';console.log('MSE CHECK '+name)}
+function event(target,name,action){return new Promise((resolve,reject)=>{const timer=setTimeout(()=>{cleanup();reject(Error('timeout '+name))},15000);function cleanup(){clearTimeout(timer);target.removeEventListener(name,success);target.removeEventListener('error',failure)}function success(){cleanup();resolve()}function failure(){cleanup();reject(Error('media error '+video.error?.code+' '+video.error?.message))}target.addEventListener(name,success);target.addEventListener('error',failure);action?.()})}
+async function until(predicate){for(let index=0;index<300;++index){if(predicate())return;await wait(50)}throw Error('condition timeout')}
+function dominant(index){const canvas=document.createElement('canvas');canvas.width=160;canvas.height=120;const context=canvas.getContext('2d');context.drawImage(video,0,0,160,120);const pixel=context.getImageData(80,60,1,1).data;return pixel[index]>180&&pixel[(index+1)%3]<60&&pixel[(index+2)%3]<60}
+async function append(bytes){await event(buffer,'updateend',()=>buffer.appendBuffer(bytes))}
+async function attach(codec){video.removeAttribute('src');video.load();if(url)URL.revokeObjectURL(url);source=new MediaSource();url=URL.createObjectURL(source);await event(source,'sourceopen',()=>{video.src=url});buffer=source.addSourceBuffer('video/webm; codecs="'+codec+'"')}
+function failure(error){console.error('MSE FAILURE '+error.stack);results.textContent+='FAIL '+error.stack}
+(async()=>{try{
+ check(MediaSource.isTypeSupported('video/webm; codecs="vp8"'),'MSE VP8 capability');
+ await attach('vp8');check(source.readyState==='open','sourceopen');
+ const bytes=await (await fetch('/media-vp8.webm')).arrayBuffer();window.fixture=bytes;
+ for(let offset=0;offset<bytes.byteLength;offset+=127)await append(bytes.slice(offset,offset+127));
+ await until(()=>video.readyState>=2);check(video.videoWidth===160&&dominant(0),'split byte append decodes red');
+ check(buffer.buffered.length===1&&buffer.buffered.end(0)>2.9,'source buffered range');
+ source.duration=12;check(video.duration===12,'explicit duration');
+ document.querySelector('#run').disabled=false;console.log('MSE READY');
+}catch(error){failure(error)}})();
+document.querySelector('#run').onclick=async()=>{document.querySelector('#run').disabled=true;try{
+ await video.play();await until(()=>video.currentTime>1.15);video.pause();check(dominant(1),'streaming green playback without endOfStream');console.log('MSE GREEN');await wait(1800);
+ await video.play();await until(()=>video.currentTime>=2.99);await wait(350);check(video.currentTime<3.1&&!video.ended,'underflow freezes clock');
+ buffer.timestampOffset=3;await append(window.fixture);await until(()=>video.currentTime>3.3);video.pause();check(dominant(0),'append resumes stalled playback');
+ await event(video,'seeked',()=>video.currentTime=5.3);check(dominant(2),'seek appended segment');console.log('MSE BLUE');await wait(1800);
+ video.currentTime=9;await wait(200);check(video.seeking,'unbuffered seek waits');
+ await event(video,'seeked',()=>video.currentTime=1.3);check(dominant(1),'new seek cancels pending seek');
+ await event(buffer,'updateend',()=>buffer.remove(0,3));check(buffer.buffered.start(0)>=3,'remove evicts coded range');
+ buffer.timestampOffset=0;await append(window.fixture);check(buffer.buffered.start(0)<.1,'reappend restores range');
+ await event(video,'seeked',()=>video.currentTime=.2);check(dominant(0),'seek restored segment');
+ source.endOfStream();check(source.readyState==='ended'&&Math.abs(video.duration-6)<.1,'endOfStream updates duration');
+ await event(video,'seeked',()=>video.currentTime=5.8);await event(video,'ended',()=>video.play());check(video.ended,'stream ends at duration');
+ await video.play();await until(()=>video.currentTime>.2&&video.currentTime<1);video.pause();check(dominant(0),'ended replay seeks demuxer');
+ buffer.timestampOffset=6;await append(window.fixture);check(source.readyState==='open'&&buffer.buffered.end(0)>8.9,'append reopens ended source');
+ await event(video,'seeked',()=>video.currentTime=7.3);check(dominant(1),'reopened source seek');
+ await attach('vp09.00.10.08');const vp9=await (await fetch('/media-vp9.webm')).arrayBuffer();await append(vp9);source.endOfStream();await until(()=>video.readyState>=2);check(dominant(0),'detach and VP9 reattach');
+ await event(video,'seeked',()=>video.currentTime=2.3);check(dominant(2),'VP9 MSE seek');
+ check(video.getVideoPlaybackQuality().totalVideoFrames>0,'decoded frame statistics');
+ document.querySelector('h1').textContent='MSE: '+checks+' checks passed';console.log('MSE PASS checks='+checks);
+}catch(error){failure(error)}};
+</script>

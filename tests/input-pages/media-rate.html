@@ -1,0 +1,47 @@
+<!doctype html><meta charset="utf-8"><title>MSE zero playback rate</title>
+<style>body{font:20px sans-serif;padding:24px}button{position:absolute;left:380px;top:180px;padding:20px}pre{white-space:pre-wrap}</style>
+<h1>MSE zero playback rate</h1><video id="video"></video>
+<button id="start" disabled>Test playback rate</button><pre id="results"></pre>
+<script>
+const video=document.querySelector('#video');
+const wait=milliseconds=>new Promise(resolve=>setTimeout(resolve,milliseconds));
+function event(target,name,action){return new Promise((resolve,reject)=>{
+  const timeout=setTimeout(()=>{cleanup();reject(Error('Timeout '+name))},15000);
+  function cleanup(){clearTimeout(timeout);target.removeEventListener(name,done)}
+  function done(){cleanup();resolve()}
+  target.addEventListener(name,done);action?.();
+})}
+function fail(error){document.querySelector('#results').textContent=error.stack;console.error('MSE RATE FAILURE '+error.stack)}
+async function until(predicate){for(let attempt=0;attempt<300;++attempt){if(predicate())return;await wait(50)}throw Error('Playback condition timeout')}
+(async()=>{try{
+  const source=new MediaSource();
+  await event(source,'sourceopen',()=>video.src=URL.createObjectURL(source));
+  const buffer=source.addSourceBuffer('audio/webm; codecs="opus"');
+  const bytes=await(await fetch('/media-opus.webm')).arrayBuffer();
+  await event(buffer,'updateend',()=>buffer.appendBuffer(bytes));source.endOfStream();
+  await until(()=>video.readyState>=2);
+  document.querySelector('#start').disabled=false;console.log('MSE RATE READY');
+}catch(error){fail(error)}})();
+document.querySelector('#start').onclick=async()=>{try{
+  document.querySelector('#start').disabled=true;
+  await video.play();await until(()=>video.currentTime>.5);
+  video.playbackRate=0;const frozen=video.currentTime;
+  await wait(1200);
+  if(Math.abs(video.currentTime-frozen)>.03)throw Error('Zero rate clock advanced');
+  video.playbackRate=1;await wait(50);const resumed=video.currentTime;
+  console.log('MSE RATE CLOCK frozen='+frozen+' resumed='+resumed);
+  if(Math.abs(resumed-frozen)>.15)throw Error('Audio consumed queued samples at zero rate');
+  await wait(600);video.pause();
+  if(video.currentTime-resumed<.4)throw Error('Playback did not resume');
+  video.playbackRate=0;const paused=video.currentTime;
+  await video.play();await wait(400);
+  if(video.paused||Math.abs(video.currentTime-paused)>.03)throw Error('Play at zero rate changed clock or paused state');
+  video.playbackRate=0;await wait(400);
+  if(Math.abs(video.currentTime-paused)>.03)throw Error('Repeated zero rate changed clock');
+  video.playbackRate=1;await wait(400);video.pause();
+  if(video.currentTime-paused<.3||video.currentTime-paused>.6)throw Error('Second resume changed the media timeline');
+  if(video.error)throw Error(video.error.message);
+  document.querySelector('#results').textContent='Zero rate freezes DMA and resumes without a clock jump';
+  console.log('MSE RATE PASS');
+}catch(error){fail(error)}};
+</script>

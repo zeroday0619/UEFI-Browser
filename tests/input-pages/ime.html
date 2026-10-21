@@ -1,0 +1,36 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Input method integration</title>
+<style>
+body { font: 22px sans-serif; margin: 40px; }
+input, textarea, [contenteditable] { font: 28px sans-serif; width: 500px; height: 50px; box-sizing: border-box; }
+#text { position: absolute; left: 40px; top: 100px; }
+#edit { position: absolute; left: 40px; top: 180px; border: 1px solid; }
+iframe { position: absolute; left: 40px; top: 280px; width: 530px; height: 120px; }
+button { position: absolute; left: 620px; top: 100px; width: 180px; height: 50px; }
+pre { position: absolute; left: 40px; top: 430px; font-size: 20px; }
+</style>
+<h1>CJK composition</h1>
+<input id="text" autocomplete="off">
+<div id="edit" contenteditable></div>
+<iframe id="child" srcdoc="<meta charset=utf-8><textarea id=field style='font:28px sans-serif;width:480px;height:80px'></textarea>"></iframe>
+<button id="check">Check values</button>
+<pre id="result"></pre>
+<script>
+let starts=0, updates=0, ends=0, inputs=0;
+for (const type of ['compositionstart','compositionupdate','compositionend','input']) {
+  document.addEventListener(type, event => {
+    if(type==='compositionstart') starts++;
+    if(type==='compositionupdate') updates++;
+    if(type==='compositionend') ends++;
+    if(type==='input' && event.isComposing) inputs++;
+  });
+}
+check.onclick=()=>{
+  const state={text:text.value,edit:edit.textContent,child:child.contentDocument.getElementById('field').value};
+  result.textContent=JSON.stringify(state,null,2);
+  console.log('IME VALUES '+JSON.stringify(state));
+  console.log('IME EVENTS '+JSON.stringify({starts,updates,ends,inputs}));
+};
+console.log('IME READY');
+</script>

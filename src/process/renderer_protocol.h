@@ -11,14 +11,15 @@ typedef struct {
   uint32_t shift;
   uint8_t toggle;
   uint8_t wheel_consumed;
-  uint8_t reserved[6];
+  uint8_t input_method, composition_action;
+  uint8_t reserved[4];
 } RendererInputMessage;
 #ifdef __cplusplus
 static_assert(sizeof(RendererInputMessage) == 56, "Renderer input wire layout");
 #else
 _Static_assert(sizeof(RendererInputMessage) == 56, "Renderer input wire layout");
 #endif
-#define RENDERER_PROTOCOL_VERSION 1u
+#define RENDERER_PROTOCOL_VERSION 2u
 #define RENDERER_INPUT_POINTER 1u
 #define RENDERER_INPUT_KEY 2u
 #define RENDERER_INPUT_CAPACITY 256u

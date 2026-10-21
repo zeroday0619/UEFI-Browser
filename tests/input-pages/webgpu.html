@@ -22,13 +22,23 @@
     @compute @workgroup_size(8) fn main(@builtin(global_invocation_id) id:vec3u){values[id.x]=values[id.x]*3u+7u;}`}),entryPoint:'main'}});
   console.log('WEBGPU STAGE bindings');
   const bindings=device.createBindGroup({layout:compute.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source}}]});
-  const encoder=device.createCommandEncoder();const pass=encoder.beginComputePass();
-  pass.setPipeline(compute);pass.setBindGroup(0,bindings);pass.dispatchWorkgroups(8);pass.end();
-  encoder.copyBufferToBuffer(source,0,readback,0,256);device.queue.submit([encoder.finish()]);
+  const cycles=Math.min(64,Math.max(1,Number(new URLSearchParams(location.search).get('coherence_cycles'))||1));
   console.log('WEBGPU STAGE submit and map');
-  await readback.mapAsync(GPUMapMode.READ);
-  check(new Uint32Array(readback.getMappedRange()).every((value,index)=>value===index*3+7),'WGSL compute and mapped buffer');
-  readback.unmap();
+  for(let cycle=0;cycle<cycles;cycle++){
+    if(cycle)device.queue.writeBuffer(source,0,new Uint32Array(Array.from({length:64},(_,index)=>index+cycle*64)));
+    const encoder=device.createCommandEncoder();const pass=encoder.beginComputePass();
+    pass.setPipeline(compute);pass.setBindGroup(0,bindings);pass.dispatchWorkgroups(8);pass.end();
+    encoder.copyBufferToBuffer(source,0,readback,0,256);device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(GPUMapMode.READ);
+    const computed=new Uint32Array(readback.getMappedRange());
+    if(!computed.every((value,index)=>value===(index+cycle*64)*3+7)){
+      console.log('WEBGPU COMPUTE MISMATCH cycle='+cycle+' values='+Array.from(computed).join(','));
+      throw Error('WGSL compute and mapped buffer');
+    }
+    readback.unmap();
+  }
+  check(true,'WGSL compute and mapped buffer');
+  console.log('WEBGPU COHERENCY PASS cycles='+cycles);
   device.queue.writeBuffer(source,0,new Uint32Array(64).fill(0x12345678));
   const bounded=device.createComputePipeline({layout:'auto',compute:{module:device.createShaderModule({code:`
     @group(0) @binding(0) var<storage,read_write> values:array<u32>;
@@ -36,7 +46,9 @@
   const limited=device.createBindGroup({layout:bounded.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:source,size:16}}]});
   const boundary=device.createCommandEncoder();const dispatch=boundary.beginComputePass();dispatch.setPipeline(bounded);dispatch.setBindGroup(0,limited);dispatch.dispatchWorkgroups(1);dispatch.end();
   boundary.copyBufferToBuffer(source,0,readback,0,256);device.queue.submit([boundary.finish()]);await readback.mapAsync(GPUMapMode.READ);
-  check(new Uint32Array(readback.getMappedRange()).slice(4).every(value=>value===0x12345678),'shader storage binding boundary');readback.unmap();
+  const boundedValues=new Uint32Array(readback.getMappedRange());
+  if(!boundedValues.slice(4).every(value=>value===0x12345678))console.log('WEBGPU BOUNDARY MISMATCH '+Array.from(boundedValues).join(','));
+  check(boundedValues.slice(4).every(value=>value===0x12345678),'shader storage binding boundary');readback.unmap();
   device.pushErrorScope('validation');
   const invalid=device.createShaderModule({code:'@compute fn invalid syntax'});
   check((await invalid.getCompilationInfo()).messages.some(message=>message.type==='error'),'WGSL compiler diagnostics');await device.popErrorScope();

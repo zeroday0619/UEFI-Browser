@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 project=$(cd -- "$(dirname -- "$0")" && pwd)
+# Distinct EFI output directories still share the configured musl library.
+mkdir -p "$project/build/musl"
+exec 9>"$project/build/musl/build.lock"
+flock 9
 source_tree=$(python3 "$project/prepare-musl.py")
 build=${BUILD_DIRECTORY:-"$project/build/musl"}
 libc_build="$project/build/musl/libc"
@@ -13,16 +17,104 @@ common=(-O2 -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic -fno-pie -f
 )
 includes=(-nostdinc -isystem "$(clang -print-resource-dir)/include" -I"$source_tree/arch/x86_64" -I"$source_tree/arch/generic" -I"$libc_build/obj/src/internal" -I"$libc_build/obj/include" -I"$source_tree/src/include" -I"$source_tree/src/internal" -I"$source_tree/include" -I"$project/runtime")
 # Browser builds fail closed when an unprivileged AP renderer cannot be started.
-renderer_cpl3=${ENABLE_RENDERER_CPL3:-${ENABLE_BLINK:-0}}
+renderer_cpl3_default=0
+if [[ ${ENABLE_BLINK:-0} == 1 || ${ENABLE_VENUS_RUNTIME:-0} == 1 ]]; then renderer_cpl3_default=1; fi
+renderer_cpl3=${ENABLE_RENDERER_CPL3:-$renderer_cpl3_default}
 case "$renderer_cpl3" in 0|1) ;; *) printf '%s\n' 'ENABLE_RENDERER_CPL3 must be 0 or 1.' >&2; exit 1 ;; esac
 engine_flags=()
 engine_objects=()
+if [[ ${ENABLE_GPU_COMPOSITION:-0} == 1 ]]; then
+ if [[ ${ENABLE_VENUS_GPU:-0} != 1 ]]; then
+  printf '%s\n' 'ENABLE_GPU_COMPOSITION requires ENABLE_VENUS_GPU=1.' >&2
+  exit 1
+ fi
+ engine_flags+=(-DENABLE_GPU_COMPOSITION)
+ case ${ENABLE_GPU_CANVAS:-1} in
+  1) engine_flags+=(-DENABLE_GPU_CANVAS) ;;
+  0) ;;
+  *) printf '%s\n' 'ENABLE_GPU_CANVAS must be 0 or 1.' >&2; exit 1 ;;
+ esac
+fi
+if [[ ${ENABLE_VENUS_RUNTIME:-0} == 1 || ${ENABLE_VENUS_GPU:-0} == 1 ]]; then
+ if [[ $renderer_cpl3 != 1 ]]; then
+  printf '%s\n' 'Mesa Venus requires the CPL3 broker for device memory cache attributes.' >&2
+  exit 1
+ fi
+ if [[ ${ENABLE_VENUS_RUNTIME:-0} == 1 && ${ENABLE_BLINK:-0} == 1 ]]; then
+  printf '%s\n' 'ENABLE_VENUS_RUNTIME currently requires a standalone GPU probe.' >&2
+  exit 1
+ fi
+ if [[ ${ENABLE_VENUS_GPU:-0} == 1 && ( ${ENABLE_BLINK:-0} != 1 || $renderer_cpl3 != 1 ) ]]; then
+  printf '%s\n' 'ENABLE_VENUS_GPU requires the CPL3 Blink browser.' >&2
+  exit 1
+ fi
+ if [[ ${ENABLE_VENUS_RUNTIME:-0} == 1 ]]; then engine_flags+=(-DENABLE_VENUS_RUNTIME -DENABLE_CPP); fi
+ if [[ ${ENABLE_VENUS_GPU:-0} == 1 ]]; then engine_flags+=(-DENABLE_VENUS_GPU); fi
+ venus_source="$project/build/venus-runtime-source/mesa-26.2.5"
+ venus_archive="$project/build/venus-runtime/src/virtio/vulkan/libvulkan_virtio.a"
+ venus_api_flags=()
+ if [[ ${ENABLE_VENUS_GPU:-0} == 1 ]]; then
+  venus_symbols=()
+  for symbol in vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion; do
+   venus_symbols+=(--redefine-sym "$symbol=uefi_venus_$symbol")
+   venus_api_flags+=(-D$symbol=uefi_venus_$symbol)
+  done
+  llvm-objcopy "${venus_symbols[@]}" "$venus_archive" "$build/libvenus-browser.a"
+  venus_archive="$build/libvenus-browser.a"
+ fi
+ native="$project/../../work/chromium-build/chromium/out/uefi-blink-native/obj/buildtools/third_party"
+ venus_names=(transport)
+ if [[ ${ENABLE_VENUS_RUNTIME:-0} == 1 ]]; then
+  python3 "$project/tools/build-venus-shaders.py" "$build/venus-shaders"
+  venus_names+=(probe render)
+ fi
+ venus_device_flags=()
+ if [[ $renderer_cpl3 == 1 ]]; then
+  engine_flags+=(-DENABLE_VENUS_CPL3)
+  venus_names+=(broker proxy)
+  for operation in open close submit poll release_fence create_blob destroy_blob present_image scanout retain_blob release_blob attach_blob detach_blob; do
+   venus_device_flags+=(-Dfirmware_venus_$operation=firmware_venus_device_$operation)
+  done
+ fi
+ for name in "${venus_names[@]}"; do
+  venus_flags=()
+  if [[ $name == transport ]]; then venus_flags+=("${venus_device_flags[@]}"); fi
+  clang "${venus_api_flags[@]}" "${engine_flags[@]}" "${venus_flags[@]}" "${common[@]}" "${includes[@]}" -I"$venus_source/include" -I"$venus_source/src" -I"$build/venus-shaders" \
+    -c "$project/src/gpu/venus-runtime/$name.c" -o "$build/venus-$name.o"
+  engine_objects+=("$build/venus-$name.o")
+ done
+ engine_objects+=(--whole-archive "$venus_archive" --no-whole-archive "$native/libc++/libc++.a" "$native/libc++abi/libc++abi.a")
+fi
+media_service=${ENABLE_MEDIA_SERVICE:-${ENABLE_MEDIA_SERVICE_PROBE:-0}}
+case "$media_service" in 0|1) ;; *) printf '%s\n' 'ENABLE_MEDIA_SERVICE must be 0 or 1.' >&2; exit 1 ;; esac
+if [[ $media_service == 1 ]]; then
+ if [[ $renderer_cpl3 != 1 || ${ENABLE_BLINK:-0} != 1 ]]; then
+  printf '%s\n' 'ENABLE_MEDIA_SERVICE requires ENABLE_BLINK=1 and ENABLE_RENDERER_CPL3=1.' >&2; exit 1
+ fi
+ engine_flags+=(-DENABLE_MEDIA_SERVICE)
+ if [[ ${ENABLE_MEDIA_SERVICE_PROBE:-0} == 1 ]]; then
+  engine_flags+=(-DENABLE_MEDIA_SERVICE_PROBE)
+ fi
+fi
+if [[ ${ENABLE_MOZC_PROBE:-0} == 1 ]]; then
+ engine_flags+=(-DENABLE_MOZC_PROBE)
+fi
+if [[ ${ENABLE_PANIC_PROBE:-0} == 1 ]]; then
+ engine_flags+=(-DENABLE_PANIC_PROBE)
+fi
+if [[ ${ENABLE_MEMORY_PROBE:-0} == 1 ]]; then
+ engine_flags+=(-DENABLE_MEMORY_PROBE)
+ clang "${common[@]}" "${includes[@]}" -c "$project/src/musl/memory_probe.c" -o "$build/memory-probe.o"
+ engine_objects+=("$build/memory-probe.o")
+fi
 if [[ ${ENABLE_CPL3_PROBE:-0} == 1 ]]; then
  if [[ $renderer_cpl3 != 1 ]]; then
   printf '%s\n' 'ENABLE_CPL3_PROBE requires ENABLE_RENDERER_CPL3=1.' >&2
   exit 1
  fi
  engine_flags+=(-DENABLE_CPL3_PROBE)
+ clang "${common[@]}" "${includes[@]}" -c "$project/src/musl/jit_probe.c" -o "$build/jit-probe.o"
+ engine_objects+=("$build/jit-probe.o")
 fi
 if [[ ${ENABLE_BROKER_PROBE:-0} == 1 ]]; then
  engine_flags+=(-DENABLE_BROKER_PROBE)
@@ -58,6 +150,10 @@ ASM
  clang -c "$build/fonts.S" -o "$build/fonts.o"
  python3 "$project/tools/embed-blink-resources.py" "$root/work/chromium-build/chromium" "$build/resources.c"
  clang "${common[@]}" "${includes[@]}" -c "$build/resources.c" -o "$build/resources.o"
+ python3 "$project/tools/embed-devtools.py" "$root/work/chromium-build/chromium/out/uefi-blink-native/gen/third_party/devtools-frontend/src" "$build"
+ clang "${common[@]}" "${includes[@]}" -c "$build/devtools-index.c" -o "$build/devtools-index.o"
+ clang -c "$build/devtools-data.S" -o "$build/devtools-data.o"
+ engine_objects+=("$build/devtools-index.o" "$build/devtools-data.o")
  python3 "$project/tools/blink-link-inputs.py" "$root/work/chromium-build/chromium/out/uefi-blink-native" "$build/blink-runtime.rsp"
  python3 - "$build/browser-url.c" <<'PYTHON'
 import json, os, pathlib, sys, urllib.parse
@@ -71,8 +167,17 @@ flags = {'optimized': '--single-threaded --sparkplug --turbofan',
          'interpreter': '--single-threaded --jitless'}
 if mode not in flags:
     raise SystemExit('BLINK_JAVASCRIPT_MODE must be optimized, sparkplug, or interpreter.')
+source_positions = os.environ.get('BLINK_SOURCE_POSITIONS', 'lazy')
+if source_positions not in ('lazy', 'eager'):
+    raise SystemExit('BLINK_SOURCE_POSITIONS must be lazy or eager.')
+javascript_flags = flags[mode] + (' --no-enable-lazy-source-positions'
+                                if source_positions == 'eager' else '')
+diagnostics = os.environ.get('BLINK_TASK_DIAGNOSTICS', '0')
+if diagnostics not in ('0', '1'):
+    raise SystemExit('BLINK_TASK_DIAGNOSTICS must be 0 or 1.')
 pathlib.Path(sys.argv[1]).write_text('const char firmware_browser_url[] = ' + json.dumps(url) + ';\n' +
-    'const char firmware_javascript_flags[] = ' + json.dumps(flags[mode]) + ';\n')
+    'const char firmware_javascript_flags[] = ' + json.dumps(javascript_flags) + ';\n' +
+    'const int firmware_task_diagnostics = ' + diagnostics + ';\n')
 PYTHON
  clang "${common[@]}" "${includes[@]}" -c "$build/browser-url.c" -o "$build/browser-url.o"
  engine_objects+=("$archive" "$build/fonts.o" "$build/resources.o" "$build/browser-url.o" "@$build/blink-runtime.rsp")
@@ -136,6 +241,8 @@ clang "${common[@]}" "${includes[@]}" -DUSE_MUSL -c "$project/src/posix.c" -o "$
 clang "${common[@]}" "${includes[@]}" -c "$project/src/virtual_memory.c" -o "$build/virtual_memory.o"
 clang "${common[@]}" "${includes[@]}" -mgeneral-regs-only -c "$project/src/process/process.c" -o "$build/process.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/process/renderer_runtime.c" -o "$build/renderer_runtime.o"
+clang "${common[@]}" "${includes[@]}" "${engine_flags[@]}" -c "$project/src/process/media_service.c" -o "$build/media_service.o"
+engine_objects+=("$build/media_service.o")
 clang "${common[@]}" "${includes[@]}" -c "$project/src/network/sockets.c" -o "$build/sockets.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/network/dns.c" -o "$build/dns.o"
 clang "${common[@]}" "${includes[@]}" -c "$project/src/audio/ac97.c" -o "$build/audio.o"
@@ -153,6 +260,10 @@ payload_start:
 payload_end:
 ASM
 loader_flags=()
+loader_objects=()
+if [[ $media_service == 1 ]]; then
+ loader_flags+=(-DENABLE_MEDIA_SERVICE)
+fi
 if [[ $renderer_cpl3 == 1 ]]; then
  loader_flags+=(-DENABLE_RENDERER_CPL3 -mgeneral-regs-only)
 fi
@@ -181,5 +292,10 @@ fi
 clang --target=x86_64-pc-win32-coff -ffreestanding -fshort-wchar -mno-red-zone -fno-stack-protector -O2 -I"$project/runtime" "${loader_flags[@]}" -c "$project/src/loader.c" -o "$build/loader.obj"
 clang --target=x86_64-pc-win32-coff -c "$build/embed.S" -o "$build/embed.obj"
 clang --target=x86_64-pc-win32-coff -c "$project/runtime/platform/jump.S" -o "$build/jump.obj"
-lld-link /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 "/out:$build/esp/EFI/BOOT/BOOTX64.next.EFI" "$build/loader.obj" "$build/embed.obj" "$build/jump.obj"
+if [[ $media_service == 1 ]]; then
+ clang --target=x86_64-pc-win32-coff -ffreestanding -fshort-wchar -mno-red-zone -fno-stack-protector -O2 -I"$project/runtime" "${loader_flags[@]}" -c "$project/src/loader-media.c" -o "$build/loader-media.obj"
+ clang --target=x86_64-pc-win32-coff -include "$project/src/loader-media-symbols.h" -c "$project/runtime/platform/jump.S" -o "$build/media-jump.obj"
+ loader_objects+=("$build/loader-media.obj" "$build/media-jump.obj")
+fi
+lld-link /subsystem:efi_application /entry:efi_main /nodefaultlib /machine:x64 "/out:$build/esp/EFI/BOOT/BOOTX64.next.EFI" "$build/loader.obj" "$build/embed.obj" "$build/jump.obj" "${loader_objects[@]}"
 mv -- "$build/esp/EFI/BOOT/BOOTX64.next.EFI" "$build/esp/EFI/BOOT/BOOTX64.EFI"

@@ -44,6 +44,42 @@ long firmware_serial_write(long descriptor, const char *data, size_t length) {
   }
   return (long)length;
 }
+/* Mesa uses monotonic clock sleeps while waiting for host ring progress. */
+static long firmware_clock_nanosleep(clockid_t clock, int flags,
+                                     const struct timespec *request) {
+  if (!request) return -EFAULT;
+  if (flags & ~TIMER_ABSTIME || request->tv_sec < 0 || request->tv_nsec < 0 ||
+      request->tv_nsec >= 1000000000) return -EINVAL;
+  if (clock != CLOCK_MONOTONIC && clock != CLOCK_REALTIME &&
+      clock != CLOCK_BOOTTIME) return -EINVAL;
+  struct timespec deadline = *request, current;
+  if (!(flags & TIMER_ABSTIME)) {
+    /* Relative realtime sleeps must not change when the calendar is adjusted. */
+    clock = CLOCK_MONOTONIC;
+    if (clock_gettime(clock, &current)) return -errno;
+    if (__builtin_add_overflow(deadline.tv_sec, current.tv_sec, &deadline.tv_sec))
+      return -EOVERFLOW;
+    deadline.tv_nsec += current.tv_nsec;
+    if (deadline.tv_nsec >= 1000000000) {
+      if (__builtin_add_overflow(deadline.tv_sec, (time_t)1, &deadline.tv_sec))
+        return -EOVERFLOW;
+      deadline.tv_nsec -= 1000000000;
+    }
+  }
+  for (;;) {
+    if (clock_gettime(clock, &current)) return -errno;
+    if (current.tv_sec > deadline.tv_sec ||
+        (current.tv_sec == deadline.tv_sec && current.tv_nsec >= deadline.tv_nsec))
+      return 0;
+    time_t seconds = deadline.tv_sec - current.tv_sec;
+    long nanoseconds = deadline.tv_nsec - current.tv_nsec;
+    if (nanoseconds < 0) { --seconds; nanoseconds += 1000000000; }
+    /* Bounded firmware stalls leave cooperative threads opportunities to run. */
+    struct timespec delay = {0, seconds || nanoseconds > 10000000 ? 10000000 : nanoseconds};
+    if (nanosleep(&delay, NULL)) return -errno;
+    firmware_threads_yield();
+  }
+}
 long firmware_syscall(long number, long first, long second, long third,
                       long fourth, long fifth, long sixth) {
   if (number == SYS_memfd_create || ((number==SYS_close || number==SYS_dup || number==SYS_fcntl || number==SYS_ftruncate || number==SYS_fstat) && firmware_shared_descriptor(first)))
@@ -120,6 +156,8 @@ long firmware_syscall(long number, long first, long second, long third,
     return firmware_threads_futex((int *)first, second, third, (void *)fourth, (int *)fifth, sixth);
   case SYS_clock_gettime:
     return clock_gettime(first, (void *)second) ? -errno : 0;
+  case SYS_clock_nanosleep:
+    return firmware_clock_nanosleep(first, second, (void *)third);
   case SYS_nanosleep:
     return nanosleep((void *)first, (void *)second) ? -errno : 0;
   case SYS_mmap: {

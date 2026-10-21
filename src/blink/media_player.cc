@@ -1,6 +1,7 @@
 #include "blink/media_player.h"
 #include <algorithm>
 #include <cmath>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <limits>
@@ -8,13 +9,19 @@
 #include "base/functional/bind.h"
 #include "base/memory/weak_ptr.h"
 #include "base/task/single_thread_task_runner.h"
+#include "base/task/bind_post_task.h"
 #include "base/timer/timer.h"
 #include "firmware_audio.h"
+#include "firmware_media.h"
 #include "media/base/media_content_type.h"
+#include "media/base/audio_buffer.h"
+#include "media/filters/opus_audio_decoder.h"
 #include "media/base/media_log.h"
 #include "media/base/media_tracks.h"
 #include "media/base/stream_parser_buffer.h"
 #include "media/formats/webm/webm_stream_parser.h"
+#include "media/filters/chunk_demuxer.h"
+#include "media/base/timestamp_constants.h"
 #include "media/gfx/paint_canvas_video_renderer.h"
 #include "third_party/blink/public/platform/web_media_player.h"
 #include "third_party/blink/public/platform/web_media_player_source.h"
@@ -27,6 +34,7 @@
 #include "third_party/blink/public/web/web_local_frame.h"
 #include "third_party/blink/renderer/platform/heap/persistent.h"
 #include "third_party/blink/renderer/platform/media/media_player_client.h"
+#include "third_party/blink/renderer/platform/media/web_media_source_impl.h"
 #include "third_party/libvpx/source/libvpx/vpx/vp8dx.h"
 #include "third_party/libvpx/source/libvpx/vpx/vpx_decoder.h"
 #include "third_party/libyuv/include/libyuv/convert_argb.h"
@@ -41,7 +49,8 @@ class MediaLog final : public media::MediaLog {
   MediaLog() = default;
 };
 class Player final : public blink::WebMediaPlayer,
-                     public blink::WebAssociatedURLLoaderClient {
+                     public blink::WebAssociatedURLLoaderClient,
+                     public media::DemuxerHost {
  public:
   Player(blink::WebLocalFrame* frame, blink::WebMediaPlayerClient* client)
       : frame_(frame),
@@ -49,6 +58,7 @@ class Player final : public blink::WebMediaPlayer,
   ~Player() override { Shutdown(); }
   void Shutdown() override {
     weak_.InvalidateWeakPtrs();
+    CloseMse();
     CloseAudio();
     timer_.Stop();
     if (loader_)
@@ -70,10 +80,13 @@ class Player final : public blink::WebMediaPlayer,
                   CorsMode cors,
                   bool) override {
     Reset();
+    if (type == kLoadTypeMediaSource) {
+      StartMse();
+      return kImmediate;
+    }
     if (type != kLoadTypeURL || !source.IsURL()) {
       PostFailure(kNetworkStateFormatError,
-                  "UEFI_MEDIA_SOURCE: only URL WebM video and PCM WAV audio "
-                  "are supported");
+                  "UEFI_MEDIA_SOURCE: expected URL WebM, PCM WAV or MSE WebM");
       return kImmediate;
     }
     network_ = kNetworkStateLoading;
@@ -100,19 +113,29 @@ class Player final : public blink::WebMediaPlayer,
   void Play() override {
     if (!client_)
       return;
-    if (IsEnded())
-      position_ = 0;
+    if (IsEnded()) {
+      if (mse_demuxer_)
+        SeekMse(0);
+      else
+        position_ = 0;
+    }
     paused_ = false;
     if (HasAudio() && !StartAudio())
       return;
     anchor_ = base::TimeTicks::Now();
     client_->DidPlayerStartPlaying();
+    mse_last_tick_ = base::TimeTicks();
+    mse_maximum_tick_gap_us_ = 0;
     timer_.Start(FROM_HERE, base::Milliseconds(16), this, &Player::Tick);
   }
   void Pause(PauseReason) override {
     position_ = CurrentTime();
     if (HasAudio())
       firmware_audio_request(AUDIO_STOP, audio_handle_, 0, 0, 0);
+    if (mse_audio_stream_) {
+      if (position_ < duration_) position_ = MseAudioTime();
+      mse_audio_started_ = false;
+    }
     paused_ = true;
     timer_.Stop();
     if (client_)
@@ -121,6 +144,10 @@ class Player final : public blink::WebMediaPlayer,
   void Seek(double seconds) override {
     if (!client_ || !HasMedia() || !std::isfinite(seconds))
       return;
+    if (mse_demuxer_) {
+      SeekMse(seconds);
+      return;
+    }
     if (HasAudio())
       firmware_audio_request(AUDIO_STOP, audio_handle_, 0, 0, 0);
     position_ = std::clamp(seconds, 0.0, duration_);
@@ -164,11 +191,18 @@ class Player final : public blink::WebMediaPlayer,
     return true;
   }
   blink::WebTimeRanges Buffered() const override {
+    if (mse_demuxer_) {
+      blink::WebTimeRanges result(mse_ranges_.size());
+      for (size_t index = 0; index < mse_ranges_.size(); ++index)
+        result[index] = {mse_ranges_.start(index).InSecondsF(),
+                         mse_ranges_.end(index).InSecondsF()};
+      return result;
+    }
     return !HasMedia() ? blink::WebTimeRanges()
                        : blink::WebTimeRanges(0, duration_);
   }
   blink::WebTimeRanges Seekable() const override { return Buffered(); }
-  bool HasVideo() const override { return !frames_.empty(); }
+  bool HasVideo() const override { return mse_video_ || !frames_.empty(); }
   bool HasAudio() const override { return audio_handle_ > 0; }
   bool IsVideoBeingCaptured() const override { return false; }
   gfx::Size NaturalSize() const override { return size_; }
@@ -179,6 +213,9 @@ class Player final : public blink::WebMediaPlayer,
   double CurrentTime() const override {
     if (!HasMedia())
       return 0;
+    if (mse_audio_stream_ && HasAudio())
+      return std::clamp(paused_ || seeking_ || !rate_ || mse_waiting_
+                            ? position_ : MseAudioTime(), 0.0, duration_);
     if (HasAudio()) {
       if (paused_ || seeking_ || !rate_)
         return position_;
@@ -189,8 +226,10 @@ class Player final : public blink::WebMediaPlayer,
                  : position_;
     }
     double value = position_;
-    if (!paused_ && !seeking_)
+    if (!paused_ && !seeking_ && !mse_waiting_)
       value += (base::TimeTicks::Now() - anchor_).InSecondsF() * rate_;
+    if (mse_demuxer_ && !seeking_ && !mse_end_)
+      value = std::min(value, std::max(position_, mse_decoded_end_));
     return std::clamp(value, 0.0, duration_);
   }
   bool IsEnded() const override {
@@ -205,7 +244,7 @@ class Player final : public blink::WebMediaPlayer,
   bool WouldTaintOrigin() const override { return false; }
   double MediaTimeForTimeValue(double value) const override { return value; }
   unsigned DecodedFrameCount() const override {
-    return static_cast<unsigned>(frames_.size());
+    return total_decoded_;
   }
   unsigned DroppedFrameCount() const override { return dropped_; }
   uint64_t AudioDecodedByteCount() const override { return audio_frames_ * 4; }
@@ -256,7 +295,9 @@ class Player final : public blink::WebMediaPlayer,
     result->height = size_.height();
     result->media_time = frames_[displayed_]->timestamp();
     result->rendering_interval = base::Milliseconds(16);
-    result->average_frame_duration = base::Seconds(duration_ / frames_.size());
+    result->average_frame_duration = mse_demuxer_
+        ? base::Seconds(mse_frame_duration_)
+        : base::Seconds(duration_ / frames_.size());
     return result;
   }
   bool WillFollowRedirect(const blink::WebURL& url,
@@ -293,7 +334,9 @@ class Player final : public blink::WebMediaPlayer,
   }
 
  private:
-  bool HasMedia() const { return HasAudio() || !frames_.empty(); }
+#include "blink/media_source_player.inc"
+#include "blink/media_source_audio.inc"
+  bool HasMedia() const { return HasAudio() || HasVideo(); }
   void CloseAudio() {
     if (audio_handle_ > 0)
       firmware_audio_request(AUDIO_CLOSE, audio_handle_, 0, 0, 0);
@@ -309,6 +352,7 @@ class Player final : public blink::WebMediaPlayer,
     firmware_audio_request(AUDIO_VOLUME, audio_handle_, gain, 0, 0);
   }
   bool StartAudio() {
+    if (mse_audio_stream_) return StartMseAudio();
     if (!rate_) {
       firmware_audio_request(AUDIO_STOP, audio_handle_, 0, 0, 0);
       return true;
@@ -462,6 +506,7 @@ class Player final : public blink::WebMediaPlayer,
   }
   void Reset() {
     weak_.InvalidateWeakPtrs();
+    CloseMse();
     CloseAudio();
     timer_.Stop();
     if (loader_)
@@ -486,6 +531,7 @@ class Player final : public blink::WebMediaPlayer,
     ready_ = kReadyStateHaveNothing;
     network_ = kNetworkStateEmpty;
     decoded_bytes_ = 0;
+    total_decoded_ = 0;
     received_bytes_ = 0;
     packet_ = 0;
     displayed_ = 0;
@@ -504,6 +550,10 @@ class Player final : public blink::WebMediaPlayer,
                                   std::string(message)));
   }
   void Fail(NetworkState state, std::string message) {
+    if (mse_demuxer_ && !mse_stopped_) {
+      mse_stopped_ = true;
+      mse_demuxer_->Stop();
+    }
     CloseAudio();
     timer_.Stop();
     paused_ = true;
@@ -572,6 +622,15 @@ class Player final : public blink::WebMediaPlayer,
         tracks->GetVideoConfigs().size() != 1)
       return false;
     auto& [identifier, config] = *tracks->GetVideoConfigs().begin();
+    if (!ConfigureVideo(config)) return false;
+    video_track_ = identifier;
+    return true;
+  }
+  bool ConfigureVideo(const media::VideoDecoderConfig& config) {
+    if (codec_open_) {
+      vpx_codec_destroy(&codec_);
+      codec_open_ = false;
+    }
     if (config.is_encrypted() ||
         (config.codec() != media::VideoCodec::kVP8 &&
          config.codec() != media::VideoCodec::kVP9) ||
@@ -590,7 +649,6 @@ class Player final : public blink::WebMediaPlayer,
         VPX_CODEC_OK)
       return false;
     codec_open_ = true;
-    video_track_ = identifier;
     codec_type_ = config.codec();
     return true;
   }
@@ -636,14 +694,23 @@ class Player final : public blink::WebMediaPlayer,
       Loaded();
       return;
     }
-    auto& packet = packets_[packet_++];
+    auto packet = packets_[packet_++];
+    if (!DecodePacket(packet)) return;
+    // Each compressed packet yields before the next decode.
+    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&Player::DecodeNext, weak_.GetWeakPtr()));
+  }
+  bool DecodePacket(const scoped_refptr<media::DecoderBuffer>& packet) {
+    auto decode_started = base::TimeTicks::Now();
     if (vpx_codec_decode(&codec_, base::span(*packet).data(),
                          static_cast<unsigned>(packet->size()), nullptr,
                          0) != VPX_CODEC_OK) {
       PostFailure(kNetworkStateDecodeError,
                   "UEFI_MEDIA_CODEC: compressed frame rejected");
-      return;
+      return false;
     }
+    auto pixels_started = base::TimeTicks::Now();
+    decode_time_us_ += (pixels_started-decode_started).InMicroseconds();
     vpx_codec_iter_t iterator = nullptr;
     while (auto* image = vpx_codec_get_frame(&codec_, &iterator)) {
       if (image->fmt != VPX_IMG_FMT_I420 || image->d_w > 1920 ||
@@ -653,13 +720,13 @@ class Player final : public blink::WebMediaPlayer,
         PostFailure(
             kNetworkStateDecodeError,
             "UEFI_MEDIA_PIXELS: unsupported frame dimensions or pixel format");
-        return;
+        return false;
       }
       size_t bytes = size_t(image->d_w) * image->d_h * 4;
       if (bytes > kDecodedLimit - decoded_bytes_) {
         PostFailure(kNetworkStateDecodeError,
                     "UEFI_MEDIA_QUOTA: decoded frames exceed 64 MiB");
-        return;
+        return false;
       }
       auto frame = media::VideoFrame::CreateFrame(media::PIXEL_FORMAT_ARGB,
                                                   size_, gfx::Rect(size_),
@@ -672,7 +739,7 @@ class Player final : public blink::WebMediaPlayer,
         if (bytes > kDecodedLimit - decoded_bytes_) {
           PostFailure(kNetworkStateDecodeError,
                       "UEFI_MEDIA_QUOTA: decoded frames exceed 64 MiB");
-          return;
+          return false;
         }
       }
       if (!frame || libyuv::I420ToARGB(image->planes[0], image->stride[0],
@@ -683,16 +750,15 @@ class Player final : public blink::WebMediaPlayer,
                                        size_.width(), size_.height())) {
         PostFailure(kNetworkStateDecodeError,
                     "UEFI_MEDIA_PIXELS: frame conversion failed");
-        return;
+        return false;
       }
       frame->set_color_space(gfx::ColorSpace::CreateSRGB());
       decoded_bytes_ += bytes;
       frames_.push_back(std::move(frame));
+      ++total_decoded_;
     }
-    // Each compressed packet yields back to the renderer event loop before the
-    // next decode.
-    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
-        FROM_HERE, base::BindOnce(&Player::DecodeNext, weak_.GetWeakPtr()));
+    pixel_time_us_ += (base::TimeTicks::Now()-pixels_started).InMicroseconds();
+    return true;
   }
   void Loaded() {
     if (frames_.empty() || !client_) {
@@ -759,23 +825,33 @@ class Player final : public blink::WebMediaPlayer,
       displayed_ = next;
       ++presented_;
       presentation_time_ = base::TimeTicks::Now();
+      const bool requested = std::exchange(frame_callback_, false);
+      auto self = weak_.GetWeakPtr();
+      const uint64_t generation = mse_generation_;
       client_->Repaint();
-      if (std::exchange(frame_callback_, false))
+      if (self && self->mse_generation_ == generation && requested)
         client_->OnRequestVideoFrameCallback();
     }
   }
   void FinishSeek() {
+    auto self = weak_.GetWeakPtr();
+    const uint64_t generation = mse_generation_;
     seeking_ = false;
     anchor_ = base::TimeTicks::Now();
     if (HasAudio() && !paused_)
       StartAudio();
     Present(true);
+    if (!self || self->mse_generation_ != generation) return;
     if (client_)
       client_->TimeChanged();
   }
   void Tick() {
     if (!client_ || !HasMedia())
       return;
+    if (mse_demuxer_) {
+      TickMse();
+      return;
+    }
     Present(false);
     if (IsEnded()) {
       position_ = duration_;
@@ -808,7 +884,8 @@ class Player final : public blink::WebMediaPlayer,
   GURL source_;
   std::string error_;
   size_t decoded_bytes_ = 0, received_bytes_ = 0, packet_ = 0, displayed_ = 0;
-  uint32_t presented_ = 0, dropped_ = 0;
+  uint32_t presented_ = 0, dropped_ = 0, total_decoded_ = 0;
+  uint64_t decode_time_us_ = 0, pixel_time_us_ = 0;
   bool paused_ = true, seeking_ = false, failed_ = false, progress_ = false,
        pause_when_hidden_ = false, frame_callback_ = false;
   double duration_ = std::numeric_limits<double>::quiet_NaN(), position_ = 0,

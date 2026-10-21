@@ -1,0 +1,35 @@
+diff --git a/src/common/code-memory-access-inl.h b/src/common/code-memory-access-inl.h
+--- a/src/common/code-memory-access-inl.h
++++ b/src/common/code-memory-access-inl.h
+@@ -21,6 +21,10 @@
+ #endif
+ #if V8_HAS_BECORE_JIT_WRITE_PROTECT
+ #include <BrowserEngineCore/BEMemory.h>
++#endif
++
++#if defined(UEFI_RUNTIME)
++extern "C" int firmware_jit_write_scope(int enter);
+ #endif
+ 
+ namespace v8 {
+@@ -320,7 +324,19 @@
+   }
+ }
+ 
+-#if V8_HAS_PTHREAD_JIT_WRITE_PROTECT
++#if defined(UEFI_RUNTIME)
++
++// The supervisor applies W^X to all aliases and restores each cooperative
++// thread's scope state when the firmware TLS gate switches threads.
++bool RwxMemoryWriteScope::IsSupported() { return true; }
++void RwxMemoryWriteScope::SetWritable() {
++  CHECK_EQ(firmware_jit_write_scope(1), 0);
++}
++void RwxMemoryWriteScope::SetExecutable() {
++  CHECK_EQ(firmware_jit_write_scope(0), 0);
++}
++
++#elif V8_HAS_PTHREAD_JIT_WRITE_PROTECT
+ 
+ // static
+ bool RwxMemoryWriteScope::IsSupported() { return true; }

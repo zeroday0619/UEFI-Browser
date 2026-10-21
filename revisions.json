@@ -72,5 +72,20 @@
     }
   },
   "musl": "1.2.5",
-  "edk2": "2970e5699ba6267f3384ffab20f96647578aebc8"
+  "edk2": "2970e5699ba6267f3384ffab20f96647578aebc8",
+  "mozc": "0136c35782536cb43d710575c311cd4185982738",
+  "libhangul": "23d2cd9d10d516d523d60c562dbcc7ea08139a09",
+  "mesa_venus": {
+    "version": "26.2.5",
+    "revision": "ddaf85e353442d9d7f192fdcf1823e652e3f2ee3",
+    "url": "https://archive.mesa3d.org/mesa-26.2.5.tar.xz",
+    "sha256": "794b3d1729075dae7ebd47c7283b7ca0cdb5dec668f7f11cc0a5d82f6138a0a5",
+    "generated_protocol_revision": "70991d4c"
+  },
+  "qemu_scanout": {
+    "version": "11.1.2",
+    "archive": "qemu_11.1.2+ds.orig.tar.xz",
+    "sha256": "4f41c3df35a86d2497f842a585b014fe5aef45ceec6450e61615f0164ca39761",
+    "patch": "patches/qemu-uefi-scanout-modifier.patch"
+  }
 }

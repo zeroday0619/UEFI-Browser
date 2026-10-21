@@ -3,8 +3,14 @@
 // found in the LICENSE file.
 #include "blink/resource_loader.h"
 #include "blink/cookies.h"
+#include "blink/devtools_resources.h"
+#include "blink/response_headers.h"
 #if defined(UEFI_RUNTIME)
 #include "third_party/blink/renderer/core/loader/loader_factory_for_frame.h"
+#include "third_party/blink/renderer/core/frame/local_dom_window.h"
+#include "third_party/blink/renderer/core/dom/document.h"
+#include "third_party/blink/renderer/core/frame/policy_container.h"
+#include "third_party/blink/renderer/platform/supplementable.h"
 #endif
 
 #include <optional>
@@ -31,6 +37,9 @@
 #include "services/network/cors/cors_util.h"
 #include "services/network/cors/preflight_result.h"
 #include "services/network/public/cpp/cors/cors.h"
+#include "services/network/public/cpp/cross_origin_resource_policy.h"
+#include "services/network/public/cpp/document_isolation_policy.h"
+#include "services/network/public/mojom/url_response_head.mojom.h"
 #include "services/network/public/cpp/resource_request_body.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "third_party/blink/public/platform/resource_load_info_notifier_wrapper.h"
@@ -46,10 +55,11 @@ namespace uefi_browser {
 namespace {
 class ResourceLoader final : public blink::URLLoader {
  public:
-  ResourceLoader(SystemTable* table, const url::Origin& document_origin,
+  ResourceLoader(SystemTable* table, std::shared_ptr<ResourceSecurityContext> security,
                  scoped_refptr<base::SingleThreadTaskRunner> task_runner,
                  base::WaitableEvent* termination_event)
-      : termination_event_(termination_event), table_(table), origin_(document_origin), task_runner_(std::move(task_runner)) {
+      : termination_event_(termination_event), table_(table), security_(std::move(security)),
+        origin_(security_->origin), task_runner_(std::move(task_runner)) {
     CHECK(table_);
     CHECK(task_runner_);
   }
@@ -95,6 +105,7 @@ class ResourceLoader final : public blink::URLLoader {
     CHECK(!request_);
     synchronous_ = true;
     request_ = std::move(request);
+    original_url_ = request_->url;
     request_origin_ = origin_;
     client_ = &client;
     auto deadline = base::TimeTicks::Now() +
@@ -123,6 +134,7 @@ class ResourceLoader final : public blink::URLLoader {
     CHECK(!request_);
     CHECK(client);
     request_ = std::move(request);
+    original_url_ = request_->url;
     client_ = client;
     request_origin_ = origin_;
     Schedule();
@@ -149,12 +161,21 @@ class ResourceLoader final : public blink::URLLoader {
   bool CrossOrigin() const {
     return cors_tainted_ || !origin_.IsSameOriginWith(request_->url);
   }
-  bool CookiesAllowed() const {
+  bool CredentialsIncluded() const {
+    if (CrossOrigin() && request_->mode == network::mojom::RequestMode::kNoCors &&
+        security_->embedder_policy.value == network::mojom::CrossOriginEmbedderPolicyValue::kCredentialless)
+      return false;
     return request_->credentials_mode != network::mojom::CredentialsMode::kOmit &&
-        (request_->credentials_mode == network::mojom::CredentialsMode::kInclude || !CrossOrigin()) &&
-        request_->site_for_cookies.IsFirstParty(request_->url);
+        (request_->credentials_mode == network::mojom::CredentialsMode::kInclude || !CrossOrigin());
+  }
+  bool CookiesAllowed() const {
+    return CredentialsIncluded() && request_->site_for_cookies.IsFirstParty(request_->url);
   }
   int ValidateRequest() const {
+    if (IsDevToolsHost(request_->url) &&
+        (!IsDevToolsOrigin(request_->url) || !IsDevToolsOrigin(origin_.GetURL()) ||
+         request_->method != "GET"))
+      return net::ERR_BLOCKED_BY_CLIENT;
     if (!request_->url.is_valid() || !request_->url.SchemeIsHTTPOrHTTPS() ||
         request_->url.has_username() || request_->url.has_password())
       return net::ERR_INVALID_URL;
@@ -167,10 +188,6 @@ class ResourceLoader final : public blink::URLLoader {
       return net::ERR_BLOCKED_BY_CLIENT;
     if (CrossOrigin() && request_->mode == network::mojom::RequestMode::kSameOrigin)
       return net::ERR_BLOCKED_BY_CLIENT;
-    // Opaque subresources need ORB and CORP services before exposing their bytes.
-    if (CrossOrigin() && request_->mode == network::mojom::RequestMode::kNoCors &&
-        request_->destination != network::mojom::RequestDestination::kEmpty)
-      return net::ERR_NOT_IMPLEMENTED;
     if (!resource_method_supported(request_->method.c_str()) || request_->keepalive ||
         !request_->cors_exempt_headers.IsEmpty())
       return net::ERR_NOT_IMPLEMENTED;
@@ -231,6 +248,40 @@ class ResourceLoader final : public blink::URLLoader {
         !result->EnsureAllowedCrossOriginHeaders(request_->headers, false,
             network::cors::NonWildcardRequestHeadersSupport(true));
   }
+  int CheckResponsePolicy(bool redirect) {
+    auto response = network::mojom::URLResponseHead::New();
+    response->headers = ResponseHeaders(resource_);
+    if (!response->headers) return net::ERR_INVALID_RESPONSE;
+    response->content_length = resource_.length;
+    response->request_include_credentials = CredentialsIncluded();
+    if (network::CrossOriginResourcePolicy::IsBlocked(request_->url, original_url_,
+        origin_, *response, request_->mode, request_->destination,
+        security_->embedder_policy, nullptr, network::DocumentIsolationPolicy(), nullptr)) {
+      std::puts("NETWORK POLICY: CORP blocked");
+      return net::ERR_BLOCKED_BY_RESPONSE;
+    }
+    // Redirect bodies are never delivered, but every redirect must pass CORP.
+    if (redirect || manual_redirect_) return net::OK;
+    using Analyzer = network::orb::ResponseAnalyzer;
+    auto analyzer = Analyzer::Create(&security_->media_responses);
+    auto decision = analyzer->Init(request_->url, request_origin_, request_->mode,
+                                    request_->destination, *response);
+    if (decision == Analyzer::Decision::kSniffMore) {
+      const size_t length = std::min<size_t>(1024, resource_.length);
+      decision = analyzer->Sniff(length ? std::string_view(
+          reinterpret_cast<const char*>(resource_.body), length) : std::string_view());
+    }
+    if (decision == Analyzer::Decision::kSniffMore)
+      decision = analyzer->HandleEndOfSniffableResponseBody();
+    // A bounded cache may forget previous media, which only makes later checks stricter.
+    if (security_->media_responses.size() > 256) security_->media_responses.clear();
+    if (decision != Analyzer::Decision::kBlock) return net::OK;
+    std::puts("NETWORK POLICY: ORB blocked");
+    if (analyzer->ShouldHandleBlockedResponseAs() == Analyzer::BlockedResponseHandling::kNetworkError)
+      return net::ERR_BLOCKED_BY_ORB;
+    orb_empty_ = true;
+    return net::OK;
+  }
   void StartRequest() {
     net::HttpRequestHeaders outgoing;
     if (preflight_) {
@@ -264,14 +315,15 @@ class ResourceLoader final : public blink::URLLoader {
     response.SetHttpStatusCode(resource_.status_code);
     // The firmware response does not expose a reason phrase; Mojo requires a non-null string.
     response.SetHttpStatusText(blink::WebString::FromUtf8(""));
-    response.SetExpectedContentLength(resource_.length);
+    response.SetExpectedContentLength(orb_empty_ ? 0 : resource_.length);
     response.SetType(manual_redirect_ ? network::mojom::FetchResponseType::kOpaqueRedirect :
         cors_ ? network::mojom::FetchResponseType::kCors : CrossOrigin() ?
         network::mojom::FetchResponseType::kOpaque : network::mojom::FetchResponseType::kBasic);
+    // Chromium's legacy opaque-fetch result strips all headers and payload bytes.
+    if (orb_empty_) return response;
     std::string mime_type, charset;
-    bool had_charset = false;
-    if (const char* type = resource_header(&resource_, "content-type"))
-      net::HttpUtil::ParseContentType(type, &mime_type, &charset, &had_charset, nullptr);
+    if (auto headers = ResponseHeaders(resource_))
+      headers->GetMimeTypeAndCharset(&mime_type, &charset);
     response.SetMimeType(blink::WebString::FromUtf8(mime_type));
     response.SetTextEncodingName(blink::WebString::FromUtf8(charset));
     for (size_t index = 0; index < resource_.header_count; ++index) {
@@ -361,13 +413,22 @@ class ResourceLoader final : public blink::URLLoader {
         int validation = Prepare();
         if (validation != net::OK) { Fail(validation); return; }
       }
+      if (IsDevToolsHost(request_->url)) {
+        if (LoadDevToolsResource(request_->url, &resource_)) {
+          Fail(net::ERR_FAILED); return;
+        }
+      } else {
       if (!job_) StartRequest();
       if (!job_) { Fail(net::ERR_INSUFFICIENT_RESOURCES); return; }
       Status status;
       if (!resource_async_result(job_, &status, &resource_)) { Schedule(); return; }
       resource_async_release(job_);
       job_ = nullptr;
-      if (status) { Fail(net::ERR_FAILED); return; }
+      if (status) {
+        std::printf("NETWORK: transport failed status=0x%llx origin=%s\n",
+            static_cast<unsigned long long>(status), request_->url.GetWithEmptyPath().spec().c_str());
+        Fail(net::ERR_FAILED); return;
+      }
       if (preflight_) {
         if (!CheckPreflight()) { Fail(net::ERR_BLOCKED_BY_RESPONSE); return; }
         resource_release(&resource_);
@@ -377,7 +438,10 @@ class ResourceLoader final : public blink::URLLoader {
       }
       if (CookiesAllowed()) StoreResponseCookies(request_->url, resource_);
       if (cors_ && !CheckCors()) { Fail(net::ERR_BLOCKED_BY_RESPONSE); return; }
+      const int policy = CheckResponsePolicy(resource_is_redirect(resource_.status_code));
+      if (policy != net::OK) { Fail(policy); return; }
       if (resource_is_redirect(resource_.status_code) && FollowRedirect()) return;
+      }
       downloaded_ = true;
       const char* type = resource_header(&resource_, "content-type");
       std::printf("BLINK: resource %u type=%s bytes=%zu\n",
@@ -391,7 +455,7 @@ class ResourceLoader final : public blink::URLLoader {
     if (!response_sent_) {
       auto response = Response();
       blink::SegmentedBuffer body;
-      if (!manual_redirect_ && !(CrossOrigin() && !cors_))
+      if (!manual_redirect_ && !orb_empty_)
         body.Append(base::span<const uint8_t>(resource_.body, resource_.length));
       response_sent_ = true;
       auto weak = weak_factory_.GetWeakPtr();
@@ -404,13 +468,16 @@ class ResourceLoader final : public blink::URLLoader {
     auto* client = std::exchange(client_, nullptr);
     client->DidFinishLoading(base::TimeTicks::Now(),
         blink::URLLoaderClient::kUnknownEncodedDataLength,
-        resource_.encoded_body_length, resource_.length);
+        orb_empty_ ? 0 : resource_.encoded_body_length, orb_empty_ ? 0 : resource_.length);
   }
 
   base::WaitableEvent* termination_event_;
   bool synchronous_ = false;
   SystemTable* table_;
+  const std::shared_ptr<ResourceSecurityContext> security_;
   const url::Origin origin_;
+  GURL original_url_;
+  bool orb_empty_ = false;
   scoped_refptr<base::SingleThreadTaskRunner> task_runner_;
   std::unique_ptr<network::ResourceRequest> request_;
   blink::URLLoaderClient* client_ = nullptr;
@@ -432,11 +499,30 @@ class ResourceLoader final : public blink::URLLoader {
 namespace {
 SystemTable* resource_system_table = nullptr;
 size_t resource_loader_owners = 0;
+class DocumentResourceSecurity final
+    : public blink::GarbageCollected<DocumentResourceSecurity>,
+      public blink::Supplement<blink::Document> {
+ public:
+  static constexpr char kSupplementName[] = "FirmwareResourceSecurity";
+  explicit DocumentResourceSecurity(blink::LocalDOMWindow& window)
+      : blink::Supplement<blink::Document>(*window.document()),
+        context(std::make_shared<ResourceSecurityContext>(window.GetSecurityOrigin()->ToUrlOrigin(),
+            window.GetPolicyContainer()->GetPolicies().cross_origin_embedder_policy.value)) {}
+  void Trace(blink::Visitor* visitor) const override {
+    blink::Supplement<blink::Document>::Trace(visitor);
+  }
+  const std::shared_ptr<ResourceSecurityContext> context;
+};
 std::unique_ptr<blink::URLLoader> CreateFrameResourceLoader(
-    const blink::SecurityOrigin& origin,
+    blink::LocalDOMWindow& window,
     scoped_refptr<base::SingleThreadTaskRunner> runner) {
   CHECK(resource_system_table);
-  return CreateResourceLoader(resource_system_table, origin.ToUrlOrigin(),
+  auto* security = blink::Supplement<blink::Document>::From<DocumentResourceSecurity>(*window.document());
+  if (!security) {
+    security = blink::MakeGarbageCollected<DocumentResourceSecurity>(window);
+    blink::Supplement<blink::Document>::ProvideTo(*window.document(), security);
+  }
+  return CreateResourceLoader(resource_system_table, security->context,
                               std::move(runner));
 }
 }
@@ -455,10 +541,10 @@ void UninstallResourceLoader() {
 }
 #endif
 std::unique_ptr<blink::URLLoader> CreateResourceLoader(
-    SystemTable* table, const url::Origin& document_origin,
+    SystemTable* table, std::shared_ptr<ResourceSecurityContext> security,
     scoped_refptr<base::SingleThreadTaskRunner> task_runner,
     base::WaitableEvent* termination_event) {
-  return std::make_unique<ResourceLoader>(table, document_origin,
+  return std::make_unique<ResourceLoader>(table, std::move(security),
                                         std::move(task_runner), termination_event);
 }
 }

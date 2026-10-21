@@ -1,15 +1,21 @@
+#include "blink/gpu_compositor.h"
 #include "third_party/blink/public/platform/web_graphics_context_3d_provider.h"
 #include "blink/blob_service.h"
+#include "blink/devtools_resources.h"
+#include "components/webcrypto/webcrypto_impl.h"
 #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
 // Copyright 2026 The Chromium Authors
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include <cstdio>
+#include "base/memory/memory_pressure_listener_registry.h"
 #include <limits>
 #include "process/process.h"
 #include <cmath>
 #include <cstring>
 #include "blink/browser_settings.h"
+#include "blink/text_composer.h"
+#include "blink/ime_popup.h"
 #include "blink/browser_identity.h"
 #include <algorithm>
 #include <vector>
@@ -35,6 +41,8 @@
 #include "blink/browser_frame.h"
 #include "blink/remote_frame.h"
 #include "renderer_runtime.h"
+#include "firmware_audio.h"
+#include "firmware_media.h"
 #include "blink/workers.h"
 #include "blink/gpu_context.h"
 #include "blink/webgl_context.h"
@@ -79,6 +87,8 @@ void InstallFonts();
 std::unique_ptr<base::DiscardableMemoryAllocator> CreateDiscardableAllocator();
 }
 extern "C" size_t runtime_memory_used(void);
+extern "C" size_t runtime_memory_limit(void);
+extern "C" size_t runtime_memory_committed(void);
 extern "C" const char firmware_browser_url[];
 extern "C" const char firmware_javascript_flags[];
 extern "C" const unsigned char* firmware_resource(int identifier, size_t* size);
@@ -107,6 +117,7 @@ constexpr int kToolbarHeight = 80;
 constexpr size_t kMaximumTabs = 4;
 struct BrowserTab {
   size_t identifier = 0, presentations = 0;
+  size_t inspected_identifier = 0;
   std::vector<Pixel> pixels;
   sk_sp<SkSurface> surface;
   std::unique_ptr<uefi_browser::BrowserFrame> frame;
@@ -115,6 +126,9 @@ struct BrowserTab {
   bool focused = true, selected = false, error = false;
 };
 struct BrowserContext {
+  std::unique_ptr<uefi_browser::GpuCompositor> gpu_compositor;
+  sk_sp<SkSurface> gpu_surface;
+  bool gpu_dirty = false;
   SystemTable* table;
   base::RunLoop* run_loop;
   Graphics* graphics = nullptr;
@@ -132,6 +146,7 @@ struct BrowserContext {
   bool monitor = false;
   base::TimeTicks monitor_updated;
   void SaveAddress() {
+    FinishInput();
     if (tabs.empty()) return;
     auto& tab = *tabs[active_tab];
     tab.address = address; tab.caret = caret; tab.focused = address_focused;
@@ -152,9 +167,33 @@ struct BrowserContext {
     Present();
   }
   void OpenTab(std::string url) { NewTab(url.c_str()); }
+  bool CanOpenDevTools() const {
+    if (!frame || tabs.empty() || tabs[active_tab]->inspected_identifier ||
+        (uefi_browser::RemoteRendererConfigured() && !renderer_runtime_available()))
+      return false;
+    for (const auto& tab : tabs)
+      if (tab->inspected_identifier == tabs[active_tab]->identifier) return true;
+    return tabs.size() < kMaximumTabs &&
+           runtime_memory_used() <= runtime_memory_limit()*3/4;
+  }
+  void OpenDevTools() {
+    if (!CanOpenDevTools()) return;
+    if (monitor) ToggleMonitor();
+    const size_t target = tabs[active_tab]->identifier;
+    for (size_t index = 0; index < tabs.size(); ++index) {
+      if (tabs[index]->inspected_identifier == target) { SelectTab(index); return; }
+    }
+    auto* inspected = frame;
+    if (NewTab()) return;
+    if (frame->Inspect(*inspected)) { CloseTab(active_tab); return; }
+    tabs[active_tab]->inspected_identifier = target;
+    address = base::UTF8ToUTF16(std::string_view(uefi_browser::kDevToolsFrontendUrl));
+    caret = address.size(); address_focused = false; selected = false;
+    std::printf("DEVTOOLS: opened for tab=%zu\n", target);
+  }
   Status NewTab(const char* url = "about:blank") {
     if (uefi_browser::RemoteRendererConfigured() && !renderer_runtime_available()) return ERROR(6);
-    if (tabs.size() >= kMaximumTabs || runtime_memory_used() > 96u*1024*1024) {
+    if (tabs.size() >= kMaximumTabs || runtime_memory_used() > runtime_memory_limit()*3/4) {
       std::puts("TABS: creation refused by tab or tracked-heap limit");
       return 1;
     }
@@ -163,7 +202,7 @@ struct BrowserContext {
     auto tab = std::make_unique<BrowserTab>();
     tab->identifier = next_tab_identifier++;
     tab->pixels.resize(width*(height-kToolbarHeight));
-    tab->surface = SkSurfaces::WrapPixels(SkImageInfo::Make(width,height-kToolbarHeight,
+    tab->surface = gpu_compositor ? gpu_compositor->MakeSurface(width,height-kToolbarHeight) : SkSurfaces::WrapPixels(SkImageInfo::Make(width,height-kToolbarHeight,
         kBGRA_8888_SkColorType,kPremul_SkAlphaType),tab->pixels.data(),width*sizeof(Pixel));
     CHECK(tab->surface);
     tab->surface->getCanvas()->clear(SK_ColorWHITE);
@@ -203,13 +242,14 @@ struct BrowserContext {
       ++tab->presentations;
       if (tab.get() == tabs[active_tab].get() && !monitor) {
         Present();
-        if (!raster_presented) std::puts("BLINK: first raster frame copied to GOP");
+        if (!raster_presented) std::puts(gpu_compositor ? "BLINK: first frame submitted to GPU compositor" : "BLINK: first raster frame copied to GOP");
         raster_presented = true;
       }
       return;
     }
   }
   void ToggleMonitor() {
+    FinishInput();
     monitor = !monitor;
     frame->SetVisible(!monitor);
     page_drag = false;
@@ -268,7 +308,8 @@ struct BrowserContext {
     draw(renderer_runtime_available() ? "BSP: browser UI and network service | AP: Blink, V8, layout and Skia" :
          uefi_browser::RemoteRendererConfigured() ? "BSP: browser UI and network service | Renderer stopped; retry with End renderer" :
          "BSP: browser UI, Blink, V8, layout and Skia (single CPU fallback)");
-    std::snprintf(line,sizeof(line),"Tracked C heap: %.1f MiB (excludes virtual-memory commitments and worker pages)",runtime_memory_used()/1048576.0); draw(line);
+    std::snprintf(line,sizeof(line),"BSP C heap: %.1f / %.1f MiB | backing requests: %.1f MiB (excludes VM and AP)",
+        runtime_memory_used()/1048576.0,runtime_memory_limit()/1048576.0,runtime_memory_committed()/1048576.0); draw(line);
     std::snprintf(line,sizeof(line),"AP transfers: %zu | BSP fallback: %zu | failures: %zu | starts: %zu | idle stops: %zu",snapshot.frames,snapshot.fallback_frames,snapshot.failures,snapshot.starts,snapshot.idle_stops); draw(line);
     for (size_t index=0;index<snapshot.workers;++index) {
       std::snprintf(line,sizeof(line),"Worker %zu / CPU %zu / CPL3: %s - completed-frame transfer",index+2,snapshot.processor[index],snapshot.disabled ? "disabled" : snapshot.running ? (snapshot.stopping ? "stopping" : "running") : "idle"); draw(line);
@@ -309,17 +350,100 @@ struct BrowserContext {
   std::unique_ptr<SkFont> font;
   std::u16string address;
   size_t caret = 0;
+  uefi_browser::InputMethod input_method = uefi_browser::InputMethod::Latin;
+  uefi_browser::TextComposer address_input;
+  uefi_browser::ImePopup candidate_popup;
+  bool candidate_pointer = false, candidate_dirty = false;
+  size_t composition_start = 0, composition_length = 0;
+  void FinishAddressInput(bool cancel = false) {
+    candidate_dirty |= candidate_popup.Visible() || !address_input.Candidates().empty();
+    auto committed = address_input.Finish(cancel);
+    if (composition_length) {
+      if (address.size() - composition_length + committed.size() > 4095)
+        committed = address.substr(composition_start, composition_length);
+      address.replace(composition_start, composition_length, committed);
+      caret = composition_start + committed.size();
+    }
+    candidate_popup.Clear();
+    composition_length = 0;
+  }
+  void FinishInput() {
+    FinishAddressInput();
+    if (frame) {
+      uefi_browser::KeySample sample{};
+      sample.input_method = input_method;
+      sample.composition_action = uefi_browser::CompositionAction::Finish;
+      frame->Keyboard(sample);
+    }
+  }
+  void ToggleInputMethod(bool japanese = false) {
+    FinishInput();
+#if defined(UEFI_ENABLE_MOZC)
+    if (japanese) input_method = input_method == uefi_browser::InputMethod::Japanese
+        ? uefi_browser::InputMethod::Latin : uefi_browser::InputMethod::Japanese;
+    else
+#endif
+      input_method = input_method == uefi_browser::InputMethod::Latin
+          ? uefi_browser::InputMethod::Korean : uefi_browser::InputMethod::Latin;
+    std::printf("IME: mode=%s\n", input_method == uefi_browser::InputMethod::Japanese ? "Japanese" :
+        input_method == uefi_browser::InputMethod::Korean ? "Korean" : "Latin");
+  }
+  bool ComposeAddress(const uefi_browser::KeySample& sample) {
+    bool pending = composition_length != 0;
+    bool cancel = sample.key.scan == 23 || sample.key.character == 27;
+    bool shortcut = (sample.shift & 0x80000000u) && (sample.shift & 252);
+    if (cancel || shortcut || input_method == uefi_browser::InputMethod::Latin) {
+      FinishAddressInput(cancel);
+      return cancel && pending;
+    }
+    auto update = address_input.Feed(sample);
+    if (!update.handled) {
+      FinishAddressInput();
+      return pending && sample.key.character == 13;
+    }
+    return ApplyAddressComposition(update);
+  }
+  bool ApplyAddressComposition(const uefi_browser::CompositionUpdate& update) {
+    candidate_dirty |= candidate_popup.Visible() || !address_input.Candidates().empty();
+    if (selected) { address.clear(); caret = 0; selected = false; }
+    if (!composition_length) composition_start = caret;
+    if (address.size() - composition_length + update.committed.size() + update.preedit.size() > 4095) {
+      // The engine has already consumed the key; preserve the last accepted editor value.
+      address_input.Clear();
+      candidate_popup.Clear();
+      composition_length = 0;
+      return true;
+    }
+    address.replace(composition_start, composition_length, update.committed + update.preedit);
+    composition_start += update.committed.size();
+    composition_length = update.preedit.size();
+    caret = composition_start + address_input.Cursor();
+    address_error = false;
+    return true;
+  }
   bool address_focused = true, selected = false, address_error = false;
   unsigned pointer_buttons = 0;
   bool page_drag = false;
   int toolbar_pressed = -1;
+  int AddressRight() const { return static_cast<int>(width) - 148; }
   int ToolbarButton(int x, int y) const {
-    if (y >= 7 && y < 41 && x >= static_cast<int>(width) - 44) return 3;
+    if (y >= 7 && y < 41) {
+      if (x >= static_cast<int>(width) - 44 && x < static_cast<int>(width) - 12) return 3;
+      if (x >= static_cast<int>(width) - 140 && x < static_cast<int>(width) - 52) return 4;
+    }
     if (y < 7 || y >= 41 || x < 164 || x >= 276) return -1;
     int index = (x - 164) / 40;
     return (x - 164) % 40 < 32 ? index : -1;
   }
   void ToolbarAction(int index) {
+    FinishInput();
+    if (index == 4) {
+      if (CanOpenDevTools()) {
+        std::puts("UI: toolbar devtools");
+        OpenDevTools();
+      }
+      return;
+    }
     if ((index == 0 && !frame->CanGoBack()) || (index == 1 && !frame->CanGoForward())) return;
     address_focused = false;
     selected = false;
@@ -328,6 +452,7 @@ struct BrowserContext {
     std::printf("UI: toolbar %s %s\n", index == 3 ? "settings" : index == 0 ? "back" : index == 1 ? "forward" : "reload", result ? "failed" : "started");
   }
   void FocusAddress() {
+    FinishInput();
     address = base::UTF8ToUTF16(frame->CurrentUrl());
     if (address == u"about:blank") address.clear();
     caret = address.size();
@@ -336,6 +461,8 @@ struct BrowserContext {
     address_error = false;
   }
   void AddressKey(const uefi_browser::KeySample& sample) {
+    if (!sample.key.scan && !sample.key.character) return;
+    if (ComposeAddress(sample)) return;
     auto key = sample.key;
     bool control = (sample.shift & 0x80000000u) && (sample.shift & 12);
     if (key.character == 27 || key.scan == 23) { address_focused = false; return; }
@@ -373,6 +500,25 @@ struct BrowserContext {
       address_error = false;
     }
   }
+  float AddressText(const char16_t* text, size_t length, float left, const SkPaint* paint) {
+    float advance = 0;
+    auto manager = skia::DefaultFontMgr();
+    for (size_t index = 0; index < length; ++index) {
+      SkUnichar character = text[index];
+      if (character >= 0xd800 && character <= 0xdbff && index + 1 < length &&
+          text[index+1] >= 0xdc00 && text[index+1] <= 0xdfff)
+        character = 0x10000 + ((character-0xd800)<<10) + text[++index]-0xdc00;
+      SkFont selected_font(*font);
+      if (!selected_font.unicharToGlyph(character)) {
+        auto fallback = manager->matchFamilyStyleCharacter(nullptr, SkFontStyle(), nullptr, 0, character);
+        if (fallback) selected_font.setTypeface(std::move(fallback));
+      }
+      if (paint) toolbar->drawSimpleText(&character, sizeof(character), SkTextEncoding::kUTF32,
+          left + advance, 30, selected_font, *paint);
+      advance += selected_font.measureText(&character, sizeof(character), SkTextEncoding::kUTF32);
+    }
+    return advance;
+  }
   void DrawToolbar() {
     if (!toolbar || !font) return;
     if (!address_focused && frame && !frame->NavigationPending()) {
@@ -389,7 +535,9 @@ struct BrowserContext {
     paint.setColor(dark ? SkColorSetRGB(32,32,32) : SkColorSetRGB(243,243,243));
     toolbar->drawRect(SkRect::MakeWH(width, kToolbarHeight), paint);
     paint.setColor(foreground);
-    toolbar->drawString("UEFI BROWSER", 12, 30, *font, paint);
+    toolbar->drawString("UEFI BROWSER", 12, 25, *font, paint);
+    SkFont mode_font(*font); mode_font.setSize(10);
+    toolbar->drawString(input_method == uefi_browser::InputMethod::Japanese ? "JA  Shift+F9" : input_method == uefi_browser::InputMethod::Korean ? "KO  F9" : "EN  F9", 12, 40, mode_font, paint);
     for (int index = 0; index < 4; ++index) {
       bool enabled = frame && (index >= 2 || (index == 0 ? frame->CanGoBack() : frame->CanGoForward()));
       float left = index == 3 ? width - 44 : 164 + index * 40;
@@ -420,27 +568,49 @@ struct BrowserContext {
     }
     paint.setStyle(SkPaint::kFill_Style);
     paint.setColor(address_error ? SkColorSetRGB(190, 35, 35) : address_focused ? SkColorSetRGB(40, 100, 200) : SkColorSetRGB(160, 165, 175));
-    toolbar->drawRoundRect(SkRect::MakeXYWH(292, 7, width - 348, 34), 6, 6, paint);
+    toolbar->drawRoundRect(SkRect::MakeXYWH(292, 7, AddressRight() - 292, 34), 6, 6, paint);
     paint.setColor(surface);
-    toolbar->drawRoundRect(SkRect::MakeXYWH(294, 9, width - 352, 30), 4, 4, paint);
-    toolbar->clipRect(SkRect::MakeXYWH(300, 10, width - 364, 28));
+    toolbar->drawRoundRect(SkRect::MakeXYWH(294, 9, AddressRight() - 298, 30), 4, 4, paint);
+    const bool tools_enabled = CanOpenDevTools();
+    paint.setColor(tools_enabled && toolbar_pressed == 4
+        ? (dark ? SkColorSetRGB(18,53,84) : SkColorSetRGB(235,243,252))
+        : surface);
+    toolbar->drawRoundRect(SkRect::MakeXYWH(width - 140, 7, 88, 34), 5, 5, paint);
+    paint.setColor(tools_enabled ? foreground : SkColorSetRGB(180,185,195));
+    toolbar->drawString("DevTools", width - 128, 29, *font, paint);
+    toolbar->clipRect(SkRect::MakeXYWH(300, 10, AddressRight() - 308, 28));
     std::u16string display = address.empty() ? u"Enter URL (Ctrl+L)" : address;
     float offset = 0;
     if (address_focused && !address.empty()) {
-      float advance = font->measureText(address.data(), caret * sizeof(char16_t), SkTextEncoding::kUTF16);
-      offset = std::max(0.0f, advance - static_cast<float>(width - 380));
-      if (selected) { paint.setColor(SkColorSetRGB(195, 215, 250)); toolbar->drawRect(SkRect::MakeXYWH(300, 10, width - 364, 28), paint); }
+      float advance = AddressText(address.data(), caret, 0, nullptr);
+      offset = std::max(0.0f, advance - static_cast<float>(AddressRight() - 324));
+      if (selected) { paint.setColor(SkColorSetRGB(195, 215, 250)); toolbar->drawRect(SkRect::MakeXYWH(300, 10, AddressRight() - 308, 28), paint); }
       paint.setColor(foreground);
       toolbar->drawRect(SkRect::MakeXYWH(302 + advance - offset, 13, 1, 22), paint);
     }
     paint.setColor(address.empty() ? SkColorSetRGB(110, 115, 125) : foreground);
-    toolbar->drawSimpleText(display.data(), display.size() * sizeof(char16_t), SkTextEncoding::kUTF16, 302 - offset, 30, *font, paint);
+    AddressText(display.data(), display.size(), 302 - offset, &paint);
+    if (address_focused && composition_length) {
+      float start = AddressText(address.data(), composition_start, 0, nullptr);
+      float end = AddressText(address.data(), composition_start + composition_length, 0, nullptr);
+      toolbar->drawLine(302 + start - offset, 33, 302 + end - offset, 33, paint);
+    }
     toolbar->restore();
     DrawTabs();
   }
   void Present() {
+    if (gpu_compositor && !gpu_compositor->CanPresent()) {
+      // Recompose the latest state after completion instead of recording discarded frames.
+      gpu_dirty = true;
+      return;
+    }
     auto started = base::TimeTicks::Now();
-    if (!tabs.empty() && !monitor)
+    if (gpu_compositor) {
+      toolbar->clear(SK_ColorWHITE);
+      if (!tabs.empty() && !monitor)
+        toolbar->drawImage(tabs[active_tab]->surface->makeImageSnapshot(),0,kToolbarHeight);
+    }
+    if (!gpu_compositor && !tabs.empty() && !monitor)
       std::memcpy(pixels.data()+width*kToolbarHeight,tabs[active_tab]->pixels.data(),width*(height-kToolbarHeight)*sizeof(Pixel));
     DrawToolbar();
     if (!monitor && frame && frame->NavigationStatus()==ERROR(21)) {
@@ -449,6 +619,26 @@ struct BrowserContext {
       toolbar->drawString("The document and its session history were discarded. Other native tabs remain open.",32,180,*font,message);
     }
     DrawMonitor();
+    if (address_focused) candidate_popup.Draw(*toolbar, address_input.Candidates(), 302, 48, width, height);
+    else candidate_popup.Clear();
+    candidate_dirty = false;
+    if (gpu_compositor) {
+      if (pointer_visible) {
+        SkPaint cursor;
+        for (int y=0;y<20;++y) {
+          cursor.setColor(SK_ColorBLACK);
+          toolbar->drawRect(SkRect::MakeXYWH(pointer_x,pointer_y+y,y/2+1,1),cursor);
+          if (y>3 && y<19) {
+            cursor.setColor(SK_ColorWHITE);
+            toolbar->drawRect(SkRect::MakeXYWH(pointer_x+1,pointer_y+y,y/2-1,1),cursor);
+          }
+        }
+      }
+      gpu_dirty = !gpu_compositor->Present(*gpu_surface);
+      presentation_microseconds += (base::TimeTicks::Now()-started).InMicroseconds();
+      ++frames_presented;
+      return;
+    }
     size_t previous = LockCursor();
     RestoreCursor();
     Status result = 0;
@@ -515,6 +705,8 @@ struct BrowserContext {
         std::min<size_t>(24, height - cursor_y), width * sizeof(Pixel)), 0u);
   }
   void PresentInput(bool toolbar_changed) {
+    if (gpu_compositor) { ++cursor_presentations; Present(); return; }
+    if (candidate_dirty || (toolbar_changed && !address_input.Candidates().empty())) { Present(); return; }
     if (toolbar_changed) DrawToolbar();
     size_t previous = LockCursor();
     RestoreCursor();
@@ -538,8 +730,14 @@ struct BrowserContext {
     ++context.cursor_presentations;
   }
   static bool Poll(void* pointer) {
+    firmware_audio_poll();
+    firmware_media_poll();
     auto& context = *static_cast<BrowserContext*>(pointer);
     if (!context.input || !context.frame) return false;
+    if (context.gpu_compositor) {
+      context.gpu_compositor->Poll();
+      if (context.gpu_dirty) context.Present();
+    }
     uefi_browser::PollRemoteFrames();
     bool handled = false;
     bool toolbar_changed = false;
@@ -555,10 +753,19 @@ struct BrowserContext {
       toolbar_changed |= pointer_sample.buttons != context.pointer_buttons;
       context.pointer_visible = true;
       bool pressed = (pointer_sample.buttons & 1) && !(context.pointer_buttons & 1);
+      int candidate = context.candidate_popup.Hit(pointer_sample.x, pointer_sample.y);
+      if (context.candidate_pointer || (pressed && candidate >= 0)) {
+        if (pressed && candidate >= 0) context.ApplyAddressComposition(context.address_input.Select(candidate));
+        context.candidate_pointer = (pointer_sample.buttons & 1) != 0;
+        context.pointer_buttons = pointer_sample.buttons;
+        handled = toolbar_changed = true;
+        continue;
+      }
       if (pressed) {
+        context.FinishAddressInput();
         if (pointer_sample.y < kAddressHeight) {
           context.toolbar_pressed = context.ToolbarButton(pointer_sample.x, pointer_sample.y);
-          if (pointer_sample.x >= 292 && pointer_sample.x < static_cast<int>(context.width) - 52) context.FocusAddress();
+          if (pointer_sample.x >= 292 && pointer_sample.x < context.AddressRight()) context.FocusAddress();
         }
         else if (pointer_sample.y < kToolbarHeight) context.toolbar_pressed = context.TabButton(pointer_sample.x,pointer_sample.y);
         else if (context.monitor && pointer_sample.x>=24 && pointer_sample.x<254 &&
@@ -594,7 +801,13 @@ struct BrowserContext {
       bool control = (key.shift & 0x80000000u) && (key.shift & 12);
       bool shift = (key.shift & 0x80000000u) && (key.shift & 3);
       auto character = key.key.character;
-      if (shift && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
+      key.input_method = context.input_method;
+      if (key.key.scan == 17 && firmware_media_probe()) {}
+      else if (key.key.scan == 19 || (control && character == ' ')) context.ToggleInputMethod(shift && key.key.scan == 19);
+      else if (shift && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
+      else if ((key.key.scan == 20 && !context.tabs.empty() &&
+                !context.tabs[context.active_tab]->inspected_identifier) ||
+               (control && shift && (character == 'i' || character == 'I'))) context.OpenDevTools();
       else if (context.monitor && (key.key.scan == 23 || character == 27)) context.ToggleMonitor();
       else if (context.monitor && key.key.scan==8) uefi_browser::TerminateRenderer();
       else if (control && (character == 20 || character == 't' || character == 'T')) context.NewTab();
@@ -647,6 +860,7 @@ class FirmwareProcessBroker final : public blink::ThreadSafeBrowserInterfaceBrok
 };
 class FirmwarePlatform final : public blink::Platform {
  public:
+  blink::WebCrypto* Crypto() override { return &crypto_; }
   std::unique_ptr<blink::WebGraphicsContext3DProvider>
   CreateWebGLGraphicsContextProvider(bool, bool fail_if_major_performance_caveat,
       WebGLContextType type, const blink::WebURL&, WebGLContextInfo* information) override {
@@ -672,6 +886,24 @@ class FirmwarePlatform final : public blink::Platform {
   scoped_refptr<base::SingleThreadTaskRunner> GetIOTaskRunner() const override {
     // Firmware I/O and renderer work share the single main-thread event loop.
     return base::SingleThreadTaskRunner::GetCurrentDefault();
+  }
+  std::unique_ptr<NestedMessageLoopRunner> CreateNestedMessageLoopRunner() const override {
+    class Runner final : public NestedMessageLoopRunner {
+     public:
+      void Run() override {
+        CHECK(!active_);
+        base::RunLoop loop(base::RunLoop::Type::kNestableTasksAllowed);
+        active_ = &loop;
+        loop.Run();
+        active_ = nullptr;
+      }
+      void QuitNow() override {
+        if (active_) active_->Quit();
+      }
+     private:
+      base::RunLoop* active_ = nullptr;
+    };
+    return std::make_unique<Runner>();
   }
   bool HasDataResource(int identifier) const override {
     size_t size;
@@ -721,6 +953,8 @@ class FirmwarePlatform final : public blink::Platform {
   blink::WebString DefaultLocale() override {
     return blink::WebString::FromAscii("ko-KR");
   }
+ private:
+  webcrypto::WebCryptoImpl crypto_;
 };
 }
 
@@ -761,9 +995,12 @@ extern "C" int run_blink_browser(SystemTable* table) {
   CHECK(base::CommandLine::Init(2, arguments));
   // Worker-dependent parsing is disabled; batching must not bypass native input polls.
   std::puts("BLINK: initialize feature list");
-  base::FeatureList::InitInstance("",
+  // The inspector frontend has its own browsing context group and must remain
+  // runnable while its inspected page is paused in the shared renderer.
+  base::FeatureList::InitInstance("PausePagesPerBrowsingContextGroup",
       "BackgroundResourceFetch,ThreadedPreloadScanner,PrecompileInlineScripts,"
       "ScriptStreaming,ThreadedBodyLoader,ConsumeCodeCacheOffThread,RunTasksByBatches");
+  base::MemoryPressureListenerRegistry memory_pressure_registry;
   std::puts("BLINK: initialize thread pool");
   base::ThreadPoolInstance::Create("UEFIBrowser");
   std::puts("BLINK: initialize ICU");
@@ -777,13 +1014,16 @@ extern "C" int run_blink_browser(SystemTable* table) {
     mojo::BinderMap binders;
     blink::Platform::InitializeBlink();
     auto scheduler=uefi_browser::CreateScheduler(table,uefi_browser::PollRenderer,nullptr);
+    uefi_browser::TaskDiagnostics task_diagnostics;
     blink::Initialize(&platform,&binders,scheduler.get());
     InitializeNetworkState();
     int result=uefi_browser::RunRenderer(table,*scheduler);
+    task_diagnostics.Stop();
     scheduler->Shutdown();
     return result;
   }
-  BrowserContext context{table, nullptr};
+  BrowserContext context{};
+  context.table = table;
   Guid graphics_guid = {0x9042a9de, 0x23dc, 0x4a38,
                          {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}};
   auto locate = reinterpret_cast<Status(UEFI_API *)(Guid*, void*, void**)>(
@@ -811,6 +1051,7 @@ extern "C" int run_blink_browser(SystemTable* table) {
   blink::Platform::InitializeBlink();
   auto scheduler = uefi_browser::CreateScheduler(table, BrowserContext::Poll,
                                                  &context);
+  uefi_browser::TaskDiagnostics task_diagnostics;
   base::RunLoop run_loop;
   context.run_loop = &run_loop;
   std::puts("BLINK: initialize");
@@ -838,6 +1079,25 @@ extern "C" int run_blink_browser(SystemTable* table) {
       std::puts("FAIL: CPL3 renderer unavailable; privileged rendering is disabled in this build");
     }
     bool permitted=remote || !renderer_runtime_sandboxed();
+    if (permitted) {
+      if (uefi_browser::GpuCompositor::Requested()) {
+        // Disconnecting the display driver invalidates its GOP protocol and cursor observer.
+        context.input->SetPointerObserver(nullptr,nullptr);
+        context.framebuffer=nullptr;
+      }
+      context.gpu_compositor=uefi_browser::GpuCompositor::Create(context.width,context.height);
+      if (uefi_browser::GpuCompositor::Requested() && !context.gpu_compositor) {
+        permitted=false;
+        std::puts("FAIL: GPU compositor unavailable; stopped before using a disconnected GOP");
+      }
+      if (context.gpu_compositor) {
+        context.gpu_surface=context.gpu_compositor->MakeSurface(context.width,context.height);
+        CHECK(context.gpu_surface);
+        context.toolbar=context.gpu_surface->getCanvas();
+        context.input->SetPointerObserver(nullptr,nullptr);
+        context.framebuffer=nullptr;
+      }
+    }
     if (permitted && !remote && context.framebuffer) render_processes_initialize(table, context.width * context.height);
     Status result = permitted ? context.NewTab(uefi_browser::preferences.startup_settings ? "about:settings" : firmware_browser_url) : ERROR(3);
     if (result) {
@@ -850,13 +1110,18 @@ extern "C" int run_blink_browser(SystemTable* table) {
     std::printf("PERF: full_presentations=%zu presentation_us=%lld\n", context.frames_presented, static_cast<long long>(context.presentation_microseconds));
     std::printf("PERF: cursor_presentations=%zu\n", context.cursor_presentations);
     context.input->SetPointerObserver(nullptr, nullptr);
+    uefi_browser::RequestRendererStop();
     context.frame = nullptr;
     context.tabs.clear();
     context.input.reset();
   }
   uefi_browser::StopRenderer();
+  context.gpu_surface.reset();
+  context.gpu_compositor.reset();
+  firmware_media_shutdown();
   render_processes_shutdown();
   resource_async_shutdown(table);
+  task_diagnostics.Stop();
   scheduler->Shutdown();
   return navigation_result || !context.frames_presented ? 1 : 0;
 }

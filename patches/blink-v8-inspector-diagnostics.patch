@@ -1,0 +1,52 @@
+diff --git a/src/inspector/v8-debugger-agent-impl.cc b/src/inspector/v8-debugger-agent-impl.cc
+--- a/src/inspector/v8-debugger-agent-impl.cc
++++ b/src/inspector/v8-debugger-agent-impl.cc
+@@ -5,6 +5,11 @@
+ #include "src/inspector/v8-debugger-agent-impl.h"
+ 
+ #include <stdint.h>
++#if defined(UEFI_RUNTIME)
++#include <cstdio>
++#include "src/base/platform/time.h"
++extern "C" const int firmware_task_diagnostics;
++#endif
+ 
+ #include <algorithm>
+ #include <limits>
+@@ -494,14 +499,36 @@
+ void V8DebuggerAgentImpl::enableImpl() {
+   m_enableState = kEnabled;
+   m_state->setBoolean(DebuggerAgentState::debuggerEnabled, true);
++#if defined(UEFI_RUNTIME)
++  const auto started = firmware_task_diagnostics ? v8::base::TimeTicks::Now()
++                                               : v8::base::TimeTicks();
++#endif
+   m_debugger->enable();
++#if defined(UEFI_RUNTIME)
++  const auto enabled = firmware_task_diagnostics ? v8::base::TimeTicks::Now()
++                                               : v8::base::TimeTicks();
++#endif
+ 
+   std::vector<std::unique_ptr<V8DebuggerScript>> compiledScripts =
+       m_debugger->getCompiledScripts(m_session->contextGroupId(), this);
++#if defined(UEFI_RUNTIME)
++  const auto collected = firmware_task_diagnostics ? v8::base::TimeTicks::Now()
++                                                 : v8::base::TimeTicks();
++#endif
+   for (auto& script : compiledScripts) {
+     didParseSource(std::move(script));
+   }
+ 
++#if defined(UEFI_RUNTIME)
++  if (firmware_task_diagnostics) {
++    const auto finished = v8::base::TimeTicks::Now();
++    std::printf("PERF: debugger_enable_us=%lld collect_us=%lld report_us=%lld scripts=%zu\n",
++        static_cast<long long>((enabled-started).InMicroseconds()),
++        static_cast<long long>((collected-enabled).InMicroseconds()),
++        static_cast<long long>((finished-collected).InMicroseconds()),
++        compiledScripts.size());
++  }
++#endif
+   m_breakpointsActive = m_state->booleanProperty(
+       DebuggerAgentState::breakpointsActiveWhenEnabled, true);
+   if (m_breakpointsActive) {

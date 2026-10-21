@@ -362,16 +362,15 @@ Status resource_request(SystemTable *table, const ResourceRequestSpec *spec,
       }
       known = 1;
       for (const char *digit = header->value; *digit; digit++) {
-        if (*digit < '0' || *digit > '9' ||
-            expected > RESOURCE_BODY_LIMIT / 10) {
+        if (*digit < '0' || *digit > '9') {
           result = ERROR(24);
           goto finish;
         }
-        expected = expected * 10 + (size_t)(*digit - '0');
-        if (expected > RESOURCE_BODY_LIMIT) {
+        if (expected > (RESOURCE_RESPONSE_LIMIT - (size_t)(*digit - '0')) / 10) {
           result = ERROR(4);
           goto finish;
         }
+        expected = expected * 10 + (size_t)(*digit - '0');
       }
     } else if (!strcasecmp(header->name, "transfer-encoding")) {
       if (chunked || strcasecmp(header->value, "chunked")) {
@@ -395,16 +394,26 @@ Status resource_request(SystemTable *table, const ResourceRequestSpec *spec,
       response->status_code == 304 ||
       resource_is_redirect(response->status_code))
     goto finish;
-  response->body = malloc(RESOURCE_BODY_LIMIT + 1);
+  /* Small responses must not reserve the maximum permitted body size. */
+  size_t capacity = known ? expected : 64 * 1024;
+  response->body = malloc(capacity + 1);
   if (!response->body) {
     result = ERROR(9);
     goto finish;
   }
   uint64_t deadline = milliseconds() + 60000;
   int complete = known && !expected;
-  while (!complete && response->length < RESOURCE_BODY_LIMIT &&
+  while (!complete && response->length < RESOURCE_RESPONSE_LIMIT &&
          milliseconds() < deadline) {
-    size_t available = RESOURCE_BODY_LIMIT - response->length;
+    if (response->length == capacity) {
+      size_t next = capacity * 2;
+      if (next > RESOURCE_RESPONSE_LIMIT) next = RESOURCE_RESPONSE_LIMIT;
+      unsigned char *replacement = realloc(response->body, next + 1);
+      if (!replacement) { result = ERROR(9); break; }
+      response->body = replacement;
+      capacity = next;
+    }
+    size_t available = capacity - response->length;
     if (known && available > expected - response->length)
       available = expected - response->length;
     message =
@@ -431,14 +440,14 @@ Status resource_request(SystemTable *table, const ResourceRequestSpec *spec,
       size_t decoded = 0;
       int state =
           resource_decode_chunks((char *)response->body, response->length, NULL,
-                                 RESOURCE_BODY_LIMIT + 1, &decoded);
+                                 RESOURCE_RESPONSE_LIMIT + 1, &decoded);
       if (state < 0) {
         result = ERROR(24);
         break;
       }
       if (state) {
         resource_decode_chunks((char *)response->body, response->length,
-                               (char *)response->body, RESOURCE_BODY_LIMIT + 1,
+                               (char *)response->body, capacity + 1,
                                &decoded);
         response->length = decoded;
         complete = 1;

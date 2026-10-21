@@ -14,6 +14,9 @@
 #include "blink/navigation.h"
 #include "ui/gfx/geometry/rect.h"
 namespace uefi_browser {
+class ScrollSceneCapture;
+class ScrollWireEncoder;
+struct ViewportSnapshot;
 // The embedding owner must stop and destroy this object before closing the
 // frame, view, or raster canvas. Present copies the painted pixels to GOP.
 class FrameLoop {
@@ -34,7 +37,9 @@ class FrameLoop {
   void Tick();
   void Layout();
   void Record();
-  void RecordScroll();
+  void RecordScroll(ViewportSnapshot&);
+  void EncodeScroll();
+  void EncodeWire();
   void Raster();
   void Finish();
   blink::WebView& view_;
@@ -54,6 +59,13 @@ class FrameLoop {
   int scroll_fallback_=-1;
   uint64_t scroll_sequence_=0;
   ScrollSnapshot scroll_snapshot_, pending_scroll_;
+  std::unique_ptr<ScrollSceneCapture> scroll_capture_;
+  std::unique_ptr<ScrollWireEncoder> wire_encoder_;
+  unsigned wire_slices_=0;
+  int64_t wire_encoding_us_=0,wire_maximum_us_=0;
+  int scroll_encoding_slices_ = 0;
+  int64_t scroll_encoding_us_ = 0;
+  int64_t scroll_encoding_maximum_us_ = 0;
   int raster_y_ = 0;
   int raster_rows_ = 128;
   int64_t raster_total_us_ = 0;

@@ -1,0 +1,86 @@
+<!doctype html><meta charset="utf-8"><title>Response policy integration</title>
+<h1>Cross-origin response policies</h1><div id="policy-target">Styled by another origin</div>
+<pre id="result">Running</pre>
+<script>
+(async()=>{
+  let checks=0;
+  const remote='https://10.0.2.2:8768/response-policy/resource';
+  const local='/response-policy/resource';
+  function check(value,name){if(!value)throw Error(name);checks++;console.log('RESPONSE POLICY CHECK '+checks+' '+name)}
+  function element(tag,url,cors){return new Promise((resolve,reject)=>{
+    const element=document.createElement(tag);
+    const timer=setTimeout(()=>reject(Error('resource timed out '+url)),15000);
+    element.onload=()=>{clearTimeout(timer);resolve({loaded:true,element})};
+    element.onerror=()=>{clearTimeout(timer);resolve({loaded:false,element})};
+    if(cors)element.crossOrigin='anonymous';
+    if(tag==='link'){element.rel='stylesheet';element.href=url}else element.src=url;
+    document.head.append(element);
+  })}
+  async function script(url,expected,name){const response=await element('script',url);check(response.loaded===expected,name)}
+  await script(remote,true,'cross-origin classic script');
+  check(window.policyScriptCount===1,'classic script executed');
+  const style=await element('link',remote+'?kind=css');
+  check(style.loaded && getComputedStyle(document.getElementById('policy-target')).color==='rgb(12, 34, 56)','cross-origin stylesheet applied');
+  let hidden=false;try{void style.element.sheet.cssRules}catch(error){hidden=error.name==='SecurityError'}
+  check(hidden,'cross-origin CSS rules remain protected');
+  const duplicate=await element('link',remote+'?kind=css-duplicate');
+  check(duplicate.loaded && getComputedStyle(document.getElementById('policy-target')).backgroundColor==='rgb(56, 34, 12)','CSS uses Chromium duplicate MIME extraction');
+  await script(remote+'?kind=script-duplicate',true,'script uses Chromium duplicate MIME extraction');
+  const image=await element('img',remote+'?kind=image');
+  check(image.loaded && image.element.naturalWidth===1,'cross-origin PNG decoded');
+  const canvas=document.createElement('canvas');canvas.width=canvas.height=1;
+  const context=canvas.getContext('2d');context.drawImage(image.element,0,0);
+  hidden=false;try{context.getImageData(0,0,1,1)}catch(error){hidden=error.name==='SecurityError'}
+  check(hidden,'cross-origin image taints canvas');
+  await script(remote+'?corp=same-origin',false,'CORP same-origin blocks other origin');
+  await script(remote+'?corp=same-site',false,'CORP same-site rejects IP-based different origin');
+  await script(remote+'?corp=cross-origin',true,'CORP cross-origin permits script');
+  await script(local+'?corp=same-origin',true,'CORP permits same origin');
+  for(const kind of ['html','json','xml','nosniff','never','range'])
+    await script(remote+'?kind='+kind,false,'ORB rejects '+kind);
+  check(!window.policyRangeExecuted,'blocked range never executes');
+  const cors=await element('script',remote+'?corp=same-origin',true);
+  check(cors.loaded,'CORS approval permits CORP same-origin response');
+  let denied=false;try{await fetch(remote+'?corp=same-origin',{mode:'no-cors'})}catch{denied=true}
+  check(denied,'CORP blocks opaque fetch');
+  const opaque=await fetch(remote+'?kind=json',{mode:'no-cors'});
+  check(opaque.type==='opaque' && opaque.status===0 && await opaque.text()==='' && [...opaque.headers].length===0,'ORB opaque-fetch filtering');
+  await script('/response-policy/redirect?to='+encodeURIComponent(remote),true,'same-to-cross redirect');
+  await script('https://10.0.2.2:8768/response-policy/redirect?corp=same-origin&to='+encodeURIComponent(location.origin+local),false,'CORP blocks redirect before following');
+  await script('https://10.0.2.2:8768/response-policy/redirect?to='+encodeURIComponent(location.origin+local+'?kind=html'),false,'ORB preserves redirect origin taint');
+  document.cookie='policyCredential=secret; Secure; SameSite=Lax; Path=/';
+  async function child(query){return new Promise((resolve,reject)=>{
+    const frame=document.createElement('iframe');
+    const timer=setTimeout(()=>{cleanup();reject(Error('child timed out '+query))},20000);
+    function cleanup(){clearTimeout(timer);window.removeEventListener('message',receive);frame.remove()}
+    function receive(event){if(event.source===frame.contentWindow && event.origin===location.origin && event.data.policy){cleanup();resolve(event.data)}}
+    window.addEventListener('message',receive);frame.src='/response-policy/document?'+query;document.body.append(frame);
+  })}
+  let response=await child('coep=require-corp');check(!response.loaded,'COEP require-corp rejects unlabeled subresource');
+  response=await child('coep=require-corp&corp=cross-origin');check(response.loaded,'COEP accepts explicit CORP');
+  response=await child('coep=require-corp&cors=1');check(response.loaded,'COEP accepts CORS');
+  response=await child('coep=unsafe-none');check(response.loaded && response.cookie.includes('policyCredential=secret'),'ordinary no-cors request includes eligible cookie');
+  response=await child('coep=credentialless');check(response.loaded && !response.cookie.includes('policyCredential='),'COEP credentialless omits cookie');
+  response=await child('coep=require-corp&worker=1');
+  check(response.worker?.denied && response.worker.blocked,'worker inherits COEP require-corp');
+  const reused=document.createElement('iframe');document.body.append(reused);
+  for(const policy of ['require-corp','unsafe-none','require-corp']){
+    const loaded=await new Promise((resolve,reject)=>{
+      const timer=setTimeout(()=>{window.removeEventListener('message',receive);reject(Error('reused frame timeout'))},20000);
+      function receive(event){if(event.source===reused.contentWindow && event.origin===location.origin && event.data.policy){clearTimeout(timer);window.removeEventListener('message',receive);resolve(event.data.loaded)}}
+      window.addEventListener('message',receive);reused.src='/response-policy/document?coep='+policy;
+    });
+    check(loaded===(policy==='unsafe-none'),'frame navigation replaces policy '+policy);
+  }
+  reused.remove();
+  const worker=await new Promise((resolve,reject)=>{
+    const worker=new Worker('/response-policy/worker.js');
+    const timer=setTimeout(()=>{worker.terminate();reject(Error('worker timed out'))},20000);
+    worker.onmessage=event=>{clearTimeout(timer);worker.terminate();resolve(event.data)};
+    worker.onerror=event=>{clearTimeout(timer);worker.terminate();reject(Error(event.message))};worker.postMessage('test');
+  });
+  check(worker.denied && worker.opaque && worker.body==='','worker uses response policies');
+  document.cookie='policyCredential=; Max-Age=0; Secure; Path=/';
+  result.textContent='PASS '+checks+' checks';console.log('RESPONSE POLICY PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('RESPONSE POLICY FAILURE '+error.message)});
+</script>

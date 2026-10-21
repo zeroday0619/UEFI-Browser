@@ -1,0 +1,63 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Scroll encoding fairness</title>
+<style>
+body { margin: 0; font: 18px sans-serif; height: 4500px; }
+#controls { position: fixed; left: 0; top: 0; width: 100%; height: 120px; background: white; z-index: 2; }
+button, input { margin: 12px; padding: 12px; }
+.panel { position: absolute; left: 0; top: 0; width: 180px; height: 130px; overflow: hidden; will-change: transform; }
+canvas { display: block; }
+.alternate .panel { color: #743400; background: #ffdfaf; }
+.panel { color: #003874; background: #afdfef; }
+</style>
+<div id="controls"><button id="start">Start measurement</button><button id="response">Input response</button><input id="entry" aria-label="Test input"><span id="status">Ready</span></div>
+<main id="panels"></main>
+<script>
+const panels = document.querySelector('#panels');
+const captureLoad = new URLSearchParams(location.search).get('capture') === '1';
+const panelCount = captureLoad ? 600 : 180;
+for (let index = 0; index < panelCount; ++index) {
+  const panel = document.createElement('div');
+  panel.className = 'panel';
+  panel.style.transform = `translate(${index % 6 * 200}px, ${140 + Math.floor(index / 6) * 140}px)`;
+  if (!captureLoad) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 160; canvas.height = 80;
+    const context = canvas.getContext('2d');
+    for (let part = 0; part < 64; ++part) {
+      context.fillStyle = `rgb(${(index * 17 + part * 31) % 256},${part * 3},${index % 256})`;
+      context.fillRect(part % 16 * 10, Math.floor(part / 16) * 20, 10, 20);
+    }
+    panel.append(canvas);
+  }
+  panel.append(document.createTextNode(`Panel ${index}: immutable picture, image and text.`));
+  panels.append(panel);
+}
+document.querySelector('#response').onclick = () => console.log('SCROLL ENCODING CLICK');
+document.querySelector('#entry').oninput = event => console.log('SCROLL ENCODING INPUT ' + event.target.value);
+document.querySelector('#start').onclick = () => {
+  document.querySelector('#start').disabled = true;
+  const started = performance.now();
+  let previous = started, frames = 0;
+  const delays = [];
+  const timer = setInterval(() => {
+    const now = performance.now(); delays.push(now - previous); previous = now;
+  }, 8);
+  function animate() {
+    panels.classList.toggle('alternate', ++frames % 2 === 1);
+    if (performance.now() - started < 12000) { requestAnimationFrame(animate); return; }
+    clearInterval(timer);
+    delays.sort((left, right) => left - right);
+    const result = {captureLoad, panelCount, frames, timerCallbacks: delays.length, elapsedMilliseconds: performance.now() - started,
+      medianMilliseconds: delays[Math.floor(delays.length * .5)],
+      percentile95Milliseconds: delays[Math.floor(delays.length * .95)], maximumMilliseconds: delays.at(-1)};
+    document.querySelector('#status').textContent = JSON.stringify(result);
+    console.log('SCROLL ENCODING RESULT ' + JSON.stringify(result));
+    if (frames < 5 || delays.length < 20) { console.error('SCROLL ENCODING FAILURE insufficient work'); return; }
+    console.log('SCROLL ENCODING PASS');
+  }
+  console.log('SCROLL ENCODING BEGIN');
+  requestAnimationFrame(animate);
+};
+console.log('SCROLL ENCODING READY');
+</script>

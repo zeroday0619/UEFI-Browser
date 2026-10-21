@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 #include "blink/frame_loop.h"
 #include "blink/scroll_scene.h"
+#include "blink/scroll_wire.h"
 #include <utility>
 #include <cstdio>
 #include <algorithm>
@@ -51,6 +52,9 @@ void FrameLoop::Stop() {
   weak_factory_.InvalidateWeakPtrs();
   picture_.reset();
   staging_.reset();
+  scroll_capture_.reset();
+  wire_encoder_.reset();
+  pending_scroll_ = {};
 }
 void FrameLoop::SetVisible(bool visible) {
   if (visible_ == visible) return;
@@ -91,11 +95,19 @@ void FrameLoop::Record() {
   widget_.UpdateAllLifecyclePhases(blink::DocumentUpdateReason::kBeginMainFrame);
   if (!alive || !running_) return;
   auto lifecycle_end = base::TimeTicks::Now();
-  cc::PaintRecorder recorder;
-  view_.PaintContent(recorder.beginRecording(), viewport_);
+  ViewportSnapshot viewport{viewport_};
+  RecordScroll(viewport);
   if (!alive || !running_) return;
-  picture_ = recorder.finishRecordingAsPicture();
-  RecordScroll();
+  picture_ = std::move(viewport.picture);
+  if (!picture_) {
+    const auto paint_started = base::TimeTicks::Now();
+    cc::PaintRecorder recorder;
+    view_.PaintContent(recorder.beginRecording(), viewport_);
+    if (!alive || !running_) return;
+    picture_ = recorder.finishRecordingAsPicture();
+    viewport.paint_microseconds += (base::TimeTicks::Now()-paint_started).InMicroseconds();
+  }
+  auto scroll_end = base::TimeTicks::Now();
   if (!staging_) {
     staging_ = SkSurfaces::Raster(SkImageInfo::MakeN32Premul(
         viewport_.width(), viewport_.height()));
@@ -106,25 +118,88 @@ void FrameLoop::Record() {
   raster_slices_ = 0;
   auto ended = base::TimeTicks::Now();
   if (ended - started > base::Milliseconds(50))
-    std::printf("PERF: record_us=%lld lifecycle_us=%lld picture_us=%lld\n",
+    std::printf("PERF: record_us=%lld lifecycle_us=%lld picture_us=%lld paint_us=%lld scroll_us=%lld\n",
         static_cast<long long>((ended-started).InMicroseconds()),
         static_cast<long long>((lifecycle_end-started).InMicroseconds()),
-        static_cast<long long>((ended-lifecycle_end).InMicroseconds()));
+        static_cast<long long>((ended-lifecycle_end).InMicroseconds()),
+        static_cast<long long>(viewport.paint_microseconds),
+        static_cast<long long>((scroll_end-lifecycle_end).InMicroseconds()-viewport.paint_microseconds));
   running_ = runner_->PostTask(FROM_HERE,
-      base::BindOnce(&FrameLoop::Raster, alive));
+      base::BindOnce(&FrameLoop::EncodeScroll, alive));
 }
-void FrameLoop::RecordScroll() {
+void FrameLoop::RecordScroll(ViewportSnapshot& viewport) {
   pending_scroll_={}; pending_scroll_.acknowledgement=scroll_sequence_;
   if (!renderer_runtime_is_child()) return;
+  auto started = base::TimeTicks::Now();
   int reason=0;
-  pending_scroll_.scene=CaptureScrollScene(view_,&reason,scroll_snapshot_.scene.get());
-  if (pending_scroll_.scene) {
+  scroll_capture_=BeginScrollScene(view_,&reason,scroll_snapshot_.scene,&viewport);
+  auto captured = base::TimeTicks::Now();
+  if (scroll_capture_) {
     recording_reflows_=true;
-    CaptureScrollbarReflows(view_,*pending_scroll_.scene);
+    scroll_capture_->CaptureReflows(view_);
     recording_reflows_=false;
   }
-  if (reason!=scroll_fallback_) std::printf("COMPOSITOR: eligibility=%d\n",reason);
+  scroll_encoding_slices_ = 0;
+  scroll_encoding_us_ = scroll_encoding_maximum_us_ = 0;
+  auto ended = base::TimeTicks::Now();
+  if (ended-started > base::Milliseconds(25))
+    std::printf("PERF: scroll_capture_us=%lld scroll_reflow_us=%lld shared_paint_us=%lld\n",
+        static_cast<long long>((captured-started).InMicroseconds()-viewport.paint_microseconds),
+        static_cast<long long>((ended-captured).InMicroseconds()),
+        static_cast<long long>(viewport.paint_microseconds));
+  if (reason!=scroll_fallback_)
+    std::printf("COMPOSITOR: eligibility=%d reason=%s\n",reason,ScrollCaptureFailureName(reason));
   scroll_fallback_=reason;
+}
+void FrameLoop::EncodeScroll() {
+  if (!running_) return;
+  if (scroll_capture_) {
+    auto started = base::TimeTicks::Now();
+    const bool complete = scroll_capture_->EncodeSlice();
+    const auto elapsed = (base::TimeTicks::Now()-started).InMicroseconds();
+    scroll_encoding_us_ += elapsed;
+    scroll_encoding_maximum_us_ = std::max(scroll_encoding_maximum_us_, elapsed);
+    ++scroll_encoding_slices_;
+    if (!complete) {
+      running_ = runner_->PostTask(FROM_HERE,
+          base::BindOnce(&FrameLoop::EncodeScroll, weak_factory_.GetWeakPtr()));
+      return;
+    }
+    pending_scroll_.scene = scroll_capture_->TakeScene();
+    scroll_capture_.reset();
+    if (scroll_encoding_us_ > 25000 || scroll_encoding_slices_ > 1)
+      std::printf("PERF: scroll_encode_us=%lld slices=%d maximum_slice_us=%lld ready=%d\n",
+          static_cast<long long>(scroll_encoding_us_), scroll_encoding_slices_,
+          static_cast<long long>(scroll_encoding_maximum_us_), pending_scroll_.scene != nullptr);
+  }
+  wire_slices_=0; wire_encoding_us_=wire_maximum_us_=0;
+  if (pending_scroll_.scene && renderer_runtime_sandboxed())
+    wire_encoder_=std::make_unique<ScrollWireEncoder>(pending_scroll_.scene);
+  running_ = runner_->PostTask(FROM_HERE,
+      base::BindOnce(&FrameLoop::EncodeWire, weak_factory_.GetWeakPtr()));
+}
+void FrameLoop::EncodeWire() {
+  if (!running_) return;
+  if (wire_encoder_) {
+    auto started=base::TimeTicks::Now();
+    bool complete=wire_encoder_->EncodeSlice();
+    auto elapsed=(base::TimeTicks::Now()-started).InMicroseconds();
+    wire_encoding_us_+=elapsed; wire_maximum_us_=std::max(wire_maximum_us_,elapsed); ++wire_slices_;
+    if (!complete) {
+      running_=runner_->PostTask(FROM_HERE,
+          base::BindOnce(&FrameLoop::EncodeWire,weak_factory_.GetWeakPtr()));
+      return;
+    }
+    auto bytes=wire_encoder_->TakeBytes(); wire_encoder_.reset();
+    if (!bytes.empty()) pending_scroll_.encoded=std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
+    if (wire_slices_>1 || wire_encoding_us_>25000)
+      std::printf("PERF: scroll_wire_us=%lld slices=%u maximum_slice_us=%lld bytes=%zu\n",
+          static_cast<long long>(wire_encoding_us_),wire_slices_,static_cast<long long>(wire_maximum_us_),
+          pending_scroll_.encoded ? pending_scroll_.encoded->size() : 0);
+  }
+  // Pixels, wire bytes and acknowledgement belong to the same immutable paint epoch.
+  running_ = runner_->PostTask(FROM_HERE,
+      base::BindOnce(&FrameLoop::Raster, weak_factory_.GetWeakPtr()));
 }
 void FrameLoop::Raster() {
   if (!running_ || !picture_) return;

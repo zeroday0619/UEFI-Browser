@@ -1,0 +1,30 @@
+<!doctype html><meta charset="utf-8"><title>Filtered asynchronous scroll</title>
+<style>
+body{margin:0;height:7000px;background:linear-gradient(#eeddcc,#446688);font:18px sans-serif}
+#run{position:fixed;left:20px;top:50px;width:190px;height:42px;z-index:20}
+#halo{position:fixed;right:80px;top:-12px;width:460px;height:8px;background:#22dd66;filter:blur(12px);z-index:5}
+#clip{position:fixed;left:60px;top:160px;width:500px;height:360px;overflow:hidden;border-radius:28px}
+#nested{width:500px;height:360px;overflow:auto;background:#ffeecc}
+.content{position:relative;width:900px;height:6000px;background:repeating-linear-gradient(#dd6633 0 80px,#33aa66 80px 160px);filter:blur(5px) drop-shadow(6px 4px 2px #224466)}
+.sticky{position:sticky;top:0;height:36px;background:#663399;z-index:2}
+#palette{position:fixed;left:650px;top:120px;display:grid;grid-template-columns:repeat(4,120px);gap:16px}
+.swatch{height:90px;background:linear-gradient(90deg,#dd6633 50%,#3388cc 50%);border:5px solid #224466}
+.swatch span{display:block;width:40px;height:40px;background:#33aa66;opacity:.6}
+#shadow{position:fixed;left:750px;top:510px;width:140px;height:70px;background:#dd6633;filter:drop-shadow(20px 10px 8px #2244aa)}
+#affine{position:fixed;left:1010px;top:540px;width:110px;height:60px;transform:rotate(8deg) scale(1.2);transform-origin:0 0;background:#dd6633;filter:blur(3px) saturate(.5)}
+#nested-effect{position:fixed;left:650px;top:650px;width:300px;height:50px;filter:blur(3px);opacity:.7}
+#nested-effect div{height:50px;background:#3388cc;filter:drop-shadow(10px -6px 3px #cc2255)}
+#marker{position:absolute;left:30px;top:3800px;width:540px;height:300px;background:#dd2266;filter:blur(6px)}
+</style>
+<button id="run">Run 20 seconds</button><div id="halo"></div>
+<div id="clip"><div id="nested"><div class="content"><div class="sticky"></div></div></div></div>
+<div id="palette"></div><div id="shadow"></div><div id="affine"></div>
+<div id="nested-effect"><div></div></div><div id="marker"></div>
+<script>
+const filters=['grayscale(.6)','sepia(.7)','saturate(1.6)','hue-rotate(75deg)','invert(.7)','brightness(1.4)','contrast(1.6)','opacity(.55)','blur(4px)','drop-shadow(8px 6px 3px #773399)','blur(2px) brightness(1.2) contrast(.8)','none'];
+for(const filter of filters){const box=document.createElement('div');box.className='swatch';box.style.filter=filter;box.append(document.createElement('span'));palette.append(box)}
+run.onclick=()=>setTimeout(()=>{console.log('FILTER begin');const end=performance.now()+20000;while(performance.now()<end){}console.log('FILTER end')},200);
+addEventListener('scroll',()=>console.log('FILTER root '+scrollY));
+nested.addEventListener('scroll',()=>console.log('FILTER nested '+nested.scrollTop));
+addEventListener('load',()=>console.log('FILTER ready'));
+</script>

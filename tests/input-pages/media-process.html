@@ -1,0 +1,19 @@
+<!doctype html><meta charset="utf-8"><title>Independent media process</title>
+<style>body{font:24px sans-serif}button{position:absolute;top:80px;width:300px;height:60px}#busy{left:30px}#check{left:380px}pre{position:absolute;top:170px}</style>
+<h1>Media process isolation</h1>
+<button id="busy">Block JavaScript for 12 seconds</button>
+<button id="check">Check page after media recovery</button><pre id="result"></pre>
+<script>
+document.querySelector('#busy').onclick=()=>{
+  console.log('MEDIA PROCESS BUSY BEGIN');
+  const started=performance.now();
+  while(performance.now()-started<12000){}
+  document.querySelector('#result').textContent='JavaScript completed after '+(performance.now()-started)+' ms';
+  console.log('MEDIA PROCESS BUSY END');
+};
+document.querySelector('#check').onclick=()=>{
+  document.querySelector('#result').textContent+='; page input remains active';
+  console.log('MEDIA PROCESS PAGE RESPONSIVE');
+};
+console.log('MEDIA PROCESS FIXTURE READY');
+</script>

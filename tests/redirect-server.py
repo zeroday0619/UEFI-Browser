@@ -8,6 +8,7 @@ import os
 import runpy
 
 network_fixture = runpy.run_path(str(Path(__file__).with_name("network-fixture.py")))["handle"]
+response_policy_fixture = runpy.run_path(str(Path(__file__).with_name("response-policy-fixture.py")))["handle"]
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *arguments, **keywords):
@@ -25,7 +26,40 @@ class Handler(SimpleHTTPRequestHandler):
         if not network_fixture(self): super().do_HEAD()
 
     def do_GET(self):
+        if response_policy_fixture(self): return
         if network_fixture(self): return
+        if self.path in ('/large-resource.js', '/large-resource-chunked', '/large-resource-excess'):
+            if self.path == '/large-resource-chunked':
+                self.protocol_version = 'HTTP/1.1'
+            self.send_response(200)
+            self.send_header('Cache-Control', 'no-store')
+            if self.path == '/large-resource-excess':
+                self.send_header('Content-Length', str(32 * 1024 * 1024 + 1))
+                self.end_headers()
+                return
+            script = self.path.endswith('.js')
+            self.send_header('Content-Type', 'text/javascript' if script else 'application/octet-stream')
+            if script: self.send_header('Content-Length', str(11 * 1024 * 1024))
+            else: self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+            try:
+                if script:
+                    body = b'window.largeResourceLoaded = true;/*'
+                    self.wfile.write(body)
+                    remaining = 11 * 1024 * 1024 - len(body) - 2
+                    while remaining:
+                        count = min(remaining, 65536)
+                        self.wfile.write(b'x' * count)
+                        remaining -= count
+                    self.wfile.write(b'*/')
+                else:
+                    block = bytes(range(256)) * 256
+                    for _ in range(176):
+                        self.wfile.write(b'10000\r\n' + block + b'\r\n')
+                    self.wfile.write(b'0\r\n\r\n')
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         if self.path in ('/cookie-secure', '/cookie-test', '/cookie-echo', '/cookie-path/echo', '/cookie-set-omit', '/cookie-navigation-check'):
             cookie = self.headers.get('Cookie', '')
             print('COOKIE_REQUEST ' + self.path + ' ' + json.dumps(cookie), flush=True)

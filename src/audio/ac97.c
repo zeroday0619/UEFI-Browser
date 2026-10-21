@@ -12,11 +12,19 @@ typedef struct {
   uint32_t address, samples;
 } Descriptor;
 typedef struct {
+  uint64_t first;
+  unsigned storage, offset, frames;
+} StreamSlot;
+typedef struct {
   uint64_t memory;
   size_t pages, bytes, uploaded, start;
   unsigned owner, rate, gain;
   int16_t* source;
   long identifier;
+  int streaming;
+  uint64_t stream_head, stream_tail, stream_published, stream_submitted, stream_position;
+  unsigned char stream_used[FIRMWARE_AUDIO_STREAM_SLOTS];
+  StreamSlot stream_slots[FIRMWARE_AUDIO_STREAM_SLOTS];
 } Clip;
 static Clip clips[8];
 static long next_identifier = 1;
@@ -163,6 +171,8 @@ static long position(Clip* clip) {
   }
   return -EAGAIN;
 }
+#include "ac97-stream.h"
+
 long firmware_audio_service(unsigned owner,
                             unsigned operation,
                             long handle,
@@ -171,7 +181,11 @@ long firmware_audio_service(unsigned owner,
                             uint64_t third) {
   if (owner > 1)
     return -EINVAL;
-  if (operation == AUDIO_CREATE) {
+  if (operation == AUDIO_STREAM_CREATE) {
+    if (handle || first || third) return -EINVAL;
+    first = FIRMWARE_AUDIO_STREAM_SLOTS * 16384;
+  }
+  if (operation == AUDIO_CREATE || operation == AUDIO_STREAM_CREATE) {
     if (!first || first > FIRMWARE_AUDIO_LIMIT || first % 4 || second < 8000 ||
         second > 48000)
       return -EINVAL;
@@ -190,6 +204,7 @@ long firmware_audio_service(unsigned owner,
           memset(clip, 0, sizeof(*clip));
           return -ENOMEM;
         }
+        clip->streaming = operation == AUDIO_STREAM_CREATE;
         clip->gain = 65536;
         clip->pages = pages;
         clip->bytes = first;
@@ -215,6 +230,8 @@ long firmware_audio_service(unsigned owner,
     }
   if (!clip)
     return -EBADF;
+  if (clip->streaming && operation != AUDIO_CLOSE)
+    return stream_request(clip, operation, first, second, third);
   switch (operation) {
     case AUDIO_UPLOAD:
       if (active == clip || first != clip->uploaded || third > 16384 ||
@@ -307,7 +324,7 @@ long firmware_audio_request(unsigned operation,
   if (!renderer_runtime_is_child())
     return firmware_audio_service(0, operation, handle, first, second, third);
   /* The loader's AP stack is shared with the BSP, unlike private image data. */
-  if (operation == AUDIO_UPLOAD) {
+  if (operation == AUDIO_UPLOAD || operation == AUDIO_STREAM_WRITE) {
     if (third > 16384)
       return -EINVAL;
     unsigned char buffer[16384];
@@ -333,4 +350,12 @@ void firmware_audio_reset(unsigned owner) {
     mixer = master = 0;
     printf("AUDIO: DMA stopped and device buffers released\n");
   }
+}
+
+long firmware_audio_stream_submitted(unsigned owner, long handle) {
+  if (renderer_runtime_is_child()) return -EPERM;
+  for (unsigned index = 0; index < 8; ++index)
+    if (clips[index].identifier == handle && handle > 0 && clips[index].owner == owner && clips[index].streaming)
+      return clips[index].stream_submitted;
+  return -EBADF;
 }

@@ -3,10 +3,62 @@ import os
 import re
 import time
 
-def run(execute, build, log):
+def devtools_tab_row(image, left, right):
+    width, height, pixels = image
+    rows = []
+    for y in range(85, min(height, 160)):
+        # A banner focus border spans beyond either tab; the selected underline does not.
+        outside = (max(0, left - 8), min(width - 1, right + 8))
+        if any((lambda red, green, blue: blue > 180 and red < 120 and blue > green + 40)(
+                *pixels[(y * width + x) * 3:(y * width + x) * 3 + 3]) for x in outside):
+            continue
+        consecutive = 0
+        for x in range(left, min(width, right)):
+            red, green, blue = pixels[(y * width + x) * 3:(y * width + x) * 3 + 3]
+            consecutive = consecutive + 1 if blue > 180 and red < 120 and blue > green + 40 else 0
+            if consecutive >= 35:
+                rows.append(y)
+                break
+    return max(rows) - 10 if rows else None
+
+
+def devtools_console_prompt(image):
+    width, height, pixels = image
+    selected_row = devtools_tab_row(image, 114, 170)
+    if selected_row is None:
+        return None
+    rows = []
+    for y in range(selected_row + 30, height - 5):
+        for x in range(15, min(width, 24)):
+            red, green, blue = pixels[(y * width + x) * 3:(y * width + x) * 3 + 3]
+            if blue > 200 and red < 180 and blue > green + 40:
+                rows.append(y)
+                break
+    return max(rows) - 2 if len(rows) >= 3 else None
+
+
+def run(execute, build, log, process_status=None):
+    def after_boundary_tests(content):
+        if os.environ.get('QEMU_TEST_REQUIRE_CPL3_PROBE') == '1':
+            marker = 'PASS: CPL3 JIT executable writes, writable execution and backing-alias writes blocked'
+            if marker in content:
+                return content.split(marker, 1)[1]
+        return content
     def healthy():
+        if process_status is not None:
+            status = process_status()
+            if status is not None:
+                raise RuntimeError('QEMU exited during input scenario: ' + str(status))
         text = log.read_text(errors='replace')
-        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type', 'IDB FAIL', 'MEDIA FAILURE', 'AUDIO FAILURE', 'WORKERS FAILURE', 'WEBGPU FAILURE', 'WEBGL FAILURE', 'WEBGL2 FAILURE', 'RENDERER: runtime abort')):
+        if any(marker in text for marker in ('AUTHENTICATOR FAILURE', 'LARGE RESOURCE FAILURE', 'RESPONSE POLICY FAILURE', 'TRANSPORT IDLE FAILURE')):
+            raise RuntimeError(text)
+        if os.environ.get('INPUT_SCENARIO') in ('devtools', 'devtools-async', 'youtube-observe', 'media-process') and 'RENDERER: stopped status=' in after_boundary_tests(text):
+            raise RuntimeError('Renderer stopped during input scenario:\n' + text)
+        if 'Fatal process out of memory' in text:
+            raise RuntimeError('Renderer exhausted memory:\n' + text)
+        if 'DEVTOOLS FIXTURE FAILURE' in text or 'DEVTOOLS ASYNC FAILURE' in text or 'MSE RATE FAILURE' in text or 'MSE DISPATCH FAILURE' in text or 'MSE RESERVOIR FAILURE' in text or 'MSE CONFIG FAILURE' in text:
+            raise RuntimeError(text)
+        if any(marker in text for marker in ('FATAL:', 'FAIL:', 'Exception Type', 'IDB FAIL', 'MEDIA FAILURE', 'MSE FAILURE', 'MSE LIMIT FAILURE', 'MSE AUDIO FAILURE', 'AUDIO FAILURE', 'WORKERS FAILURE', 'WEBGPU FAILURE', 'GPU MULTICONTEXT FAILURE', 'WEBGL FAILURE', 'WEBGL2 FAILURE', 'RENDERER: runtime abort')):
             raise RuntimeError(text)
         return text
     def snapshot(name):
@@ -35,19 +87,22 @@ def run(execute, build, log):
             time.sleep(.08)
     def click(x, y, page=True):
         move(x, y, page)
+        if os.environ.get('INPUT_POINTER_TRACE') == '1':
+            print(f'QMP: click x={x} y={y + (80 if page else 0)}', flush=True)
         for down in (True, False):
             execute('input-send-event', {'events':[{'type':'btn','data':{'button':'left','down':down}}]})
             time.sleep(.15)
     def key(*keys):
         execute('send-key', {'keys':[{'type':'qcode','data':name} for name in keys]})
         time.sleep(.3)
-    def wait_marker(marker, timeout=30):
+    def wait_marker(marker, timeout=30, offset=0):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             content = healthy()
-            if os.environ.get('INPUT_SCENARIO') in ('webgpu', 'webgl', 'webgl2', 'webgpu-canvas') and 'RENDERER: stopped status=' in content:
-                raise AssertionError('GPU execution stopped the renderer:\n' + content)
-            if marker in content: return
+            fault_content = after_boundary_tests(content)
+            if os.environ.get('INPUT_SCENARIO') in ('webgpu', 'gpu-coherency', 'webgl', 'webgl2', 'webgpu-canvas', 'gpu-multicontext', 'devtools') and 'RENDERER: stopped status=' in fault_content:
+                raise AssertionError('Scenario execution stopped the renderer:\n' + content)
+            if marker in content[offset:]: return
             time.sleep(.2)
         raise AssertionError('Missing page result: ' + marker + '\n' + healthy())
     def wheel(direction, ticks=1):
@@ -62,8 +117,395 @@ def run(execute, build, log):
             elif character == '.': key('dot')
             elif character == '-': key('minus')
             elif character == '_': key('shift','minus')
+            elif character == '?': key('shift', 'slash')
+            elif character == '=': key('equal')
             elif character.isupper(): key('shift',character.lower())
             else: key(character)
+    if os.environ.get('INPUT_SCENARIO') == 'paint-snapshot':
+        key('ctrl', 'l'); type_address('http://10.0.2.2:8765/paint-snapshot.html'); key('ret')
+        wait_marker('PAINT SNAPSHOT READY')
+        initial = snapshot('paint-snapshot-initial')
+        click(90, 30); wait_marker('PAINT SNAPSHOT CHANGED')
+        changed = snapshot('paint-snapshot-changed')
+        assert initial[2] != changed[2], 'Style mutation did not repaint'
+        move(1200, 500); wheel('down', 8)
+        wait_marker('PAINT SNAPSHOT SCROLL 640')
+        scrolled = snapshot('paint-snapshot-scrolled')
+        assert changed[2] != scrolled[2], 'Root scrolling did not repaint'
+        print('PASS: effect and iframe snapshots captured; cross-image pixel comparison is required')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-encoding':
+        import json
+        variant = '?capture=1' if os.environ.get('SCROLL_ENCODING_CAPTURE') == '1' else ''
+        key('ctrl', 'l'); type_address('http://10.0.2.2:8765/scroll-encoding.html' + variant); key('ret')
+        wait_marker('SCROLL ENCODING READY', timeout=60)
+        snapshot('scroll-encoding-ready')
+        click(100, 35); wait_marker('SCROLL ENCODING BEGIN')
+        started = time.monotonic()
+        click(300, 35); wait_marker('SCROLL ENCODING CLICK')
+        click_seconds = time.monotonic() - started
+        click(510, 35); key('a'); wait_marker('SCROLL ENCODING INPUT a')
+        # Hiding a busy tab cancels its uncommitted records; resuming must capture a new scene.
+        key('ctrl', 't'); key('ctrl', '1')
+        wait_marker('SCROLL ENCODING PASS', timeout=45)
+        assert 'SCROLL ENCODING FAILURE' not in healthy()
+        result = json.loads(re.findall(r'SCROLL ENCODING RESULT (\{[^\n]+\})', healthy())[-1])
+        result['mouse_delivery_and_poll_seconds'] = click_seconds
+        result['keyboard_delivery'] = True
+        result['hide_and_resume'] = True
+        slices = [int(value) for value in re.findall(r'PERF: scroll_encode_us=\d+ slices=(\d+)', healthy())]
+        result['encoding_slices'] = slices
+        if os.environ.get('SCROLL_ENCODING_REQUIRE_SLICES') == '1':
+            assert any(value > 1 for value in slices), 'The fixture did not exercise encoding continuations'
+        snapshot('scroll-encoding-complete')
+        (build / 'scroll-encoding-results.json').write_text(json.dumps(result, indent=2))
+        key('ctrl', 'w')
+        print('PASS: scroll encoding under paint load, mouse, keyboard and tab cancellation', json.dumps(result))
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'transport-idle':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/transport-idle.html'); key('ret')
+        wait_marker('TRANSPORT IDLE PASS checks=4', timeout=60)
+        snapshot('transport-idle-complete')
+        print('PASS: configured HTTPS header/body idle timeout and following request')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'media-process':
+        key('ctrl', 'l'); type_address('http://10.0.2.2:8765/media-process.html'); key('ret')
+        wait_marker('MEDIA PROCESS FIXTURE READY', timeout=60)
+        click(120, 100)
+        wait_marker('MEDIA PROCESS BUSY BEGIN')
+        for cycle in (1, 2):
+            key('f7')
+            wait_marker(f'MEDIA SERVICE: probe passed cycle={cycle} decoded_packets=100 cpl=3 private_data=1 private_tls=1 supervisor_fault=14', timeout=10)
+            assert healthy().count('MEDIA SERVICE: denied_capabilities=5 fault_error=5 ') == cycle
+            assert 'MEDIA PROCESS BUSY END' not in healthy(), 'Media completion did not precede the blocked renderer task'
+        wait_marker('MEDIA PROCESS BUSY END', timeout=20)
+        shutdown = re.search(r'MEDIA SERVICE: immediate shutdown completed elapsed_ms=(\d+)', healthy())
+        assert shutdown and int(shutdown[1]) < 2000
+        click(450, 100)
+        wait_marker('MEDIA PROCESS PAGE RESPONSIVE')
+        snapshot('media-process-recovered')
+        print('PASS: two independent CPL3 Opus service lifecycles during blocked JavaScript, packet bound, private TLS/data, supervisor faults and surviving page input')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('mse-queue', 'mse-queue-recovery'):
+        import json
+        offset = len(healthy())
+        if os.environ.get('INPUT_SCENARIO') == 'mse-queue-recovery':
+            key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-queue.html'); key('ret')
+            wait_marker('MSE RESERVOIR READY', timeout=60, offset=offset)
+            click(450, 205)
+            wait_marker('MSE RESERVOIR BLOCK BEGIN', timeout=20, offset=offset)
+            key('shift', 'esc'); wait_marker('MONITOR: opened', offset=offset)
+            key('delete')
+            wait_marker('RENDERER: recovery launched', timeout=20, offset=offset)
+            assert re.search(r'MEDIA QUEUE: released streams=1 queued_bytes=[1-9][0-9]*', healthy()[offset:])
+            key('esc')
+            offset = len(healthy())
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-queue.html'); key('ret')
+        wait_marker('MSE RESERVOIR READY', timeout=60, offset=offset)
+        click(450, 205)
+        import runpy
+        from pathlib import Path
+        output = build / 'audio-output-observation-results.json'
+        runpy.run_path(str(Path(__file__).with_name('audio-output-observer.py')))['run'](
+            lambda: healthy()[offset:], build / 'audio-output.wav', output)
+        observation = json.loads(output.read_text())
+        assert observation['interior_seconds'] > 5.5
+        assert .95 <= observation['signal_to_wall_clock_ratio'] <= 1.05
+        content = healthy()[offset:].split('MSE RESERVOIR BLOCK BEGIN', 1)[1].split('MSE RESERVOIR BLOCK END', 1)[0]
+        counts = [int(value) for value in re.findall(r'MEDIA SERVICE: production decoded_packets=(\d+)', content)]
+        assert len(counts) >= 2 and counts[-1] - counts[0] >= 100, counts
+        observation['decode_count_markers_during_block'] = counts
+        output.write_text(json.dumps(observation, indent=2))
+        wait_marker('MSE QUEUE PASS', timeout=30, offset=offset)
+        snapshot('mse-queue-complete')
+        print('PASS: autonomous Opus decoding and timed PCM during six-second JavaScript, pause, resume and seek')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'mse-reservoir':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-reservoir.html'); key('ret')
+        wait_marker('MSE RESERVOIR READY', timeout=60)
+        click(450, 205)
+        import runpy
+        from pathlib import Path
+        runpy.run_path(str(Path(__file__).with_name('audio-output-observer.py')))['run'](
+            healthy, build / 'audio-output.wav', build / 'audio-output-observation-results.json')
+        wait_marker('MSE RESERVOIR PASS', timeout=30)
+        snapshot('mse-reservoir-complete')
+        print('PASS: retained audio during 1.5-second JavaScript, pause and resume')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('mse-dispatch', 'mse-batch'):
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-dispatch.html')
+        if os.environ.get('INPUT_SCENARIO') == 'mse-batch':
+            key('shift', 'slash'); type_address('queue'); key('equal'); type_address('4')
+        key('ret')
+        wait_marker('MSE DISPATCH READY', timeout=60)
+        click(450, 205)
+        wait_marker('MSE DISPATCH PASS', timeout=30)
+        if os.environ.get('INPUT_SCENARIO') == 'mse-batch':
+            assert '"queuedTaskSources":4' in healthy()
+        snapshot('mse-dispatch-complete')
+        print('PASS: MSE audio maintains real-time progression under repeated JavaScript load')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'mse-rate':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-rate.html'); key('ret')
+        wait_marker('MSE RATE READY', timeout=60)
+        click(450, 205)
+        wait_marker('MSE RATE PASS', timeout=30)
+        snapshot('mse-rate-complete')
+        print('PASS: MSE zero-rate clock retention and playback resume')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'response-policy':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/response-policy.html'); key('ret')
+        wait_marker('RESPONSE POLICY PASS checks=35', timeout=180)
+        assert 'NETWORK POLICY: CORP blocked' in healthy()
+        assert 'NETWORK POLICY: ORB blocked' in healthy()
+        snapshot('response-policy-complete')
+        print('PASS: cross-origin resources, ORB, CORP, redirects, COEP and worker policies')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'large-resources':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/large-resources.html'); key('ret')
+        wait_marker('LARGE RESOURCE PASS checks=4', timeout=120)
+        snapshot('large-resources-complete')
+        print('PASS: large script execution, chunked bytes, bounded rejection and recovery')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'authenticator':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/authenticator.html'); key('ret')
+        wait_marker('AUTHENTICATOR PASS checks=6')
+        snapshot('authenticator-complete')
+        print('PASS: unavailable authenticator queries, concurrency and frame teardown')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'youtube-observe':
+        # This diagnostic records the live player without treating a loaded page as playback.
+        import json
+        if os.environ.get('YOUTUBE_PLAYBACK_PROBE') == '1' and os.environ.get('YOUTUBE_INSPECT') != '1':
+            raise ValueError('YOUTUBE_PLAYBACK_PROBE requires YOUTUBE_INSPECT=1.')
+        key('ctrl', 'l')
+        type_address('https://www.youtube.com/watch')
+        key('shift', 'slash'); key('v'); key('equal')
+        type_address('aqz-KE-bpKQ'); key('ret')
+        observations = []
+        started = time.monotonic()
+        observation_times = (10, 30, 60, 90, 120, 180) if os.environ.get('YOUTUBE_LONG') == '1' else (10, 30, 60, 90)
+        if 'YOUTUBE_OBSERVE_SECONDS' in os.environ:
+            duration = int(os.environ['YOUTUBE_OBSERVE_SECONDS'])
+            if not 180 <= duration <= 1800 or duration % 30:
+                raise ValueError('YOUTUBE_OBSERVE_SECONDS must be a multiple of 30 between 180 and 1800.')
+            observation_times = (10, 30, 60, 90, 120, 180) + tuple(range(210, duration + 1, 30))
+        for elapsed in observation_times:
+            while time.monotonic() - started < elapsed:
+                healthy()
+                time.sleep(.2)
+            image = snapshot('youtube-' + str(elapsed))
+            text = healthy()
+            observations.append({'seconds': elapsed, 'width': image[0], 'height': image[1],
+                'mse_sources': text.count('MSE: source initialized'),
+                'renderer_stopped': 'RENDERER: stopped status=' in after_boundary_tests(text)})
+            (build / 'youtube-observation-results.json').write_text(json.dumps(observations, indent=2))
+        if os.environ.get('YOUTUBE_INSPECT') == '1':
+            click(image[0] - 96, 24, page=False)
+            wait_marker('DEVTOOLS: frontend loaded', timeout=90)
+            deadline = time.monotonic() + 60
+            while True:
+                toolbar = snapshot('youtube-inspector-toolbar')
+                selected_row = devtools_tab_row(toolbar, 38, 108)
+                if selected_row is not None:
+                    break
+                if time.monotonic() >= deadline:
+                    raise AssertionError('YouTube inspector tab strip was not visible')
+            # The optional language banner moves the tab strip by forty pixels.
+            clicked_row = selected_row
+            console_timeout = int(os.environ.get('YOUTUBE_CONSOLE_TIMEOUT', '30'))
+            if not 30 <= console_timeout <= 180:
+                raise ValueError('YOUTUBE_CONSOLE_TIMEOUT must be between 30 and 180 seconds.')
+            console_started = time.monotonic()
+            def save_console_readiness(ready):
+                (build / 'youtube-console-readiness-results.json').write_text(json.dumps({
+                    'ready': ready, 'seconds': time.monotonic() - console_started,
+                    'timeout_seconds': console_timeout, 'clicked_row': clicked_row,
+                }, indent=2) + '\n')
+            click(143, clicked_row, page=False)
+            move(300, 24, page=False)
+            last_console_click = time.monotonic()
+            deadline = time.monotonic() + console_timeout
+            while True:
+                console = snapshot('youtube-console-ready')
+                prompt_y = devtools_console_prompt(console)
+                if prompt_y is not None:
+                    save_console_readiness(True)
+                    click(70, prompt_y, page=False)
+                    break
+                # A late language banner can move the tab after the first click.
+                updated_row = devtools_tab_row(console, 38, 108)
+                if updated_row is not None and (updated_row != clicked_row or time.monotonic() - last_console_click >= 3):
+                    clicked_row = updated_row
+                    click(143, clicked_row, page=False)
+                    move(300, 24, page=False)
+                    last_console_click = time.monotonic()
+                if time.monotonic() >= deadline:
+                    save_console_readiness(False)
+                    raise AssertionError('YouTube inspector Console prompt was not visible')
+            query_offset = len(healthy())
+            expression = 'console.log("YTSTATE",movie_player.getPlayerState(),document.querySelector("video")?.currentTime,document.querySelector("video")?.readyState,document.querySelector("video")?.error)'
+            punctuation = {'"': ('shift', 'apostrophe'), '.': ('dot',),
+                ',': ('comma',), '(': ('shift', '9'), ')': ('shift', '0'),
+                '_': ('shift', 'minus'), '?': ('shift', 'slash')}
+            for character in expression:
+                keys = punctuation.get(character, ('shift', character.lower()) if character.isupper() else (character,))
+                key(*keys)
+            time.sleep(1)
+            key('ret')
+            try:
+                wait_marker('YTSTATE ', timeout=45, offset=query_offset)
+            except AssertionError:
+                snapshot('youtube-console-query-failure')
+                raise
+            snapshot('youtube-inspected')
+            if os.environ.get('YOUTUBE_PLAYBACK_PROBE') == '1':
+                import runpy
+                from pathlib import Path
+                runpy.run_path(str(Path(__file__).with_name('youtube-playback.py')))['run'](
+                    key, healthy, snapshot, build)
+        print('OBSERVED: live YouTube page; playback requires visual and captured-audio verification')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'devtools-async':
+        import json
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/devtools-async.html'); key('ret')
+        wait_marker('DEVTOOLS ASYNC READY', timeout=60)
+        initial = snapshot('devtools-async-ready')
+        click(initial[0] - 96, 24, page=False)
+        wait_marker('DEVTOOLS: frontend loaded', timeout=90)
+        time.sleep(10)
+        key('ctrl', '1')
+        started = time.monotonic()
+        click(200, 125)
+        wait_marker('DEVTOOLS ASYNC START')
+        wait_marker('DEVTOOLS ASYNC PASS', timeout=180)
+        milliseconds = float(re.search(r'DEVTOOLS ASYNC PASS milliseconds=([0-9.]+)', healthy())[1])
+        (build / 'devtools-async-results.json').write_text(json.dumps({
+            'promise_steps': 2048, 'compiled_functions': 1024,
+            'guest_milliseconds': milliseconds,
+            'host_seconds': round(time.monotonic() - started, 3)}, indent=2))
+        snapshot('devtools-async-complete')
+        print('PASS: inspector-attached Promise workload, checksum and completion; guest milliseconds=', milliseconds)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'devtools':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/devtools.html'); key('ret')
+        wait_marker('DEVTOOLS FIXTURE READY')
+        launcher = snapshot('devtools-launcher')
+        tools_x = launcher[0] - 96
+        # Native clicks must enter the inspector without relying on its shortcut.
+        click(tools_x, 24, page=False)
+        try:
+            wait_marker('DEVTOOLS: frontend loaded', timeout=90)
+        except Exception:
+            execute('screendump', {'filename': str(build / 'input-devtools-failed.ppm')})
+            raise
+        time.sleep(5)
+        created = healthy().count('TABS: created id=')
+        click(tools_x, 24, page=False)
+        assert healthy().count('TABS: created id=') == created
+        key('ctrl', 't'); key('ctrl', 't')
+        created = healthy().count('TABS: created id=')
+        key('ctrl', '1')
+        click(tools_x, 24, page=False)
+        time.sleep(1)
+        assert healthy().count('TABS: created id=') == created
+        assert healthy().count('DEVTOOLS: frontend loaded') == 1
+        snapshot('devtools-reused-at-tab-limit')
+        key('ctrl', '4'); key('ctrl', 'w')
+        key('ctrl', '3'); key('ctrl', 'w')
+        snapshot('devtools-elements')
+        click(350, 141)
+        time.sleep(2)
+        snapshot('devtools-styles')
+        click(143, 54)
+        # The native cursor must not obscure the selected-tab underline.
+        move(300, 24, page=False)
+        # The lazy Console editor must expose its prompt before it receives keys.
+        deadline = time.monotonic() + 30
+        last_console_click = time.monotonic()
+        while True:
+            healthy()
+            path = build / 'input-devtools-console-ready.ppm'
+            execute('screendump', {'filename': str(path)})
+            header = path.read_bytes().split(b'\n', 3)
+            width, height = map(int, header[1].split())
+            pixels = header[3]
+            console = (width, height, pixels)
+            prompt_y = devtools_console_prompt(console)
+            if prompt_y is not None:
+                click(70, prompt_y, page=False)
+                break
+            updated_row = devtools_tab_row(console, 38, 108)
+            if updated_row is not None and time.monotonic() - last_console_click >= 3:
+                click(143, updated_row, page=False)
+                move(300, 24, page=False)
+                last_console_click = time.monotonic()
+            if time.monotonic() >= deadline:
+                raise AssertionError('DevTools Console did not display an input prompt')
+            time.sleep(.2)
+        for character in 'text.value="debugged";heading.style.color="red"':
+            if character == '"': key('shift', 'apostrophe')
+            elif character == '=': key('equal')
+            elif character == ';': key('semicolon')
+            elif character == '.': key('dot')
+            else: key(character)
+        key('ret')
+        time.sleep(2)
+        snapshot('devtools-console')
+        key('ctrl', '1')
+        click(470, 125)
+        wait_marker('DEVTOOLS INSPECTED {"value":"debugged","color":"rgb(255, 0, 0)"}')
+        snapshot('devtools-inspected')
+        key('ctrl', '2')
+        click(280, 54)
+        time.sleep(2)
+        snapshot('devtools-network')
+        key('ctrl', '1')
+        click(470, 180)
+        wait_marker('DEVTOOLS: debugger paused')
+        assert 'DEVTOOLS BREAKPOINT RESUMED' not in healthy()
+        key('ctrl', '2')
+        click(210, 54)
+        # Sources loads its editor lazily on first use in the firmware frontend.
+        time.sleep(8)
+        snapshot('devtools-paused')
+        pauses = healthy().count('DEVTOOLS: debugger paused')
+        key('f10')
+        deadline = time.monotonic() + 30
+        while healthy().count('DEVTOOLS: debugger paused') <= pauses:
+            if time.monotonic() >= deadline:
+                raise AssertionError('DevTools step-over did not pause on the next statement')
+            time.sleep(.2)
+        assert 'DEVTOOLS BREAKPOINT RESUMED' not in healthy()
+        time.sleep(3)
+        snapshot('devtools-stepped')
+        key('f8')
+        wait_marker('DEVTOOLS BREAKPOINT RESUMED')
+        wait_marker('DEVTOOLS: debugger resumed')
+        snapshot('devtools-resumed')
+        key('ctrl', 'w')
+        # Opening from the process monitor must reveal the resulting tools tab.
+        click(launcher[0] - 70, 64, page=False)
+        wait_marker('MONITOR: opened')
+        click(tools_x, 24, page=False)
+        wait_marker('MONITOR: closed')
+        deadline = time.monotonic() + 60
+        while healthy().count('DEVTOOLS: frontend loaded') < 2:
+            if time.monotonic() >= deadline: raise AssertionError('DevTools did not reopen')
+            time.sleep(.2)
+        key('ctrl', '1'); key('ctrl', 'w')
+        wait_marker('DEVTOOLS: target session detached')
+        time.sleep(2)
+        snapshot('devtools-target-closed')
+        print('PASS: DevTools toolbar launch, tab-limit reuse, monitor exit, console DOM/CSS mutation, debugger pause/step/resume, reopening and target detachment; DOM and network screenshots require inspection')
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('ime', 'ime-japanese'):
+        import runpy
+        from pathlib import Path
+        name = 'japanese-ime-scenario.py' if os.environ.get('INPUT_SCENARIO') == 'ime-japanese' else 'ime-scenario.py'
+        runpy.run_path(str(Path(__file__).with_name(name)))['run'](
+            key, click, type_address, wait_marker, snapshot, healthy)
+        return
     if os.environ.get('INPUT_SCENARIO') == 'scroll-wire-boundary':
         import subprocess
         import tempfile
@@ -103,7 +545,7 @@ def run(execute, build, log):
             assert time.monotonic()<deadline,healthy()[recovered:]
             time.sleep(.1)
         time.sleep(1); click(280,50)
-        assert 'ISOLATION click' in healthy()[recovered:]
+        wait_marker('ISOLATION click', timeout=5, offset=recovered)
         result={'producer_cpl':3,'rejected_publications':5,'untrusted_pointer_fields_ignored':True,
                 'valid_cache_after_rejection':True,'scroll_while_producer_busy':True,'recovery_click':True}
         (build/'scroll-wire-boundary-results.json').write_text(json.dumps(result,indent=2))
@@ -145,9 +587,131 @@ def run(execute, build, log):
                 assert time.monotonic()<deadline, healthy()[offset:]
                 time.sleep(.1)
             time.sleep(1); click(280,50)
-            assert 'ISOLATION click' in healthy()[offset:]
+            wait_marker('ISOLATION click', timeout=5, offset=offset)
             snapshot('sandbox-recovered-'+symbol)
         print('PASS: live CPL3 website input, corrupted channel recovery, supervisor read denial, page-table write denial and two interactive recoveries',flush=True)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-canvas-colors':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/gpu-canvas-colors.html'); key('ret')
+        wait_marker('GPU COLORS READY', timeout=120)
+        time.sleep(2)
+        image=snapshot('gpu-canvas-colors'); width,height,pixels=image
+        for x,y,expected in [(60,80,(0,255,0)),(60,140,(128,0,0)),(210,80,(0,255,0)),(210,140,(128,0,0)),(360,140,(128,0,0)),(60,280,(0,0,128)),(210,280,(0,0,128)),(360,280,(0,0,128)),(680,70,(255,0,255)),(700,90,(255,255,255)),(760,70,(0,0,0)),(60,460,(0,255,0)),(210,460,(0,255,0)),(360,460,(0,255,0))]:
+            offset=((y+80)*width+x)*3; actual=tuple(pixels[offset:offset+3])
+            assert all(abs(a-b)<=2 for a,b in zip(actual,expected)),(x,y,expected,actual)
+        if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1':
+            assert healthy().count('GPU-CANVAS: imported token=')>=10
+            assert 'GPU-CANVAS: readback api=' not in healthy()
+        print('PASS: GPU canvas orientation, opaque/premultiplied/straight alpha, RGBA/BGRA/float16, CSS transform, clipping and foreground occlusion',flush=True)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-live-webgl':
+        import json
+        key('ctrl','l'); type_address('https://webglfundamentals.org/webgl/webgl-3d-perspective.html')
+        offset=len(healthy()); started=time.monotonic(); key('ret')
+        marker='GPU-CANVAS: imported token=' if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1' else 'GPU-CANVAS: readback api=webgl'
+        wait_marker(marker,timeout=120,offset=offset)
+        first_ms=round((time.monotonic()-started)*1000,2)
+        wait_marker('BLINK: main document load finished',timeout=60,offset=offset)
+        # SDL focus can deliver relative motion before the scenario starts.
+        # Clamp to the screen corner instead of assuming the initial pointer position.
+        execute('input-send-event',{'events':[
+            {'type':'rel','data':{'axis':'x','value':-4096}},
+            {'type':'rel','data':{'axis':'y','value':-4096}}]})
+        time.sleep(.25);position[:]=[0,0]
+        move(640,400,page=False)
+        first=snapshot('live-webgl-loaded')
+        def changed(previous,name,started):
+            deadline=started+10
+            while time.monotonic()<deadline:
+                path=build/('input-'+name+'.ppm')
+                execute('screendump',{'filename':str(path)})
+                header=path.read_bytes().split(b'\n',3); width,height=map(int,header[1].split())
+                current=(width,height,header[3])
+                # Exclude the native toolbar and the website's slider panel.
+                count=sum(previous[2][index:index+3]!=current[2][index:index+3]
+                    for y in range(100,height) for x in range(0,900)
+                    for index in [(y*width+x)*3])
+                if count>1000:return current,round((time.monotonic()-started)*1000,2),count
+                healthy();time.sleep(.02)
+            raise AssertionError('The live WebGL object did not respond to input')
+        move(1145,23); started=time.monotonic()
+        for down in (True,False):execute('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':down}}]})
+        second,click_ms,click_pixels=changed(first,'live-webgl-click',started)
+        started=time.monotonic();execute('send-key',{'keys':[{'type':'qcode','data':'home'}]})
+        third,key_ms,key_pixels=changed(second,'live-webgl-key',started)
+        content=healthy()[offset:]
+        result={'first_gpu_frame_ms':first_ms,'click_visible_ms':click_ms,'key_visible_ms':key_ms,
+            'click_changed_pixels':click_pixels,'key_changed_pixels':key_pixels,
+            'imports':content.count('GPU-CANVAS: imported token='),
+            'readback_bytes':sum(map(int,re.findall(r'GPU-CANVAS: readback api=webgl bytes=(\d+)',content)))}
+        if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1':assert result['readback_bytes']==0,result
+        (build/'gpu-live-webgl-results.json').write_text(json.dumps(result,indent=2)+'\n')
+        offset=len(healthy());key('ctrl','l');type_address('about:blank');key('ret')
+        wait_marker('BLINK: main frame stopped loading',timeout=30,offset=offset)
+        print('PASS: live HTTPS WebGL geometry responds to slider click and keyboard '+json.dumps(result),flush=True)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-aquarium':
+        import json
+        key('ctrl','l'); type_address('https://webglsamples.org/aquarium/aquarium.html')
+        offset=len(healthy()); started=time.monotonic(); key('ret')
+        marker='GPU-CANVAS: imported token=' if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1' else 'GPU-CANVAS: readback api=webgl'
+        wait_marker(marker,timeout=150,offset=offset)
+        first_ms=round((time.monotonic()-started)*1000,2)
+        time.sleep(8)
+        first=snapshot('aquarium-before')
+        click(65,155)
+        second=snapshot('aquarium-after')
+        width,height,pixels=second
+        changed=sum(first[2][index:index+3]!=pixels[index:index+3] for index in range((height//3)*width*3,len(pixels),3))
+        assert changed>1000, 'Aquarium pixels did not animate'
+        content=healthy()[offset:]
+        result={'url':'https://webglsamples.org/aquarium/aquarium.html','first_gpu_frame_ms':first_ms,'changed_pixels':changed,
+            'exports':content.count('GPU-CANVAS: exported token='),'imports':content.count('GPU-CANVAS: imported token='),
+            'readback_bytes':sum(map(int,re.findall(r'GPU-CANVAS: readback api=webgl bytes=(\d+)',content)))}
+        if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1':assert result['readback_bytes']==0,result
+        (build/'gpu-aquarium-results.json').write_text(json.dumps(result,indent=2)+'\n')
+        offset=len(healthy())
+        key('ctrl','l');type_address('about:blank');key('ret')
+        wait_marker('BLINK: main frame stopped loading',timeout=30,offset=offset)
+        print('PASS: live WebGL Aquarium animation and navigation '+json.dumps(result),flush=True)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-canvas-perf':
+        import json
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/gpu-canvas-perf.html'); key('ret')
+        wait_marker('GPU PERF READY', timeout=120)
+        samples=[]
+        def measured(marker, action):
+            offset=len(healthy()); started=time.monotonic(); action()
+            deadline=started+30
+            while marker not in healthy()[offset:]:
+                assert time.monotonic()<deadline, 'Missing benchmark input: '+marker
+                time.sleep(.01)
+            samples.append({'event':marker,'host_delivery_to_log_ms':round((time.monotonic()-started)*1000,2)})
+        move(90,35)
+        def press():
+            for down in (True,False): execute('input-send-event',{'events':[{'type':'btn','data':{'button':'left','down':down}}]})
+        measured('GPU PERF INPUT click',press)
+        click(300,35)
+        measured('GPU PERF INPUT key a',lambda:execute('send-key',{'keys':[{'type':'qcode','data':'a'}]}))
+        move(800,500)
+        def scroll():
+            for down in (True,False): execute('input-send-event',{'events':[{'type':'btn','data':{'button':'wheel-down','down':down}}]})
+        measured('GPU PERF INPUT scroll',scroll)
+        wait_marker('GPU PERF DONE', timeout=180)
+        text=healthy()
+        assert 'GPU PERF FAILURE' not in text, text
+        result=json.loads(re.search(r'GPU PERF DONE (\{[^\n]+\})',text)[1])
+        result['load_ms']=float(re.search(r'GPU PERF READY load_ms=([\d.]+)',text)[1])
+        result['inputs']=samples
+        result['exports']=len(re.findall(r'GPU-CANVAS: exported token=',text))
+        result['imports']=len(re.findall(r'GPU-CANVAS: imported token=',text))
+        result['readback_bytes']=sum(map(int,re.findall(r'GPU-CANVAS: readback api=\w+ bytes=(\d+)',text)))
+        if os.environ.get('QEMU_TEST_REQUIRE_GPU_CANVAS')=='1':
+            assert result['exports']>0 and result['imports']>0, result
+            assert result['readback_bytes']==0, result
+        (build/'gpu-canvas-perf-results.json').write_text(json.dumps(result,indent=2)+'\n')
+        snapshot('gpu-canvas-perf')
+        print('PASS: animated WebGL2/WebGPU canvases and live click, keyboard and wheel input '+json.dumps(result),flush=True)
         return
     if os.environ.get('INPUT_SCENARIO') == 'webgpu-canvas':
         key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu-canvas.html'); key('ret')
@@ -157,21 +721,39 @@ def run(execute, build, log):
         assert tuple(pixels[offset:offset + 3]) == (0, 0, 255)
         print('PASS: WebGPU canvas formats, alpha modes, resize, reconfiguration and presentation')
         return
+    if os.environ.get('INPUT_SCENARIO') == 'gpu-multicontext':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/gpu-multicontext.html'); key('ret')
+        wait_marker('GPU MULTICONTEXT PASS checks=14', timeout=150)
+        assert 'GPU MULTICONTEXT FAILURE' not in healthy()
+        width, height, pixels = snapshot('gpu-multicontext')
+        for color in (bytes((0, 255, 0)), bytes((0, 0, 255))):
+            assert sum(pixels[index:index+3] == color for index in range(0, len(pixels), 3)) >= 8000, color
+        if os.environ.get('QEMU_TEST_VENUS') == '1':
+            counts = [int(count) for count in re.findall(r'VENUS TRANSPORT: context opened id=\d+ active=(\d+)', healthy())]
+            assert counts and max(counts) >= 3 + (os.environ.get('QEMU_TEST_GPU_COMPOSITION') == '1'), counts
+        print('PASS: simultaneous WebGL1/WebGL2 and frame WebGPU compute, context loss, removal and recreation')
+        return
     if os.environ.get('INPUT_SCENARIO') == 'gpu-lifecycle':
-        for cycle in range(3):
+        cycles = 8
+        for cycle in range(cycles):
             for version, marker in (('webgpu', 'WEBGPU PASS checks=13'), ('webgl2', 'WEBGL2 PASS checks=8')):
                 previous = healthy().count(marker)
                 key('ctrl','l'); type_address('https://10.0.2.2:8767/' + version + '.html'); key('ret')
                 deadline = time.monotonic() + 150
                 while healthy().count(marker) <= previous:
                     assert time.monotonic() < deadline, (version, cycle, healthy())
-                    assert 'RENDERER: stopped status=' not in healthy(), healthy()
+                    assert 'RENDERER: stopped status=' not in after_boundary_tests(healthy()), healthy()
                     time.sleep(.2)
                 width, height, pixels = snapshot('lifecycle-' + str(cycle) + '-' + version)
                 for x, y, expected in ((40, 240, (0, 255, 0)), (160, 350, (255, 0, 0))):
                     offset = (y * width + x) * 3
                     assert tuple(pixels[offset:offset + 3]) == expected, (version, cycle, x, y)
-        print('PASS: repeated WebGPU/WebGL2 navigation, device teardown and visible frames')
+        if os.environ.get('QEMU_TEST_VENUS') == '1':
+            transitions = re.findall(r'VENUS TRANSPORT: context (opened|closed) id=(\d+) active=(\d+)', healthy())
+            assert transitions and max(int(count) for _, _, count in transitions) <= 2 + (os.environ.get('QEMU_TEST_GPU_COMPOSITION') == '1'), transitions
+            assert sum(kind == 'closed' for kind, _, _ in transitions) >= cycles, transitions
+            assert int(transitions[-1][2]) == 1 + (os.environ.get('QEMU_TEST_GPU_COMPOSITION') == '1'), transitions
+        print('PASS: eight WebGPU/WebGL2 navigation cycles, bounded live contexts, device teardown and visible frames')
         return
     if os.environ.get('INPUT_SCENARIO') in ('webgl', 'webgl2'):
         version = os.environ['INPUT_SCENARIO']
@@ -184,10 +766,12 @@ def run(execute, build, log):
             assert tuple(pixels[offset:offset + 3]) == expected, (x, y, pixels[offset:offset + 3])
         print('PASS: WebGL clear, GLSL compilation, triangle rasterization, readback and validation')
         return
-    if os.environ.get('INPUT_SCENARIO') == 'webgpu':
-        key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu.html'); key('ret')
+    if os.environ.get('INPUT_SCENARIO') in ('webgpu', 'gpu-coherency'):
+        coherence = os.environ.get('INPUT_SCENARIO') == 'gpu-coherency'
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/webgpu.html' + ('?coherence_cycles=32' if coherence else '')); key('ret')
         wait_marker('WEBGPU PASS checks=13', timeout=150)
         assert 'WEBGPU FAILURE' not in healthy()
+        if coherence: assert 'WEBGPU COHERENCY PASS cycles=32' in healthy()
         time.sleep(.5)
         width, height, pixels = snapshot('webgpu')
         for x, y, expected in ((40, 240, (0, 255, 0)), (160, 350, (255, 0, 0))):
@@ -220,6 +804,56 @@ def run(execute, build, log):
         wait_marker('AUDIO PASS checks=15', timeout=60)
         snapshot('audio-complete')
         print('PASS: audio DMA playback, pause, seek, volume, end and reload; waveform validation follows QEMU shutdown')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'mse-config':
+        key('ctrl', 'l'); type_address('https://10.0.2.2:8767/media-config.html'); key('ret')
+        wait_marker('MSE CONFIG READY', timeout=60)
+        click(450, 205)
+        wait_marker('MSE CONFIG PASS', timeout=45)
+        assert 'MSE CONFIG FAILURE' not in healthy()
+        snapshot('mse-config-complete')
+        print('PASS: MSE mono/stereo transition clock; complete PCM validation follows shutdown')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'mse-audio':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/media-source-audio.html'); key('ret')
+        wait_marker('MSE AUDIO READY', timeout=90)
+        click(480, 220)
+        for marker, name, channel in [('MSE AUDIO GREEN', 'mse-audio-green', 1), ('MSE AUDIO BLUE', 'mse-audio-blue', 2)]:
+            wait_marker(marker, timeout=40)
+            width, height, pixels = snapshot(name)
+            for x, y in ((80, 260), (190, 330), (300, 400)):
+                color = pixels[(y * width + x) * 3:(y * width + x) * 3 + 3]
+                assert color[channel] > 180 and all(color[index] < 60 for index in range(3) if index != channel), (name, list(color))
+        wait_marker('MSE AUDIO PASS checks=17', timeout=90)
+        snapshot('mse-audio-complete')
+        print('PASS: MSE Opus and VP8 playback, pause, seek, separate source buffers and audio-only playback')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'media-source-boundaries':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/media-source-boundaries.html'); key('ret')
+        wait_marker('MSE LIMIT PASS checks=14', timeout=150)
+        assert 'MSE LIMIT FAILURE' not in healthy()
+        snapshot('mse-boundaries')
+        print('PASS: MSE abort, append window, sequence, config change, malformed data, frame recycling and pending detach')
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'media-source':
+        key('ctrl','l'); type_address('https://10.0.2.2:8767/media-source.html'); key('ret')
+        wait_marker('MSE READY', timeout=90)
+        def mse_pixels(name, channel):
+            width, height, pixels = snapshot(name)
+            for x, y in ((80, 260), (190, 330), (300, 400)):
+                offset = (y * width + x) * 3
+                color = pixels[offset:offset + 3]
+                assert color[channel] > 180 and all(color[index] < 60 for index in range(3) if index != channel), (name, x, y, list(color))
+        mse_pixels('mse-red', 0)
+        click(480, 220)
+        wait_marker('MSE GREEN', timeout=40)
+        mse_pixels('mse-green', 1)
+        wait_marker('MSE BLUE', timeout=40)
+        mse_pixels('mse-blue', 2)
+        wait_marker('MSE PASS checks=22', timeout=90)
+        assert 'MSE FAILURE' not in healthy()
+        snapshot('mse-complete')
+        print('PASS: MSE split append, streaming, underflow recovery, seek, removal, EOS, replay and reattach')
         return
     if os.environ.get('INPUT_SCENARIO') == 'media-boundaries':
         key('ctrl','l'); type_address('https://10.0.2.2:8767/media-boundaries.html'); key('ret')
@@ -369,6 +1003,17 @@ def run(execute, build, log):
         import runpy
         runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-layout.py'))['run'](
             execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') == 'scroll-filter':
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-filter.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address)
+        return
+    if os.environ.get('INPUT_SCENARIO') in ('scroll-affine', 'scroll-affine-controls'):
+        import runpy
+        runpy.run_path(str(__import__('pathlib').Path(__file__).parent/'scroll-affine.py'))['run'](
+            execute,build,healthy,move,click,key,wait_marker,type_address,
+            horizontal=os.environ.get('INPUT_SCENARIO') == 'scroll-affine-controls')
         return
     if os.environ.get('INPUT_SCENARIO') == 'scroll-style':
         import runpy
@@ -632,6 +1277,13 @@ def run(execute, build, log):
         (build/'renderer-scroll-results.json').write_text(json.dumps(result,indent=2))
         print('PASS: asynchronous scroll during JavaScript',json.dumps(result))
         return
+    if os.environ.get('INPUT_SCENARIO') == 'renderer-shutdown':
+        key('ctrl', 'l'); type_address('http://10.0.2.2:8765/renderer-infinite.html'); key('ret')
+        wait_marker('RECOVERY fixture ready'); time.sleep(2)
+        click(130, 40); wait_marker('RECOVERY infinite begin')
+        snapshot('renderer-shutdown-infinite')
+        # The outer harness sends F12 while the renderer remains in JavaScript.
+        return
     if os.environ.get('INPUT_SCENARIO') == 'renderer-recovery':
         key('ctrl','l'); type_address('http://10.0.2.2:8765/renderer-infinite.html'); key('ret')
         wait_marker('RECOVERY fixture ready'); time.sleep(2)
@@ -667,7 +1319,7 @@ def run(execute, build, log):
             while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.1)
             assert 'ISOLATION ready' in healthy()[offset:]
             time.sleep(2); click(280,50)
-            assert 'ISOLATION click' in healthy()[offset:]
+            wait_marker('ISOLATION click', timeout=5, offset=offset)
         offset=len(healthy())
         click(120,50)
         deadline=time.monotonic()+10
@@ -678,13 +1330,15 @@ def run(execute, build, log):
         while time.monotonic()<deadline and 'RENDERER: recovery launched' not in healthy()[offset:]: time.sleep(.02)
         assert 'RENDERER: recovery launched' in healthy()[offset:]
         assert 'ISOLATION end' not in healthy()[offset:]
+        wait_marker('BLINK: non-composited main frame created', timeout=20, offset=offset)
+        wait_marker('RENDERER: recovery publication discarded slot=1', timeout=20, offset=offset)
         key('esc'); snapshot('renderer-recovery-message')
         click(260,24,False)
         deadline=time.monotonic()+20
         while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
         assert 'ISOLATION ready' in healthy()[offset:]
         time.sleep(1); click(280,50)
-        assert 'ISOLATION click' in healthy()[offset:]
+        wait_marker('ISOLATION click', timeout=5, offset=offset)
         if os.environ.get('QEMU_TEST_GDB_PORT'):
             disassembly=subprocess.check_output(['llvm-objdump','-d','--disassemble-symbols=abort',str(build/'payload.elf')],text=True)
             invalid=re.search(r'^\s*([0-9a-f]+):.*\bud2\b',disassembly,re.M)
@@ -701,7 +1355,7 @@ def run(execute, build, log):
             while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
             assert 'ISOLATION ready' in healthy()[offset:]
             time.sleep(1); click(280,50)
-            assert 'ISOLATION click' in healthy()[offset:]
+            wait_marker('ISOLATION click', timeout=5, offset=offset)
             disassembly=subprocess.check_output(['llvm-objdump','-d','--disassemble-symbols=_ZN5angle13BreakDebuggerEv',str(build/'payload.elf')],text=True)
             breakpoint=re.search(r'^\s*([0-9a-f]+):.*\bint3\b',disassembly,re.M)
             assert breakpoint, disassembly
@@ -717,7 +1371,7 @@ def run(execute, build, log):
             while time.monotonic()<deadline and 'ISOLATION ready' not in healthy()[offset:]: time.sleep(.02)
             assert 'ISOLATION ready' in healthy()[offset:]
             time.sleep(1); click(280,50)
-            assert 'ISOLATION click' in healthy()[offset:]
+            wait_marker('ISOLATION click', timeout=5, offset=offset)
         tracked=re.findall(r'reclaimed broker allocations=([0-9]+) tracked=([0-9]+)',healthy())
         assert len(tracked)==(5 if os.environ.get('QEMU_TEST_GDB_PORT') else 2) and all(freed==owned for freed,owned in tracked), tracked
         selection_start=len(healthy()); key('ctrl','2')
@@ -1339,7 +1993,7 @@ def run(execute, build, log):
         assert expect_url('/second.html')[1] == count
         loads = healthy().count('INPUT_TEST second document loaded')
         button(2)
-        deadline = time.monotonic() + timeout
+        deadline = time.monotonic() + 30
         while healthy().count('INPUT_TEST second document loaded') <= loads and time.monotonic() < deadline: time.sleep(.2)
         assert healthy().count('INPUT_TEST second document loaded') > loads, 'Reload did not load the document again'
         assert history()[1] == count, 'Reload appended a history entry'

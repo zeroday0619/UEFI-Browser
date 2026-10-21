@@ -1,0 +1,15 @@
+--- a/third_party/abseil-cpp/absl/random/internal/seed_material.cc
++++ b/third_party/abseil-cpp/absl/random/internal/seed_material.cc
+@@ -51,6 +51,12 @@
+ 
+ #endif
+ 
++#if defined(UEFI_RUNTIME)
++#include <sys/random.h>
++// The firmware runtime brokers getentropy through its validated RNG service.
++#define ABSL_RANDOM_USE_GET_ENTROPY 1
++#endif
++
+ #if defined(__GLIBC__) && \
+     (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 25))
+ // glibc >= 2.25 has getentropy()

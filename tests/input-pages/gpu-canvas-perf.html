@@ -1,0 +1,33 @@
+<!doctype html><meta charset="utf-8"><title>GPU canvas input benchmark</title>
+<style>body{margin:0;background:#142435;color:white;font:20px sans-serif;height:2200px}header{height:90px;position:sticky;top:0;background:#142435;z-index:2}button,input{font:20px sans-serif;margin:12px;padding:8px}canvas{width:480px;height:280px;display:inline-block}#status{padding:6px}</style>
+<header><button id="button">Input check</button><input id="field" placeholder="Type here"><span id="status">Starting</span></header>
+<canvas id="webgl" width="960" height="560"></canvas><canvas id="webgpu" width="960" height="560"></canvas>
+<script>
+(async()=>{
+  const started=performance.now(), gaps=[];
+  let frames=0,last=0,finished=false;
+  const gl=webgl.getContext('webgl2',{antialias:false,preserveDrawingBuffer:true});
+  if(!gl)throw Error('WebGL2 unavailable');
+  const adapter=await navigator.gpu.requestAdapter(),device=await adapter.requestDevice();
+  const context=webgpu.getContext('webgpu');context.configure({device,format:'rgba8unorm',alphaMode:'opaque'});
+  button.onclick=()=>{button.style.background='#00ff00';console.log('GPU PERF INPUT click');};
+  field.oninput=()=>console.log('GPU PERF INPUT key '+field.value);
+  window.addEventListener('scroll',()=>console.log('GPU PERF INPUT scroll '+scrollY),{passive:true});
+  function frame(now){
+    if(finished)return;
+    if(last)gaps.push(now-last);last=now;frames++;
+    const phase=frames%2;
+    gl.clearColor(phase,1-phase,0,1);gl.clear(gl.COLOR_BUFFER_BIT);
+    const encoder=device.createCommandEncoder(),pass=encoder.beginRenderPass({colorAttachments:[{view:context.getCurrentTexture().createView(),clearValue:[0,phase,1-phase,1],loadOp:'clear',storeOp:'store'}]});
+    pass.end();device.queue.submit([encoder.finish()]);
+    if(frames===1){document.getElementById('status').textContent='Animating';console.log('GPU PERF READY load_ms='+(performance.now()-started).toFixed(2));}
+    if(frames>=40 && performance.now()-started>=15000){
+      finished=true;gaps.sort((a,b)=>a-b);
+      console.log('GPU PERF DONE '+JSON.stringify({frames,elapsed_ms:performance.now()-started,median_ms:gaps[Math.floor(gaps.length*.5)],p95_ms:gaps[Math.floor(gaps.length*.95)]}));
+      document.getElementById('status').textContent='Complete';return;
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})().catch(error=>console.log('GPU PERF FAILURE '+error.stack));
+</script>

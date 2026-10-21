@@ -19,6 +19,8 @@ struct RendererBootstrap {
   const uint64_t *fault;
   int (UEFI_API *grant)(uint64_t address, size_t size, unsigned permissions);
   int (UEFI_API *buffer)(uint64_t address, size_t size, unsigned writable);
+  int (UEFI_API *reserve_tables)(size_t minimum);
+  RendererBootstrap *media;
 };
 /* Only the supervisor maps this request slot in CPL3 mode. */
 typedef struct {
@@ -39,17 +41,22 @@ void renderer_runtime_shared_free(void *address, size_t size);
 void renderer_runtime_application_size(size_t size);
 void *renderer_runtime_export_allocate(size_t size);
 void renderer_runtime_export_free(void *address,size_t size);
+/* Device grants are non-executable and cannot acquire virtual aliases. */
+int renderer_runtime_device_grant(uint64_t address, size_t size, unsigned cache_type);
 Status renderer_runtime_join(void);
 Status renderer_runtime_terminate(void);
 void renderer_network_reset(void);
 SystemTable *renderer_runtime_table(SystemTable *table);
 void renderer_runtime_service(void);
 uint64_t renderer_runtime_frequency(void);
-enum { RENDERER_MEMORY_PAGES=13 };
+enum { RENDERER_MEMORY_PAGES=13, RENDERER_MEMORY_STATISTICS=14 };
+/* Fields are charged physical bytes, quota bytes and allocation count. */
+uint64_t renderer_runtime_memory_statistic(unsigned field);
 /* The BSP checks ownership before dereferencing a renderer-supplied address. */
 int renderer_runtime_buffer(uint64_t address, size_t size, unsigned writable);
 int renderer_runtime_string(char *output, size_t capacity, uint64_t address);
 int renderer_runtime_sandboxed(void);
+RendererBootstrap *renderer_runtime_media_bootstrap(void);
 /* Runtime requests are synchronous; UI and network service polling never wait for the AP. */
 uint64_t renderer_runtime_request(unsigned operation, uint64_t first, uint64_t second,
                                   uint64_t third, uint64_t fourth, uint64_t fifth);

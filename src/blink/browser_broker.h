@@ -1,6 +1,7 @@
 #ifndef UEFI_BROWSER_BROKER_H
 #define UEFI_BROWSER_BROKER_H
 #include <cstdio>
+#include "blink/authenticator.h"
 #include "blink/web_socket.h"
 #include "blink/cache_storage.h"
 #include "blink/indexed_db.h"
@@ -24,6 +25,10 @@ class BrowserBroker final : public blink::mojom::BrowserInterfaceBroker,
   }
   void SetFrameToken(blink::LocalFrameToken token) { token_ = token; sockets_ = CreateWebSocketService(token); }
   void GetInterface(mojo::GenericPendingReceiver receiver) override {
+    if (auto authenticator = receiver.As<blink::mojom::Authenticator>()) {
+      authenticator_.Bind(std::move(authenticator));
+      return;
+    }
     if (auto database = receiver.As<blink::mojom::IDBFactory>()) {
       BindIndexedDB(token_, std::move(database));
       return;
@@ -88,6 +93,7 @@ class BrowserBroker final : public blink::mojom::BrowserInterfaceBroker,
                            const std::string&, bool) override {}
  private:
   blink::LocalFrameToken token_;
+  FirmwareAuthenticator authenticator_;
   std::unique_ptr<WebSocketService> sockets_;
   static blink::mojom::PermissionStatusWithDetailsPtr Denied() {
     return blink::mojom::PermissionStatusWithDetails::New(

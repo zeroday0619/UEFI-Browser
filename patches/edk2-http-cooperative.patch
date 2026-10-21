@@ -91,7 +91,7 @@ index 21d0f33..af34464 100644
 +}
 +#endif
 diff --git a/NetworkPkg/HttpDxe/HttpImpl.c b/NetworkPkg/HttpDxe/HttpImpl.c
-index 7ce6882..0bd4b67 100644
+index 7ce6882..b8c404e 100644
 --- a/NetworkPkg/HttpDxe/HttpImpl.c
 +++ b/NetworkPkg/HttpDxe/HttpImpl.c
 @@ -298,6 +298,7 @@ EfiHttpRequest (
@@ -102,6 +102,101 @@ index 7ce6882..0bd4b67 100644
          break;
        case HttpMethodConnect:
          ConnRequest = (EFI_HTTP_CONNECT_REQUEST_DATA *)Request;
+@@ -1183,12 +1184,16 @@ HttpResponseWorker (
+     //
+     // Get HTTP timeout value
+     //
+-    TimeoutValue = PcdGet32 (PcdHttpIoTimeout);
++    // The caller configuration must govern each blocking response wait.
++    TimeoutValue = HttpInstance->TimeOutMillisec;
++    if (TimeoutValue == 0) {
++      TimeoutValue = PcdGet32 (PcdHttpIoTimeout);
++    }
+
+     //
+     // Start the timer, and wait Timeout seconds to receive the header packet.
+     //
+-    Status = gBS->SetTimer (HttpInstance->TimeoutEvent, TimerRelative, TimeoutValue * TICKS_PER_MS);
++    Status = gBS->SetTimer (HttpInstance->TimeoutEvent, TimerRelative, (UINT64)TimeoutValue * TICKS_PER_MS);
+     if (EFI_ERROR (Status)) {
+       goto Error;
+     }
+@@ -1478,12 +1483,16 @@ HttpResponseWorker (
+     //
+     // Get HTTP timeout value
+     //
+-    TimeoutValue = PcdGet32 (PcdHttpIoTimeout);
++    // The caller configuration must govern each blocking response wait.
++    TimeoutValue = HttpInstance->TimeOutMillisec;
++    if (TimeoutValue == 0) {
++      TimeoutValue = PcdGet32 (PcdHttpIoTimeout);
++    }
+
+     //
+     // Start the timer, and wait Timeout seconds to receive the body packet.
+     //
+-    Status = gBS->SetTimer (HttpInstance->TimeoutEvent, TimerRelative, TimeoutValue * TICKS_PER_MS);
++    Status = gBS->SetTimer (HttpInstance->TimeoutEvent, TimerRelative, (UINT64)TimeoutValue * TICKS_PER_MS);
+     if (EFI_ERROR (Status)) {
+       goto Error2;
+     }
+@@ -1497,26 +1506,20 @@ HttpResponseWorker (
+     }
+
+     //
+-    // Process the received the body packet.
+-    //
+-    HttpMsg->BodyLength = MIN ((UINTN)Fragment.Len, HttpMsg->BodyLength);
+-
+-    CopyMem (HttpMsg->Body, Fragment.Bulk, HttpMsg->BodyLength);
+-
+-    //
+-    // Record the CallbackData data.
++    // Cached bytes bypass the parser on subsequent Response calls. Parse the
++    // entire TLS fragment once so partial caller buffers cannot skip bytes.
+     //
+     HttpInstance->CallbackData.Wrap            = (VOID *)Wrap;
+-    HttpInstance->CallbackData.ParseData       = HttpMsg->Body;
+-    HttpInstance->CallbackData.ParseDataLength = HttpMsg->BodyLength;
++    HttpInstance->CallbackData.ParseData       = Fragment.Bulk;
++    HttpInstance->CallbackData.ParseDataLength = Fragment.Len;
+
+     //
+     // Parse Body with CallbackData data.
+     //
+     Status = HttpParseMessageBody (
+                HttpInstance->MsgParser,
+-               HttpMsg->BodyLength,
+-               HttpMsg->Body
++               Fragment.Len,
++               (CHAR8 *)Fragment.Bulk
+                );
+     if (EFI_ERROR (Status)) {
+       goto Error2;
+@@ -1533,10 +1536,13 @@ HttpResponseWorker (
+     //
+     // Check whether there is the next message header in the HttpMsg->Body.
+     //
++    BodyLen = Fragment.Len;
+     if (HttpInstance->NextMsg != NULL) {
+-      HttpMsg->BodyLength = HttpInstance->NextMsg - (CHAR8 *)HttpMsg->Body;
++      BodyLen = HttpInstance->NextMsg - (CHAR8 *)Fragment.Bulk;
+     }
+
++    HttpMsg->BodyLength = MIN (BodyLen, HttpMsg->BodyLength);
++    CopyMem (HttpMsg->Body, Fragment.Bulk, HttpMsg->BodyLength);
+     HttpInstance->CacheLen = Fragment.Len - HttpMsg->BodyLength;
+     if (HttpInstance->CacheLen != 0) {
+       if (HttpInstance->CacheBody != NULL) {
+@@ -1552,7 +1558,7 @@ HttpResponseWorker (
+       CopyMem (HttpInstance->CacheBody, Fragment.Bulk + HttpMsg->BodyLength, HttpInstance->CacheLen);
+       HttpInstance->CacheOffset = 0;
+       if (HttpInstance->NextMsg != NULL) {
+-        HttpInstance->NextMsg = HttpInstance->CacheBody;
++        HttpInstance->NextMsg = HttpInstance->CacheBody + BodyLen - HttpMsg->BodyLength;
+       }
+     }
+
 diff --git a/NetworkPkg/HttpDxe/HttpProto.c b/NetworkPkg/HttpDxe/HttpProto.c
 index 9fac19a..0306855 100644
 --- a/NetworkPkg/HttpDxe/HttpProto.c

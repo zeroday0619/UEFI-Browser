@@ -1,0 +1,5 @@
+# The engine compile check uses the same musl ABI as the browser payload.
+import("//.gn")
+script_executable = "/usr/bin/python3"
+root = "//third_party/blink/uefi/mozc:engine"
+root_patterns = [ "//third_party/blink/uefi/mozc:engine" ]

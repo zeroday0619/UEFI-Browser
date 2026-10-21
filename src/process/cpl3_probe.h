@@ -1,5 +1,8 @@
 /* The payload tests execute on the same entry, stack, TLS, and mappings as the renderer. */
 #include "renderer_sandbox.h"
+#ifdef ENABLE_BROKER_PROBE
+#include "../network/resource.h"
+#endif
 static const RendererBootstrap *boundary_bootstrap;
 #if defined(ENABLE_BLINK)
 extern void renderer_scroll_wire_probe(void);
@@ -57,14 +60,24 @@ failure:
   renderer_system_call(RENDERER_SYSTEM_EXIT,1,0,0,0,0);
   for (;;) __asm__ volatile("pause");
 }
-static int renderer_boundary_supervisor(RendererBootstrap *bootstrap) {
+static int renderer_boundary_supervisor(RendererBootstrap *bootstrap, SystemTable *table) {
   fflush(stdout);
-  static const unsigned vectors[]={128,14,14,14,14,14,13,13,6,13,128};
+#ifdef ENABLE_BROKER_PROBE
+  if (resource_async_initialize(table)) { puts("FAIL: CPL3 broker network initialization"); return 1; }
+#else
+  (void)table;
+#endif
+  int failed=0;
+  static const unsigned vectors[]={128,14,14,14,14,14,13,13,6,13,128,14,14,14};
   for (unsigned index=0;index<sizeof(vectors)/sizeof(*vectors);++index) {
-    if (renderer_runtime_start(NULL)) { puts("FAIL: CPL3 renderer start"); return 1; }
+    if (renderer_runtime_start(NULL)) { puts("FAIL: CPL3 renderer start"); failed=1; break; }
     Status result;
     do {
       renderer_runtime_service();
+#ifdef ENABLE_BROKER_PROBE
+      /* Startup probes run before the browser loop can advance network requests. */
+      resource_async_process();
+#endif
       result=renderer_runtime_join();
     } while (result==ERROR(6));
     const uint64_t *fault=bootstrap->fault;
@@ -75,12 +88,19 @@ static int renderer_boundary_supervisor(RendererBootstrap *bootstrap) {
     fflush(stdout);
     if (result!=(vectors[index]==128 ? 0 : ERROR(21)) || fault[0]!=vectors[index] || (fault[3]&3)!=3 ||
         ((index==0 || index==10) && fault[1]) || (index>=1 && index<=4 && !(fault[1]&4)) ||
-        (index==5 && (fault[1]&20)!=20)) {
-      puts("FAIL: CPL3 boundary result"); return 1;
+        (index==5 && (fault[1]&20)!=20) ||
+        ((index==11 || index==13) && fault[1]!=7) ||
+        (index==12 && fault[1]!=21)) {
+      puts("FAIL: CPL3 boundary result"); failed=1; break;
     }
   }
+#ifdef ENABLE_BROKER_PROBE
+  resource_async_shutdown(table);
+#endif
+  if (failed) return 1;
   fflush(stdout);
   puts("PASS: CPL3 payload entry, fixed syscall ABI, TLS validation, supervisor read/write, protected page tables, RX code, NX stack, CR3, port I/O, invalid stack and CLI containment");
+  puts("PASS: CPL3 JIT executable writes, writable execution and backing-alias writes blocked");
   fflush(stdout);
   return 0;
 }

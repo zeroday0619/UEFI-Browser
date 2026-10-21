@@ -1,0 +1,22 @@
+--- a/third_party/abseil-cpp/BUILD.gn
++++ b/third_party/abseil-cpp/BUILD.gn
+@@ -162,6 +162,11 @@
+ # Chrome (e.g. flags generates static initializers that are undesirable in
+ # non-test binaries). These third-party libraries can depend on `absl_full`
+ # instead of `absl` to use those banned subsets of Abseil as well.
++group("uefi_mozc") {
++  visibility = [ "//third_party/blink/uefi/mozc:*" ]
++  public_deps = [ ":absl_full", "//third_party/abseil-cpp/absl/log:flags" ]
++}
++
+ source_set("absl_full") {
+   public_deps = [ ":absl" ]
+ 
+@@ -180,6 +185,7 @@
+       # Used by some test executables, but not by anything that is a
+       # part of Chrome.
+       "//components/optimization_guide/internal/*",
++      ":uefi_mozc",
+       "//third_party/fuzztest:*",
+       "//third_party/webrtc/*",
+ 

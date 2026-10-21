@@ -1,0 +1,44 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Inspector asynchronous stack workload</title>
+<style>
+body { font: 22px sans-serif; margin: 40px; }
+button { position: absolute; left: 40px; top: 100px; font: inherit; padding: 12px; }
+pre { position: absolute; left: 40px; top: 170px; }
+</style>
+<h1>Inspector asynchronous stack workload</h1>
+<button id="run">Run Promise workload</button>
+<pre id="result">Preparing compiled functions</pre>
+<script>
+const functions = Array.from({length: 1024}, (_, index) =>
+    new Function('value', 'capture', `
+      if (capture) {
+        const stack = new Error('Inspector workload').stack;
+        if (typeof stack !== 'string' || !stack.includes('Inspector workload'))
+          throw new Error('The compiled function did not produce a stack trace.');
+      }
+      return (value + ${index}) | 0;`));
+let checksum = 0;
+for (let iteration = 0; iteration < 64; ++iteration) {
+  for (const calculate of functions) checksum = calculate(checksum);
+}
+result.textContent = 'Open DevTools before running the workload.';
+console.log('DEVTOOLS ASYNC READY checksum=' + checksum);
+run.onclick = async () => {
+  run.disabled = true;
+  const started = performance.now();
+  console.log('DEVTOOLS ASYNC START');
+  try {
+    let value = 0;
+    for (let index = 0; index < 2048; ++index) {
+      value = await Promise.resolve(value).then(value => functions[index % functions.length](value, true));
+    }
+    if (value !== 1047552) throw new Error('Promise workload checksum mismatch: ' + value);
+    const milliseconds = performance.now() - started;
+    result.textContent = 'Completed in ' + milliseconds.toFixed(2) + ' ms';
+    console.log('DEVTOOLS ASYNC PASS milliseconds=' + milliseconds.toFixed(2));
+  } catch (error) {
+    console.error('DEVTOOLS ASYNC FAILURE ' + error.stack);
+  }
+};
+</script>

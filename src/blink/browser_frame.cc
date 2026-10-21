@@ -6,12 +6,18 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 #include "blink/browser_frame.h"
+#include "blink/devtools.h"
+#include "blink/devtools_resources.h"
 #include "blink/remote_frame.h"
 #include "blink/scroll_scene.h"
 #include "renderer_runtime.h"
 #include "blink/browser_identity.h"
 #include "blink/browser_broker.h"
 #include "blink/web_storage.h"
+#include "blink/text_composer.h"
+#include "blink/ime_popup.h"
+#include "third_party/skia/include/core/SkCanvas.h"
+#include "third_party/blink/public/web/web_input_method_controller.h"
 #include "process/renderer_protocol.h"
 #include "third_party/blink/public/platform/task_type.h"
 #include <deque>
@@ -266,11 +272,15 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     static_cast<blink::WebViewImpl*>(view_)->SetTabsToLinks(true);
     widget->SetFocus(true);
     loop_ = std::make_unique<FrameLoop>(*view_, *widget, canvas,
-        gfx::Rect(viewport), agent_group_->DefaultTaskRunner(), std::move(present));
+        gfx::Rect(viewport), agent_group_->DefaultTaskRunner(), base::BindRepeating(
+        &State::PresentComposition, weak_factory_.GetWeakPtr(), base::Unretained(&canvas),
+        viewport, std::move(present)));
     CHECK(loop_->Start());
     std::puts("BLINK: non-composited main frame created");
   }
   ~State() override {
+    devtools_frontend_.reset();
+    devtools_target_.reset();
     std::printf("RENDERER: input_messages=%llu maximum_queue_us=%lld maximum_dispatch_us=%lld\n",
         static_cast<unsigned long long>(input_sequence_), static_cast<long long>(maximum_input_wait_),
         static_cast<long long>(maximum_input_dispatch_));
@@ -283,7 +293,33 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     }
     UninstallResourceLoader();
   }
-  const ScrollSnapshot& Snapshot() const { return loop_->Snapshot(); }
+  void PresentComposition(SkCanvas* canvas, gfx::Size viewport, base::RepeatingClosure present) {
+    if (composer_.Candidates().empty()) {
+      candidate_popup_.Clear();
+      present.Run();
+      return;
+    }
+    std::vector<gfx::Rect> bounds;
+    auto* controller = InputController();
+    if (!controller || controller->CompositionRange().IsNull()) {
+      composer_.Clear();
+      candidate_popup_.Clear();
+      present.Run();
+      return;
+    }
+    int x = 8, y = 8;
+    if (controller && controller->GetCompositionCharacterBounds(bounds) && !bounds.empty()) {
+      x = bounds.front().x(); y = bounds.front().bottom();
+    }
+    candidate_popup_.Draw(*canvas, composer_.Candidates(), x, y, viewport.width(), viewport.height());
+    present.Run();
+  }
+  const ScrollSnapshot& Snapshot() const {
+    if (composer_.Candidates().empty()) return loop_->Snapshot();
+    // Candidate pixels are an overlay and cannot be replayed as document scroll pictures.
+    composition_snapshot_.acknowledgement = loop_->Snapshot().acknowledgement;
+    return composition_snapshot_;
+  }
   uint64_t KeyboardScrollTarget() const { return view_ ? uefi_browser::KeyboardScrollTarget(*view_) : 0; }
   void ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence) {
     if (view_) ApplyScrollbarState(*view_,element,horizontal,hover,press);
@@ -331,6 +367,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   void FrameDetached(blink::DetachReason reason) override {
     navigation_request_.reset();
+    devtools_frontend_.reset();
+    devtools_target_.reset();
     widget_ = nullptr;
     frame_ = nullptr;
     loop_.reset();
@@ -451,14 +489,25 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     message.kind = RENDERER_INPUT_KEY;
     message.scan = sample.key.scan; message.character = sample.key.character;
     message.shift = sample.shift; message.toggle = sample.toggle;
+    message.input_method = static_cast<uint8_t>(sample.input_method);
+    message.composition_action = static_cast<uint8_t>(sample.composition_action);
     QueueInput(message);
   }
-  void QueueInput(RendererInputMessage message) {
+  enum class InputOperation { Event, Scroll, Scrollbar };
+  void QueueScroll(uint64_t element, int x, int y, uint64_t sequence,
+                   bool scrollbar=false, bool horizontal=false) {
+    RendererInputMessage message{};
+    message.x=x; message.y=y; message.buttons=horizontal;
+    QueueInput(message,scrollbar ? InputOperation::Scrollbar : InputOperation::Scroll,element,sequence);
+  }
+  void QueueInput(RendererInputMessage message, InputOperation operation=InputOperation::Event,
+                  uint64_t element=0, uint64_t scroll_sequence=0) {
     CHECK(CanAcceptInput());
     message.version = RENDERER_PROTOCOL_VERSION;
     message.generation = input_generation_;
     message.sequence = ++input_sequence_;
-    input_messages_.push_back({message, base::TimeTicks::Now()});
+    input_messages_.push_back({message, base::TimeTicks::Now(), operation, element, scroll_sequence});
+    // Geometry updates must not overtake earlier events and change their hit-test targets.
     // DOM event handlers require a scheduler task so Canvas observers and microtasks
     // complete before the next event is dispatched.
     ScheduleInput();
@@ -482,10 +531,15 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     maximum_input_wait_ = std::max(maximum_input_wait_, (started - queued.received).InMicroseconds());
     auto alive = weak_factory_.GetWeakPtr();
     input_dispatching_ = true;
-    if (message.kind == RENDERER_INPUT_POINTER)
+    if (queued.operation == InputOperation::Scroll)
+      ScrollTo(queued.element,message.x,message.y,queued.scroll_sequence);
+    else if (queued.operation == InputOperation::Scrollbar)
+      ScrollbarState(queued.element,message.buttons!=0,message.x,message.y,queued.scroll_sequence);
+    else if (message.kind == RENDERER_INPUT_POINTER)
       Pointer({message.x, message.y, message.wheel, message.buttons, message.wheel_consumed != 0});
     else if (message.kind == RENDERER_INPUT_KEY)
-      Keyboard({{message.scan, message.character}, message.shift, message.toggle});
+      Keyboard({{message.scan, message.character}, message.shift, message.toggle,
+          static_cast<InputMethod>(message.input_method), static_cast<CompositionAction>(message.composition_action)});
     if (!alive) return;
     input_dispatching_ = false;
     maximum_input_dispatch_ = std::max(maximum_input_dispatch_, (base::TimeTicks::Now()-started).InMicroseconds());
@@ -493,6 +547,28 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   }
   bool pointer_capabilities_=false;
   void Pointer(const PointerSample& sample) {
+    if (candidate_pointer_) {
+      if (!sample.buttons) candidate_pointer_ = false;
+      return;
+    }
+    int candidate = candidate_popup_.Hit(sample.x, sample.y);
+    if ((sample.buttons & 1) && candidate >= 0) {
+      candidate_pointer_ = true;
+      auto* controller = InputController();
+      if (!controller || controller->CompositionRange().IsNull()) {
+        composer_.Clear();
+        candidate_popup_.Clear();
+        loop_->Start();
+        return;
+      }
+      ApplyComposition(composer_.Select(candidate));
+      return;
+    }
+    if (sample.buttons && !composer_.Preedit().empty()) {
+      auto alive = weak_factory_.GetWeakPtr();
+      FinishComposition(false);
+      if (!alive) return;
+    }
     if (!pointer_capabilities_) {
       pointer_capabilities_=true;
       // Firmware pointer samples represent a mouse cursor rather than touch contacts.
@@ -570,7 +646,77 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       }
     }
   }
+  TextComposer composer_;
+  ImePopup candidate_popup_;
+  bool candidate_pointer_ = false;
+  mutable ScrollSnapshot composition_snapshot_;
+  blink::WebInputMethodController* InputController() {
+    auto* focused = view_ ? view_->FocusedFrame() : nullptr;
+    return focused ? focused->GetInputMethodController() : nullptr;
+  }
+  void FinishComposition(bool cancel) {
+    bool pending = !composer_.Preedit().empty();
+    bool had_candidates = !composer_.Candidates().empty();
+    auto committed = composer_.Finish(cancel);
+    candidate_popup_.Clear();
+    if (pending || had_candidates) loop_->Start();
+    auto* controller = InputController();
+    if (!pending || !controller || controller->CompositionRange().IsNull()) return;
+    if (cancel) controller->SetComposition(blink::WebString(), {}, blink::WebRange(), 0, 0);
+    else controller->CommitText(blink::WebString::FromUtf16(committed), {}, blink::WebRange(), 0);
+  }
+  bool ComposeKey(const KeySample& sample) {
+    auto* controller = InputController();
+    if (!controller || controller->TextInputType() == blink::kWebTextInputTypeNone) {
+      composer_.Clear();
+      return false;
+    }
+    // Script-driven focus and selection changes can end a composition between keys.
+    if (controller->CompositionRange().IsNull()) composer_.Clear();
+    bool pending = !composer_.Preedit().empty();
+    bool shortcut = (sample.shift & 0x80000000u) && (sample.shift & 252);
+    bool cancel = sample.key.scan == 23 || sample.key.character == 27;
+    if (sample.composition_action != CompositionAction::None ||
+        sample.input_method == InputMethod::Latin || shortcut || cancel) {
+      FinishComposition(cancel);
+      return sample.composition_action != CompositionAction::None || (cancel && pending);
+    }
+    CompositionUpdate update = composer_.Feed(sample);
+    if (!update.handled) {
+      FinishComposition(false);
+      return pending && sample.key.character == 13;
+    }
+    return ApplyComposition(update);
+  }
+  bool ApplyComposition(const CompositionUpdate& update) {
+    auto* controller = InputController();
+    if (!controller) { composer_.Clear(); return true; }
+    loop_->Start();
+    auto alive = weak_factory_.GetWeakPtr();
+    auto* focused = view_->FocusedFrame();
+    auto element = focused->GetDocument().FocusedElement();
+    if (!update.committed.empty()) {
+      if (!controller->CommitText(blink::WebString::FromUtf16(update.committed), {}, blink::WebRange(), 0)) {
+        if (alive) composer_.Clear();
+        return true;
+      }
+      if (!alive) return true;
+      if (view_->FocusedFrame() != focused || focused->GetDocument().FocusedElement() != element) {
+        composer_.Clear();
+        return true;
+      }
+      controller = InputController();
+    }
+    if (!controller || !controller->SetComposition(blink::WebString::FromUtf16(update.preedit), {},
+        blink::WebRange(), static_cast<int>(composer_.Cursor()), static_cast<int>(composer_.Cursor()))) {
+      if (alive) composer_.Clear();
+    }
+    return true;
+  }
   void Keyboard(const KeySample& sample) {
+    if (!sample.key.scan && !sample.key.character && sample.composition_action == CompositionAction::None) return;
+    auto alive = weak_factory_.GetWeakPtr();
+    if (ComposeKey(sample) || !alive) return;
     using Event = blink::WebInputEvent;
     int modifiers = 0;
     if (sample.shift & 0x80000000u) {
@@ -599,6 +745,14 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
       case 10: key=ui::VKEY_NEXT; dom_key=ui::DomKey::PAGE_DOWN; break;
       case 23: key=ui::VKEY_ESCAPE; dom_key=ui::DomKey::ESCAPE; break;
       default: break;
+    }
+    if (sample.key.scan >= 11 && sample.key.scan <= 22) {
+      static const ui::DomKey function_keys[] = {
+          ui::DomKey::F1, ui::DomKey::F2, ui::DomKey::F3, ui::DomKey::F4,
+          ui::DomKey::F5, ui::DomKey::F6, ui::DomKey::F7, ui::DomKey::F8,
+          ui::DomKey::F9, ui::DomKey::F10, ui::DomKey::F11, ui::DomKey::F12};
+      key = ui::VKEY_F1 + sample.key.scan - 11;
+      dom_key = function_keys[sample.key.scan - 11];
     }
     char16_t character = sample.key.character;
     if (!key) {
@@ -760,6 +914,7 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   void DidCommitNavigation(blink::WebHistoryCommitType type, bool,
       const network::ParsedPermissionsPolicy&,
       const blink::DocumentPolicyFeatureState&) override {
+    composer_.Clear();
     ++input_generation_;
     input_messages_.clear();
     pointer_buttons_ = 0;
@@ -813,13 +968,24 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     SaveHistoryItem();
     return NavigateInternal(url, blink::WebFrameLoadType::kStandard, {});
   }
+  Status Inspect(State& target) {
+    if (&target == this || !frame_ || !target.frame_ || devtools_frontend_ || target.devtools_frontend_)
+      return ERROR(2);
+    if (!target.devtools_target_)
+      target.devtools_target_ = std::make_unique<DevToolsTarget>(target.frame_);
+    devtools_frontend_ = std::make_unique<DevToolsFrontend>(frame_, *target.devtools_target_);
+    return Navigate(kDevToolsFrontendUrl);
+  }
   Status NavigateInternal(const char* url, blink::WebFrameLoadType load_type,
                           blink::WebHistoryItem history_item,
                           std::unique_ptr<blink::WebNavigationParams> parameters = {}) {
     CHECK(navigation_);
+    // An authorized tools frame retains its bindings until it closes.
+    if (devtools_frontend_ && !IsDevToolsOrigin(GURL(url))) return ERROR(2);
+    composer_.Clear();
     ++input_generation_;
     input_messages_.clear();
-    const bool internal = IsBrowserPage(GURL(url));
+    const bool internal = IsBrowserPage(GURL(url)) || IsDevToolsOrigin(GURL(url));
     view_->GetSettings()->SetJavaScriptEnabled(internal || preferences.javascript);
     view_->GetSettings()->SetImagesEnabled(internal || preferences.images);
     view_->GetSettings()->SetLoadsImagesAutomatically(internal || preferences.images);
@@ -853,7 +1019,12 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
     }
   }
  private:
-  struct QueuedInput { RendererInputMessage message; base::TimeTicks received; };
+  struct QueuedInput {
+    RendererInputMessage message;
+    base::TimeTicks received;
+    InputOperation operation;
+    uint64_t element, scroll_sequence;
+  };
   std::deque<QueuedInput> input_messages_;
   uint64_t input_generation_ = 0, input_sequence_ = 0;
   int64_t maximum_input_wait_ = 0, maximum_input_dispatch_ = 0;
@@ -901,6 +1072,8 @@ class BrowserFrame::State final : public blink::WebLocalFrameClient,
   base::TimeTicks last_click_;
   unsigned last_click_button_ = 0;
   int last_click_x_ = 0, last_click_y_ = 0, click_count_ = 0;
+  std::unique_ptr<DevToolsTarget> devtools_target_;
+  std::unique_ptr<DevToolsFrontend> devtools_frontend_;
   base::WeakPtrFactory<State> weak_factory_{this};
 };
 BrowserFrame::BrowserFrame(SystemTable* table,
@@ -912,10 +1085,15 @@ BrowserFrame::BrowserFrame(SystemTable* table,
   else state_=std::make_unique<State>(table,scheduler,canvas,viewport,std::move(present),std::move(open_tab));
 }
 BrowserFrame::~BrowserFrame() = default;
+Status BrowserFrame::Inspect(BrowserFrame& target) {
+  if (remote_ && target.remote_) return remote_->Inspect(*target.remote_);
+  if (state_ && target.state_) return state_->Inspect(*target.state_);
+  return ERROR(2);
+}
 const ScrollSnapshot& BrowserFrame::Snapshot() const { return state_->Snapshot(); }
 uint64_t BrowserFrame::KeyboardScrollTarget() const { return state_->KeyboardScrollTarget(); }
-void BrowserFrame::ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence) { state_->ScrollbarState(element,horizontal,hover,press,sequence); }
-void BrowserFrame::ScrollTo(uint64_t element, int x, int y, uint64_t sequence) { state_->ScrollTo(element,x,y,sequence); }
+void BrowserFrame::ScrollbarState(uint64_t element, bool horizontal, unsigned hover, unsigned press, uint64_t sequence) { state_->QueueScroll(element,hover,press,sequence,true,horizontal); }
+void BrowserFrame::ScrollTo(uint64_t element, int x, int y, uint64_t sequence) { state_->QueueScroll(element,x,y,sequence); }
 Status BrowserFrame::Navigate(const char* url) { return remote_ ? remote_->Navigate(url) : state_->Navigate(url); }
 bool BrowserFrame::NavigationPending() const { return remote_ ? remote_->NavigationPending() : state_->NavigationPending(); }
 Status BrowserFrame::NavigationStatus() const { return remote_ ? remote_->NavigationStatus() : state_->NavigationStatus(); }

@@ -6,6 +6,8 @@ Original contributions use BSD-3-Clause, Copyright (c) 2026, zeroday0619. Includ
 
 The current source tree can be prepared independently of binary release licensing. The EFI executable incorporates a larger third-party graph whose notices and applicable source/relinking obligations still require a release-specific inventory. Do not label the development EFI archive as a license-audited release.
 
+The Korean input path statically links libhangul under LGPL-2.1-or-later. Its source revision, build flags and unchanged upstream license are recorded in `revisions.json`, `config/blink-navigation.gn` and `licenses/libhangul-COPYING`. Include the corresponding libhangul source and the materials required to relink the distributed application with a modified library when preparing a binary release; the source-only repository does not supply a complete binary relinking kit. The project BSD license does not replace libhangul's terms.
+
 ## Repository contents
 
 Publish source, build scripts, patches, configuration, bundled fonts and certificate data, license notices, tests and validation documentation. The `build/` directory, downloaded upstream repositories, generated EFI/ELF files and firmware variable profiles are excluded. Bundled font binaries are intentional source assets and retain their OFL notices.

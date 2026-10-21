@@ -1,5 +1,9 @@
+#include "blink/gpu_canvas.h"
+#include "blink/gpu_compositor.h"
+#include "third_party/blink/renderer/platform/graphics/paint/foreign_layer_display_item.h"
 #include "blink/scroll_scene.h"
 #include "blink/scroll_wire.h"
+#include "base/time/time.h"
 #include "third_party/blink/public/common/metrics/document_update_reason.h"
 #include "third_party/blink/renderer/core/layout/scroll_anchor.h"
 #include "third_party/blink/renderer/core/layout/custom_scrollbar.h"
@@ -34,6 +38,11 @@
 #include "third_party/blink/renderer/platform/graphics/paint/scrollbar_display_item.h"
 #include "third_party/blink/renderer/platform/graphics/paint/hit_test_data.h"
 #include "cc/paint/paint_record.h"
+#include "cc/paint/paint_recorder.h"
+#include "cc/paint/filter_operations.h"
+#include "cc/paint/render_surface_filters.h"
+#include "cc/paint/paint_filter.h"
+#include "third_party/blink/renderer/platform/graphics/compositor_filter_operations.h"
 #include "skia/ext/font_utils.h"
 #include "third_party/skia/include/core/SkPictureRecorder.h"
 #include "third_party/skia/include/core/SkBBHFactory.h"
@@ -56,6 +65,13 @@
 #include "third_party/blink/renderer/platform/graphics/graphics_context.h"
 namespace uefi_browser {
 namespace {
+enum CaptureReason {
+  kUnavailable=10, kScrollbarOwner=17, kEncoding=18, kTransform=20,
+  kMainThreadRepaint=21, kScrollSnap=22, kClipPath=23, kClipFilter=24,
+  kFilter=25, kBackdropFilter=26, kResourceLimit=27, kPictureLimit=28,
+  kScrollbarAnchor=29, kScrollbarProperties=30, kDisplayItem=31,
+  kEmpty=32, kImageRead=33, kFont=34, kFrameSet=35
+};
 // Paint properties are shared across local frames, while scroll-area registries are per frame.
 std::vector<blink::LocalFrameView*> FrameViews(blink::LocalFrameView* root) {
   std::vector<blink::LocalFrameView*> views;
@@ -110,27 +126,103 @@ struct Capture {
   blink::LocalFrameView* view;
   const ScrollScene* previous=nullptr;
   bool valid=true;
+  int failure=kUnavailable;
+  void Fail(int reason) {
+    if (valid) failure=reason;
+    valid=false;
+  }
   size_t bytes=0;
+  int64_t image_time_us=0, font_time_us=0;
+  int64_t scrollbar_time_us=0, conversion_time_us=0;
+  size_t scrollbar_states=0, reused_groups=0, converted_groups=0;
+  struct MeasureResource {
+    int64_t& total;
+    base::TimeTicks started=base::TimeTicks::Now();
+    ~MeasureResource() { total+=(base::TimeTicks::Now()-started).InMicroseconds(); }
+  };
   bool Reserve(size_t size) {
     constexpr size_t limit=32*1024*1024;
-    if (size>limit || bytes>limit-size) { valid=false; return false; }
+    if (size>limit || bytes>limit-size) { Fail(kResourceLimit); return false; }
     bytes+=size; return true;
   }
   std::map<const blink::TransformPaintPropertyNode*,int> transforms;
   std::map<const blink::ClipPaintPropertyNode*,int> clips;
   std::map<const blink::EffectPaintPropertyNode*,int> effects;
   std::map<uint32_t,uint32_t> images,fonts;
+  struct PendingPicture {
+    size_t index;
+    std::optional<cc::PaintRecord> record;
+  };
+  std::vector<PendingPicture> pending;
+  size_t next_picture=0, pending_bytes=0;
+  bool Queue(ScrollPicture picture,cc::PaintRecord record) {
+    constexpr size_t limit=32*1024*1024;
+    const size_t size=record.bytes_used();
+    if (scene.pictures.size()>=4096 || size>limit || pending_bytes>limit-size) {
+      Fail(scene.pictures.size()>=4096 ? kPictureLimit : kResourceLimit);
+      return false;
+    }
+    pending_bytes+=size;
+    pending.push_back({scene.pictures.size(),std::move(record)});
+    scene.pictures.push_back(std::move(picture));
+    return true;
+  }
+  bool EncodeSlice() {
+    if (scene.pictures.empty()) Fail(kEmpty);
+    const auto deadline=base::TimeTicks::Now()+base::Milliseconds(4);
+    SkSerialProcs procedures;
+    procedures.fImageProc=Image; procedures.fImageCtx=this;
+    procedures.fTypefaceProc=Font; procedures.fTypefaceCtx=this;
+    while (valid && next_picture<pending.size()) {
+      auto& entry=pending[next_picture++];
+      if (entry.index>=scene.pictures.size() || !entry.record) { Fail(kEncoding); break; }
+      auto& picture=scene.pictures[entry.index];
+      auto started=base::TimeTicks::Now();
+      auto image_before=image_time_us, font_before=font_time_us;
+      SkPictureRecorder recorder;
+      entry.record->Playback(recorder.beginRecording(picture.bounds));
+      auto recording=recorder.finishRecordingAsPicture();
+      auto recorded=base::TimeTicks::Now();
+      picture.data=recording->serialize(&procedures);
+      auto ended=base::TimeTicks::Now();
+      if (ended-started>base::Milliseconds(10))
+        std::printf("PERF: scroll_picture index=%zu record_us=%lld serialize_us=%lld image_us=%lld font_us=%lld bytes=%zu\n",
+            entry.index,static_cast<long long>((recorded-started).InMicroseconds()),
+            static_cast<long long>((ended-recorded).InMicroseconds()),
+            static_cast<long long>(image_time_us-image_before),static_cast<long long>(font_time_us-font_before),
+            picture.data ? picture.data->size() : 0);
+      pending_bytes-=entry.record->bytes_used();
+      entry.record.reset();
+      if (!picture.data || !Reserve(picture.data->size())) Fail(kEncoding);
+      // Skia calls are indivisible; the deadline bounds batches, not one picture.
+      if (base::TimeTicks::Now()>=deadline) break;
+    }
+    if (!valid || next_picture==pending.size()) {
+      pending.clear(); next_picture=0; pending_bytes=0;
+      return true;
+    }
+    return false;
+  }
+  bool Finish() {
+    while (!EncodeSlice()) {}
+    return valid;
+  }
   int Transform(const blink::TransformPaintPropertyNode* node) {
     if (!node || node==&blink::TransformPaintPropertyNode::Root()) return -1;
     if (auto found=transforms.find(node); found!=transforms.end()) return found->second;
     ScrollTransform value;
     value.parent=Transform(node->UnaliasedParent());
-    if (!node->IsIdentityOr2dTranslation()) { valid=false; return -1; }
-    auto translation=node->Get2dTranslation(); value.x=translation.x(); value.y=translation.y();
+    auto matrix=node->MatrixWithOriginApplied();
+    if (!matrix.Is2dTransform()) { Fail(kTransform); return -1; }
+    value.scale_x=matrix.rc(0,0); value.skew_x=matrix.rc(0,1);
+    value.skew_y=matrix.rc(1,0); value.scale_y=matrix.rc(1,1);
+    value.x=matrix.rc(0,3); value.y=matrix.rc(1,3);
+    if (!BoundedScrollMatrix(ScrollMatrix(value,value.x,value.y))) { Fail(kTransform); return -1; }
     if (auto* scroll=node->ScrollNode()) {
       auto* area=FindArea(view,scroll->GetCompositorElementId().GetInternalValue());
       if (area) {
-        if (!scroll->GetMainThreadRepaintReasons().empty() || scroll->GetSnapContainerData()) valid=false;
+        if (!scroll->GetMainThreadRepaintReasons().empty()) Fail(kMainThreadRepaint);
+        if (scroll->GetSnapContainerData()) Fail(kScrollSnap);
         value.element=scroll->GetCompositorElementId().GetInternalValue();
         if (scroll->Parent()) value.scroll_parent=scroll->Parent()->GetCompositorElementId().GetInternalValue();
         value.position=area->GetScrollOffset().y(); value.y+=value.position;
@@ -152,10 +244,14 @@ struct Capture {
   int Clip(const blink::ClipPaintPropertyNode* node) {
     if (!node || node==&blink::ClipPaintPropertyNode::Root()) return -1;
     if (auto found=clips.find(node); found!=clips.end()) return found->second;
+    if (node->PixelMovingFilter()) {
+      // Blink uses this infinite sentinel to expand filter input, not to clip pixels.
+      int parent=Clip(node->UnaliasedParent()); clips[node]=parent; return parent;
+    }
     ScrollClip value;
     value.parent=Clip(node->UnaliasedParent());
     value.transform=Transform(&node->LocalTransformSpace().Unalias());
-    if (node->ClipPath() || node->PixelMovingFilter()) valid=false;
+    if (node->ClipPath()) Fail(kClipPath);
     value.rectangle=SkRRect(node->PaintClipRect());
     int index=static_cast<int>(scene.clips.size()); clips[node]=index; scene.clips.push_back(value); return index;
   }
@@ -166,11 +262,44 @@ struct Capture {
     value.parent=Effect(node->UnaliasedParent());
     value.clip=node->OutputClip() ? Clip(&node->OutputClip()->Unalias()) : -1;
     value.opacity=node->Opacity(); value.blend=node->BlendMode();
-    if (node->Filter() || node->BackdropFilter()) valid=false;
+    value.transform=Transform(&node->LocalTransformSpace().Unalias());
+    if (const auto* source=node->Filter()) {
+      const auto& operations=source->AsCcFilterOperations();
+      if (operations.size()>16) { Fail(kFilter); return -1; }
+      for (size_t index=0;index<operations.size();++index) {
+        const auto& operation=operations.at(index);
+        ScrollFilter filter;
+        switch (operation.type()) {
+          case cc::FilterOperation::GRAYSCALE: filter.kind=ScrollFilterKind::Grayscale; break;
+          case cc::FilterOperation::SEPIA: filter.kind=ScrollFilterKind::Sepia; break;
+          case cc::FilterOperation::SATURATE: filter.kind=ScrollFilterKind::Saturate; break;
+          case cc::FilterOperation::HUE_ROTATE: filter.kind=ScrollFilterKind::HueRotate; break;
+          case cc::FilterOperation::INVERT: filter.kind=ScrollFilterKind::Invert; break;
+          case cc::FilterOperation::BRIGHTNESS: filter.kind=ScrollFilterKind::Brightness; break;
+          case cc::FilterOperation::CONTRAST: filter.kind=ScrollFilterKind::Contrast; break;
+          case cc::FilterOperation::OPACITY: filter.kind=ScrollFilterKind::Opacity; break;
+          case cc::FilterOperation::BLUR:
+            filter.kind=ScrollFilterKind::Blur; filter.tile_mode=static_cast<unsigned>(operation.blur_tile_mode()); break;
+          case cc::FilterOperation::DROP_SHADOW: {
+            filter.kind=ScrollFilterKind::DropShadow;
+            filter.offset_x=operation.offset().x(); filter.offset_y=operation.offset().y();
+            const auto color=operation.drop_shadow_color(); filter.color={color.fR,color.fG,color.fB,color.fA}; break;
+          }
+          case cc::FilterOperation::COLOR_MATRIX:
+            filter.kind=ScrollFilterKind::ColorMatrix; filter.matrix=operation.matrix(); break;
+          default: Fail(kFilter); return -1;
+        }
+        if (filter.kind!=ScrollFilterKind::ColorMatrix) filter.amount=operation.amount();
+        if (!ValidScrollFilter(filter)) { Fail(kFilter); return -1; }
+        value.filters.push_back(filter);
+      }
+    }
+    if (node->BackdropFilter()) Fail(kBackdropFilter);
     int index=static_cast<int>(scene.effects.size()); effects[node]=index; scene.effects.push_back(value); return index;
   }
   static SkSerialReturnType Image(SkImage* image,void* context) {
     auto& self=*static_cast<Capture*>(context);
+    MeasureResource measure{self.image_time_us};
     auto [entry,added]=self.images.emplace(image->uniqueID(),self.scene.images.size());
     if (added) {
       ScrollImage resource; resource.width=image->width(); resource.height=image->height();
@@ -183,7 +312,7 @@ struct Capture {
       if (!resource.pixels) {
         resource.pixels=SkData::MakeUninitialized(bytes);
         if (!image->readPixels(nullptr,SkImageInfo::MakeN32Premul(resource.width,resource.height),
-            resource.pixels->writable_data(),resource.width*4,0,0)) self.valid=false;
+            resource.pixels->writable_data(),resource.width*4,0,0)) self.Fail(kImageRead);
       }
       self.scene.images.push_back(std::move(resource));
       self.scene.renderer_images.push_back(sk_ref_sp(image));
@@ -193,6 +322,7 @@ struct Capture {
   }
   static SkSerialReturnType Font(SkTypeface* face,void* context) {
     auto& self=*static_cast<Capture*>(context);
+    MeasureResource measure{self.font_time_us};
     auto [entry,added]=self.fonts.emplace(face->uniqueID(),self.scene.fonts.size());
     if (added) {
       sk_sp<SkData> data;
@@ -201,7 +331,7 @@ struct Capture {
         if (found!=self.previous->font_keys.end()) data=self.previous->fonts[found-self.previous->font_keys.begin()];
       }
       if (!data) data=face->serialize(SkTypeface::SerializeBehavior::kDoIncludeData);
-      if (!data || !self.Reserve(data->size())) { self.valid=false; return SkData::MakeEmpty(); }
+      if (!data || !self.Reserve(data->size())) { self.Fail(kFont); return SkData::MakeEmpty(); }
       self.scene.font_keys.push_back(face->uniqueID());
       self.scene.fonts.push_back(std::move(data));
       self.scene.renderer_fonts.push_back(sk_ref_sp(face));
@@ -210,14 +340,40 @@ struct Capture {
   }
 };
 }
-std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* reason,const ScrollScene* previous) {
+const char* ScrollCaptureFailureName(int reason) {
+  switch (reason) {
+    case 0: return "none";
+    case kUnavailable: return "frame-unavailable";
+    case kScrollbarOwner: return "scrollbar-owner";
+    case kEncoding: return "encoding";
+    case kTransform: return "unsupported-transform";
+    case kMainThreadRepaint: return "main-thread-repaint";
+    case kScrollSnap: return "scroll-snap";
+    case kClipPath: return "clip-path";
+    case kClipFilter: return "clip-filter";
+    case kFilter: return "filter";
+    case kBackdropFilter: return "backdrop-filter";
+    case kResourceLimit: return "resource-limit";
+    case kPictureLimit: return "picture-limit";
+    case kScrollbarAnchor: return "scrollbar-anchor";
+    case kScrollbarProperties: return "scrollbar-properties";
+    case kDisplayItem: return "display-item";
+    case kEmpty: return "empty-scene";
+    case kImageRead: return "image-read";
+    case kFont: return "font-serialization";
+    case kFrameSet: return "unsupported-frame-set";
+    default: return "unclassified";
+  }
+}
+static std::unique_ptr<Capture> FreezeScrollScene(blink::WebView& web_view,int* reason,
+    const ScrollScene* previous,ViewportSnapshot* viewport=nullptr) {
   *reason=10;
   auto* frame=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame());
   auto* local=frame->GetFrame();
   auto* view=local->View();
   if (!view || !view->GetLayoutView()) return {};
   auto views=FrameViews(view);
-  if (views.empty()) return {};
+  if (views.empty()) { *reason=kFrameSet; return {}; }
   bool blocking=false, listeners=false;
   for (auto* child:views) {
     auto& registry=child->GetFrame().GetEventHandlerRegistry();
@@ -225,6 +381,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
     listeners|=registry.HasEventHandlers(blink::EventHandlerRegistry::kWheelEventPassive);
   }
   // Infinite culling records existing offscreen layout without forcing lazy content to load.
+  const auto paint_started=base::TimeTicks::Now();
   blink::PaintController controller;
   blink::GraphicsContext context(controller);
   bool infinite=blink::RuntimeEnabledFeatures::InfiniteCullRectEnabled();
@@ -234,7 +391,26 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
   blink::WebRuntimeFeatures::EnableFeatureFromString("InfiniteCullRect",infinite);
   for (auto* child:views) InvalidateCullRects(child->GetLayoutView()->Layer());
   const auto& artifact=controller.CommitNewDisplayItems();
-  Capture capture; capture.view=view; capture.previous=previous;
+  if (viewport && view->GetLayoutView()->FirstFragment().HasLocalBorderBoxProperties()) {
+    // The visible frame and scroll cache must describe the same paint epoch, even
+    // when an unsupported scroll property later rejects the asynchronous scene.
+    cc::PaintRecorder recorder;
+    auto* canvas=recorder.beginRecording();
+    const auto& bounds=viewport->bounds;
+    canvas->clipRect(SkRect::MakeXYWH(bounds.x(),bounds.y(),bounds.width(),bounds.height()));
+    canvas->drawPicture(artifact.GetPaintRecord(
+        view->GetLayoutView()->FirstFragment().LocalBorderBoxProperties().Unalias(),&bounds));
+    viewport->picture=recorder.finishRecordingAsPicture();
+    viewport->paint_microseconds=(base::TimeTicks::Now()-paint_started).InMicroseconds();
+  }
+  const auto freeze_started=base::TimeTicks::Now();
+  auto owner=std::make_unique<Capture>();
+  auto& capture=*owner; capture.view=view; capture.previous=previous;
+  struct FailureGuard {
+    Capture& capture;
+    int* reason;
+    ~FailureGuard() { if (!capture.valid) *reason=capture.failure; }
+  } failure_guard{capture,reason};
   capture.scene.wheel_listeners=blocking || listeners;
   SkSerialProcs procedures; procedures.fImageProc=Capture::Image; procedures.fImageCtx=&capture;
   procedures.fTypefaceProc=Capture::Font; procedures.fTypefaceCtx=&capture;
@@ -243,13 +419,32 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
   ScrollPicture picture;
   auto flush=[&]() {
     if (!group) return;
-    if (capture.scene.pictures.size()>=4096) { capture.valid=false; group.reset(); return; }
-    auto record=blink::PaintChunksToCcLayer::Convert(*group,group_state);
-    SkPictureRecorder recorder;
-    record.Playback(recorder.beginRecording(picture.bounds));
-    picture.data=recorder.finishRecordingAsPicture()->serialize(&procedures);
-    if (!picture.data || !capture.Reserve(picture.data->size())) capture.valid=false;
-    capture.scene.pictures.push_back(std::move(picture));
+    if (capture.scene.pictures.size()>=4096) { capture.Fail(kPictureLimit); group.reset(); return; }
+    Capture::MeasureResource measure{capture.conversion_time_us};
+    bool reusable=true;
+    cc::PaintRecord record;
+    size_t drawings=0;
+    for (auto chunk=group->begin();chunk!=group->end();++chunk) {
+      if (chunk->effectively_invisible) continue;
+      if (chunk->properties.Unalias()!=group_state) { reusable=false; break; }
+      for (const auto& item:chunk.DisplayItems()) {
+        auto* drawing=blink::DynamicTo<blink::DrawingDisplayItem>(item);
+        if (!drawing) { reusable=false; break; }
+        if (drawing->GetPaintRecord().empty()) continue;
+        if (++drawings>1) { reusable=false; break; }
+        record=drawing->GetPaintRecord();
+      }
+      if (!reusable) break;
+    }
+    if (reusable) {
+      // A single immutable drawing already has local canvas save/restore semantics.
+      // Reusing it avoids allocating a redundant DrawRecordOp wrapper per group.
+      ++capture.reused_groups;
+    } else {
+      record=blink::PaintChunksToCcLayer::Convert(*group,group_state);
+      ++capture.converted_groups;
+    }
+    capture.Queue(std::move(picture),std::move(record));
     group.reset();
   };
   auto rectangle=[](const gfx::Rect& rect) { return SkRect::MakeXYWH(rect.x(),rect.y(),rect.width(),rect.height()); };
@@ -278,12 +473,13 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
   }
   auto capture_bar=[&](blink::Scrollbar* bar,const blink::TransformPaintPropertyNode* translation,
       const gfx::Rect& frame,int transform,int clip,int effect,blink::ScrollableArea* area) -> bool {
+    Capture::MeasureResource measure{capture.scrollbar_time_us};
     int scroll_transform=capture.Transform(translation);
     if (scroll_transform<0 && area && !bar->Enabled()) {
       ScrollTransform stationary; stationary.element=area->GetScrollElementId().GetInternalValue();
       scroll_transform=static_cast<int>(capture.scene.transforms.size()); capture.scene.transforms.push_back(stationary);
     }
-    if (scroll_transform<0 || !capture.scene.transforms[scroll_transform].element) { *reason=17; return false; }
+    if (scroll_transform<0 || !capture.scene.transforms[scroll_transform].element) { *reason=kScrollbarOwner; return false; }
     auto& theme=bar->GetTheme();
     ScrollbarScene value; value.element=capture.scene.transforms[scroll_transform].element;
     value.transform=transform; value.clip=clip; value.frame=rectangle(frame);
@@ -335,6 +531,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
           blink::kForwardTrackPart,blink::kThumbPart};
       for (auto hovered:targets) for (auto pressed:targets) {
         if (!bar->Enabled() && (hovered!=blink::kNoPart || pressed!=blink::kNoPart)) continue;
+        ++capture.scrollbar_states;
         style_proxy->PrepareForSnapshot(*bar,hovered,pressed);
         auto full_track=theme.TrackRect(*style_proxy);
         auto constrained=theme.ConstrainTrackRectToTrackPieces(*style_proxy,full_track);
@@ -379,7 +576,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
           SkPictureRecorder recorder; auto* canvas=recorder.beginRecording(picture_bounds);
           canvas->clipRect(picture_bounds); canvas->translate(offset.x(),offset.y()); record.Playback(canvas);
           auto data=recorder.finishRecordingAsPicture()->serialize(&procedures);
-          if (!data) return false;
+          if (!data) { capture.Fail(kEncoding); return false; }
           bool shared=false;
           for (const auto& existing:part.appearances) {
             if (existing->size()==data->size() && !std::memcmp(existing->data(),data->data(),data->size())) { data=existing; shared=true; break; }
@@ -392,7 +589,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
       for (auto& part:records) {
         part.bounds=part.appearance_bounds.front(); part.data=part.appearances.front();
         if (part.part==blink::kThumbPart) value.thumb_picture=static_cast<unsigned>(capture.scene.pictures.size());
-        if (capture.scene.pictures.size()>=4096) return false;
+        if (capture.scene.pictures.size()>=4096) { capture.Fail(kPictureLimit); return false; }
         capture.scene.pictures.push_back(std::move(part));
       }
       value.last_picture=static_cast<unsigned>(capture.scene.pictures.size()-1);
@@ -419,6 +616,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
       part.appearances.resize(8);
       for (unsigned appearance=0;appearance<8;++appearance) {
         // Aggregate backgrounds match hover/active on their contained controls in Blink's selector checker.
+        ++capture.scrollbar_states;
         proxy->State(kind==blink::kTrackBGPart ? blink::kThumbPart : kind,appearance);
         blink::PaintRecordBuilder builder;
         blink::PaintInfo info(builder.Context(),blink::CullRect::Infinite(),blink::PaintPhase::kForeground,false);
@@ -428,7 +626,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
         SkPictureRecorder recorder; auto* canvas=recorder.beginRecording(part.bounds);
         canvas->clipRect(part.bounds); canvas->translate(offset.x(),offset.y()); record.Playback(canvas);
         auto data=recorder.finishRecordingAsPicture()->serialize(&procedures);
-        if (!data) return false;
+        if (!data) { capture.Fail(kEncoding); return false; }
         for (unsigned previous=0;previous<appearance;++previous) {
           const auto& existing=part.appearances[previous];
           if (existing->size()==data->size() && !std::memcmp(existing->data(),data->data(),data->size())) { data=existing; break; }
@@ -439,10 +637,10 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
       }
       part.data=part.appearances[0];
       if (kind==blink::kThumbPart) value.thumb_picture=static_cast<unsigned>(capture.scene.pictures.size());
-      if (capture.scene.pictures.size()>=4096) return false;
+      if (capture.scene.pictures.size()>=4096) { capture.Fail(kPictureLimit); return false; }
       capture.scene.pictures.push_back(std::move(part));
     }
-    if (capture.scene.pictures.size()==value.track_picture) return false;
+    if (capture.scene.pictures.size()==value.track_picture) { capture.Fail(kEmpty); return false; }
     value.last_picture=static_cast<unsigned>(capture.scene.pictures.size()-1);
     if (custom) custom_bars[custom]=static_cast<unsigned>(capture.scene.scrollbars.size());
     capture.scene.scrollbars.push_back(value); return true;
@@ -460,8 +658,19 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
     int transform=capture.Transform(&chunk.properties.Transform().Unalias());
     int clip=capture.Clip(&chunk.properties.Clip().Unalias());
     int effect=capture.Effect(&chunk.properties.Effect().Unalias());
-    if (!capture.valid || capture.scene.pictures.size()>=4096) return {};
+    if (capture.scene.pictures.size()>=4096) capture.Fail(kPictureLimit);
+    if (!capture.valid) return {};
     const auto& item=artifact.GetDisplayItemList()[chunk.begin_index];
+    if (chunk.end_index==chunk.begin_index+1 && item.IsForeignLayer()) {
+      const auto& foreign=blink::To<blink::ForeignLayerDisplayItem>(item);
+      auto frame=GetGpuCanvasFrame(foreign.GetLayer()->id());
+      if (!frame) { *reason=kDisplayItem; return {}; }
+      flush();
+      ScrollPicture canvas; canvas.transform=transform; canvas.clip=clip; canvas.effect=effect;
+      canvas.bounds=rectangle(item.VisualRect()); canvas.gpu_token=frame->token; canvas.gpu_frame=std::move(frame);
+      capture.scene.pictures.push_back(std::move(canvas));
+      continue;
+    }
     if (chunk.end_index==chunk.begin_index+1 && item.IsScrollbar()) {
       const auto& display=blink::To<blink::ScrollbarDisplayItem>(item);
       auto* translation=display.ScrollTranslation();
@@ -488,18 +697,16 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
         if (found!=custom_parts.end()) {
           auto* bar=found->second.bar;
           auto anchor=custom_chunks.find(bar);
-          if (anchor==custom_chunks.end() || anchor->second->properties!=chunk.properties) return {};
+          if (anchor==custom_chunks.end() || anchor->second->properties!=chunk.properties) { *reason=kScrollbarAnchor; return {}; }
           if (custom_bars.contains(bar)) continue;
           auto* properties=custom_areas.at(bar)->GetLayoutBox()->FirstFragment().PaintProperties();
-          if (!properties || !capture_bar(bar,properties->ScrollTranslation(),anchor->second->hit_test_data->scroll_hit_test_rect,transform,clip,effect,custom_areas.at(bar))) return {};
+          if (!properties) { *reason=kScrollbarProperties; return {}; }
+          if (!capture_bar(bar,properties->ScrollTranslation(),anchor->second->hit_test_data->scroll_hit_test_rect,transform,clip,effect,custom_areas.at(bar))) return {};
         } else {
           auto* record=blink::DynamicTo<blink::DrawingDisplayItem>(drawing);
-          if (!record) return {};
+          if (!record) { *reason=kDisplayItem; return {}; }
           ScrollPicture part; part.transform=transform; part.clip=clip; part.effect=effect; part.bounds=rectangle(drawing.VisualRect());
-          SkPictureRecorder recorder; record->GetPaintRecord().Playback(recorder.beginRecording(part.bounds));
-          part.data=recorder.finishRecordingAsPicture()->serialize(&procedures);
-          if (!part.data || !capture.Reserve(part.data->size()) || capture.scene.pictures.size()>=4096) return {};
-          capture.scene.pictures.push_back(std::move(part));
+          if (!capture.Queue(std::move(part),record->GetPaintRecord())) return {};
         }
       }
       continue;
@@ -516,7 +723,7 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
   }
   flush();
   if (!capture.valid) return {};
-  if (capture.scene.pictures.empty()) return {};
+  if (capture.scene.pictures.empty()) { *reason=kEmpty; return {}; }
   capture.scene.wheel_blocked|=blocking && capture.scene.wheel_regions.empty();
   // DOM identities survive layout-object replacement and scrollbar removal between snapshots.
   auto stable=[&](uint64_t native) { auto* area=FindArea(view,native); return area ? StableScrollId(area) : uint64_t{0}; };
@@ -530,8 +737,45 @@ std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& web_view,int* re
     }
   }
   for (auto& bar:capture.scene.scrollbars) bar.element=stable(bar.element);
+  // Blink properties and layout objects cannot outlive the synchronous capture.
+  capture.view=nullptr;
+  capture.transforms.clear(); capture.clips.clear(); capture.effects.clear();
+  const auto freeze_us=(base::TimeTicks::Now()-freeze_started).InMicroseconds();
+  if (freeze_us>25000 || capture.scene.pictures.size()>=512)
+    std::printf("PERF: scroll_freeze_us=%lld scrollbar_us=%lld conversion_us=%lld bars=%zu states=%zu pictures=%zu reused=%zu converted=%zu\n",
+        static_cast<long long>(freeze_us),static_cast<long long>(capture.scrollbar_time_us),
+        static_cast<long long>(capture.conversion_time_us),capture.scene.scrollbars.size(),
+        capture.scrollbar_states,capture.scene.pictures.size(),capture.reused_groups,capture.converted_groups);
   *reason=0;
+  return owner;
+}
+struct ScrollSceneCapture::State {
+  std::unique_ptr<Capture> capture;
+  std::shared_ptr<const ScrollScene> previous;
+};
+ScrollSceneCapture::ScrollSceneCapture(std::unique_ptr<State> state)
+    : state_(std::move(state)) {}
+ScrollSceneCapture::~ScrollSceneCapture()=default;
+bool ScrollSceneCapture::EncodeSlice() { return state_->capture->EncodeSlice(); }
+bool ScrollSceneCapture::Finish() { return state_->capture->Finish(); }
+std::shared_ptr<ScrollScene> ScrollSceneCapture::TakeScene() {
+  auto& capture=*state_->capture;
+  if (!capture.valid || !capture.pending.empty() || capture.scene.pictures.empty()) return {};
   return std::make_shared<ScrollScene>(std::move(capture.scene));
+}
+std::unique_ptr<ScrollSceneCapture> BeginScrollScene(blink::WebView& view,int* reason,
+    std::shared_ptr<const ScrollScene> previous,ViewportSnapshot* viewport) {
+  auto capture=FreezeScrollScene(view,reason,previous.get(),viewport);
+  if (!capture) return {};
+  auto state=std::make_unique<ScrollSceneCapture::State>();
+  state->capture=std::move(capture); state->previous=std::move(previous);
+  return std::unique_ptr<ScrollSceneCapture>(new ScrollSceneCapture(std::move(state)));
+}
+std::shared_ptr<ScrollScene> CaptureScrollScene(blink::WebView& view,int* reason,const ScrollScene* previous) {
+  auto capture=FreezeScrollScene(view,reason,previous);
+  if (!capture) return {};
+  if (!capture->Finish()) { *reason=18; return {}; }
+  return std::make_shared<ScrollScene>(std::move(capture->scene));
 }
 void ApplyScrollOffset(blink::WebView& web_view,uint64_t element,int x,int y,bool synchronize_queries) {
   auto* view=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame())->GetFrame()->View();
@@ -594,7 +838,7 @@ void ApplyScrollbarState(blink::WebView& web_view,uint64_t element,bool horizont
   }
 }
 
-void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
+static void CaptureScrollbarReflowsImpl(blink::WebView& web_view,ScrollScene& scene,ScrollSceneCapture* pending) {
   auto* view=static_cast<blink::WebLocalFrameImpl*>(web_view.MainFrame())->GetFrame()->View();
   auto views=FrameViews(view);
   if (views.empty()) return;
@@ -660,6 +904,9 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
     }
   }
   if (candidates.empty() && queries.empty()) return;
+  // Speculative variants require complete base resources for deduplication and budgeting.
+  // Ordinary scenes defer this work until the frame loop returns to its task runner.
+  if (pending && !pending->Finish()) { scene={}; return; }
   auto condition=[&](const Query& query,unsigned horizontal,unsigned vertical) {
     uint64_t element=query.element;
     if (query.stuck) {
@@ -789,6 +1036,12 @@ void CaptureScrollbarReflows(blink::WebView& web_view,ScrollScene& scene) {
   for (auto* child:views) child->scrollbar_snapshot_mode=false;
   std::printf("COMPOSITOR: gutter snapshots=%zu bytes=%zu\n",scene.reflows.size(),bytes);
 }
+void CaptureScrollbarReflows(blink::WebView& view,ScrollScene& scene) {
+  CaptureScrollbarReflowsImpl(view,scene,nullptr);
+}
+void ScrollSceneCapture::CaptureReflows(blink::WebView& view) {
+  CaptureScrollbarReflowsImpl(view,state_->capture->scene,this);
+}
 
 uint64_t KeyboardScrollTarget(blink::WebView& web_view) {
   if (web_view.FocusedFrame() && web_view.FocusedFrame()!=web_view.MainFrame()) return 0;
@@ -814,14 +1067,29 @@ uint64_t KeyboardScrollTarget(blink::WebView& web_view) {
     if (handlers(node)) return 0;
   return area ? StableScrollId(area) : 0;
 }
-SkRect ScrollCompositor::Global(SkRect bounds,int transform) const {
-  if (transform>=0) bounds.offset(offsets_[transform].x(),offsets_[transform].y());
-  return bounds;
+bool ScrollCompositor::LocalPoint(int transform,float x,float y,SkPoint* point) const {
+  *point=SkPoint::Make(x,y);
+  if (transform>=0) {
+    if (!invertible_[transform]) return false;
+    *point=inverses_[transform].mapPoint(*point);
+  }
+  return std::isfinite(point->x()) && std::isfinite(point->y());
+}
+bool ScrollCompositor::Hit(SkRect bounds,int transform,float x,float y) const {
+  SkPoint point;
+  return LocalPoint(transform,x,y,&point) && bounds.contains(point.x(),point.y());
+}
+SkRect ScrollCompositor::Thumb(const ScrollbarScene& bar) const {
+  // The wire validator requires the synthetic thumb node to be a direct translation child.
+  auto result=bar.thumb;
+  const auto& node=scene_.transforms[bar.thumb_transform];
+  result.offset(node.x,node.y);
+  return result;
 }
 bool ScrollCompositor::WheelAllowed(int x,int y) const {
   if (scene_.wheel_blocked) return false;
   for (const auto& region:scene_.wheel_regions)
-    if (Contains(region.clip,x,y) && Global(region.bounds,region.transform).contains(x,y)) return false;
+    if (Contains(region.clip,x,y) && Hit(region.bounds,region.transform,x,y)) return false;
   return true;
 }
 uint64_t ScrollCompositor::Move(uint64_t element,int value,bool absolute,bool chain,ScrollPosition* position,bool horizontal) {
@@ -876,13 +1144,15 @@ uint64_t ScrollCompositor::Repeat(ScrollPosition* position) {
   if (bar==scene_.scrollbars.end()) { CancelDrag(); return 0; }
   auto scroll=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==drag_element_;});
   if (scroll==scene_.transforms.end()) { CancelDrag(); return 0; }
-  auto inside=[&](SkRect rect){return Global(rect,bar->transform).contains(pointer_x_,pointer_y_);};
+  auto inside=[&](SkRect rect){return Hit(rect,bar->transform,pointer_x_,pointer_y_);};
   if (!Contains(bar->clip,pointer_x_,pointer_y_)) return 0;
   bool backwards=drag_part_<0;
   int distance=40;
   if (std::abs(drag_part_)==2) {
-    auto thumb=Global(bar->thumb,bar->thumb_transform);
-    float coordinate=drag_horizontal_ ? pointer_x_ : pointer_y_;
+    auto thumb=Thumb(*bar);
+    SkPoint point;
+    if (!LocalPoint(bar->transform,pointer_x_,pointer_y_,&point)) return 0;
+    float coordinate=drag_horizontal_ ? point.x() : point.y();
     if (!inside(bar->track) || (backwards ? coordinate>=(drag_horizontal_ ? thumb.left() : thumb.top()) :
         coordinate<(drag_horizontal_ ? thumb.right() : thumb.bottom()))) return 0;
     distance=std::max(1,(drag_horizontal_ ? scroll->viewport_x : scroll->viewport)*7/8);
@@ -904,22 +1174,24 @@ bool ScrollCompositor::Tick(int64_t now,uint64_t* element,ScrollPosition* positi
 }
 unsigned ScrollCompositor::HitPart(const ScrollbarScene& bar,int x,int y) const {
   if (!bar.enabled) return blink::kNoPart;
-  if (!Contains(bar.clip,x,y) || !Global(bar.frame,bar.transform).contains(x,y)) return blink::kNoPart;
+  if (!Contains(bar.clip,x,y) || !Hit(bar.frame,bar.transform,x,y)) return blink::kNoPart;
   int hit=-1;
   for (int index=static_cast<int>(scene_.pictures.size())-1;index>=0;--index) {
     const auto& picture=scene_.pictures[index];
-    if (Contains(picture.clip,x,y) && Global(Bounds(picture),picture.transform).contains(x,y)) { hit=index; break; }
+    if (Contains(picture.clip,x,y) && Hit(Bounds(picture),picture.transform,x,y)) { hit=index; break; }
   }
   if (hit<static_cast<int>(bar.track_picture) || hit>static_cast<int>(bar.last_picture)) return blink::kNoPart;
-  if (Global(bar.thumb,bar.thumb_transform).contains(x,y)) return blink::kThumbPart;
-  auto inside=[&](SkRect bounds){return Global(bounds,bar.transform).contains(x,y);};
+  if (Hit(bar.thumb,bar.thumb_transform,x,y)) return blink::kThumbPart;
+  auto inside=[&](SkRect bounds){return Hit(bounds,bar.transform,x,y);};
   if (inside(bar.back_start)) return blink::kBackButtonStartPart;
   if (inside(bar.back_end)) return blink::kBackButtonEndPart;
   if (inside(bar.forward_start)) return blink::kForwardButtonStartPart;
   if (inside(bar.forward_end)) return blink::kForwardButtonEndPart;
   if (inside(bar.track)) {
-    auto thumb=Global(bar.thumb,bar.thumb_transform);
-    return (bar.horizontal ? x<thumb.left() : y<thumb.top()) ? blink::kBackTrackPart : blink::kForwardTrackPart;
+    auto thumb=Thumb(bar);
+    SkPoint point;
+    if (!LocalPoint(bar.transform,x,y,&point)) return blink::kNoPart;
+    return (bar.horizontal ? point.x()<thumb.left() : point.y()<thumb.top()) ? blink::kBackTrackPart : blink::kForwardTrackPart;
   }
   return blink::kScrollbarBGPart;
 }
@@ -972,16 +1244,18 @@ bool ScrollCompositor::Pointer(int x,int y,unsigned buttons,uint64_t* element,Sc
   if (drag_element_) {
     if (!(buttons&1)) { CancelDrag(); return true; }
     if (drag_part_) return true;
-    int coordinate=drag_horizontal_ ? x : y;
-    if (coordinate==drag_coordinate_) return true;
-    drag_coordinate_=coordinate;
     auto found=std::find_if(scene_.scrollbars.begin(),scene_.scrollbars.end(),[&](const auto& bar){return bar.element==drag_element_ && bar.horizontal==drag_horizontal_;});
     if (found==scene_.scrollbars.end()) { CancelDrag(); return true; }
     auto scroll=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==drag_element_;});
-    auto track=Global(found->track,found->transform);
+    SkPoint point;
+    if (!LocalPoint(found->transform,x,y,&point)) { CancelDrag(); return true; }
+    float coordinate=drag_horizontal_ ? point.x() : point.y();
+    if (coordinate==drag_coordinate_) return true;
+    drag_coordinate_=coordinate;
+    auto track=found->track;
     float travel=drag_horizontal_ ? track.width()-found->thumb.width() : track.height()-found->thumb.height();
     if (scroll!=scene_.transforms.end() && travel>0) {
-      float fraction=std::clamp(((drag_horizontal_ ? x-track.left() : y-track.top())-drag_offset_)/travel,0.0f,1.0f);
+      float fraction=std::clamp(((drag_horizontal_ ? point.x()-track.left() : point.y()-track.top())-drag_offset_)/travel,0.0f,1.0f);
       int minimum=drag_horizontal_ ? scroll->minimum_x : scroll->minimum;
       int maximum=drag_horizontal_ ? scroll->maximum_x : scroll->maximum;
       *element=Move(drag_element_,minimum+static_cast<int>(std::lround(fraction*(maximum-minimum))),true,false,position,drag_horizontal_);
@@ -992,34 +1266,36 @@ bool ScrollCompositor::Pointer(int x,int y,unsigned buttons,uint64_t* element,Sc
   int hit=-1;
   for (int index=static_cast<int>(scene_.pictures.size())-1;index>=0;--index) {
     const auto& picture=scene_.pictures[index];
-    if (Contains(picture.clip,x,y) && Global(Bounds(picture),picture.transform).contains(x,y)) { hit=index; break; }
+    if (Contains(picture.clip,x,y) && Hit(Bounds(picture),picture.transform,x,y)) { hit=index; break; }
   }
   for (auto iterator=scene_.scrollbars.rbegin();iterator!=scene_.scrollbars.rend();++iterator) {
     const auto& bar=*iterator;
     if (hit<static_cast<int>(bar.track_picture) || hit>static_cast<int>(bar.last_picture)) continue;
-    if (!Contains(bar.clip,x,y) || !Global(bar.frame,bar.transform).contains(x,y)) continue;
+    if (!Contains(bar.clip,x,y) || !Hit(bar.frame,bar.transform,x,y)) continue;
     if (!bar.enabled) {
       drag_element_=bar.element; drag_horizontal_=bar.horizontal; drag_part_=5; pressed_part_=0;
       return true;
     }
-    auto thumb=Global(bar.thumb,bar.thumb_transform);
-    auto inside=[&](SkRect rect){return Global(rect,bar.transform).contains(x,y);};
+    SkPoint point;
+    if (!LocalPoint(bar.transform,x,y,&point)) continue;
+    auto thumb=Thumb(bar);
+    auto inside=[&](SkRect rect){return Hit(rect,bar.transform,x,y);};
     int part=0;
-    if (!thumb.contains(x,y)) {
+    if (!thumb.contains(point.x(),point.y())) {
       if (inside(bar.back_start) || inside(bar.back_end)) part=-1;
       else if (inside(bar.forward_start) || inside(bar.forward_end)) part=1;
-      else if (inside(bar.track)) part=(bar.horizontal ? x<thumb.left() : y<thumb.top()) ? -2 : 2;
+      else if (inside(bar.track)) part=(bar.horizontal ? point.x()<thumb.left() : point.y()<thumb.top()) ? -2 : 2;
       else return false;
     }
     drag_element_=bar.element; drag_horizontal_=bar.horizontal; drag_part_=part; repeat_at_=0;
     pressed_part_=HitPart(bar,x,y);
     UpdateLayouts();
-    thumb=Global(bar.thumb,bar.thumb_transform);
-    drag_offset_=bar.horizontal ? x-thumb.left() : y-thumb.top();
-    drag_coordinate_=bar.horizontal ? x : y;
+    thumb=Thumb(bar);
+    drag_offset_=bar.horizontal ? point.x()-thumb.left() : point.y()-thumb.top();
+    drag_coordinate_=bar.horizontal ? point.x() : point.y();
     if (part && std::abs(part)==2 && bar.jump) {
       drag_part_=0; drag_offset_=(bar.horizontal ? thumb.width() : thumb.height())/2;
-      drag_coordinate_=bar.horizontal ? x-1 : y-1;
+      drag_coordinate_-=1;
       return Pointer(x,y,buttons,element,position);
     }
     if (part) *element=Repeat(position);
@@ -1030,13 +1306,17 @@ bool ScrollCompositor::Pointer(int x,int y,unsigned buttons,uint64_t* element,Sc
 
 void ScrollCompositor::SwapScene(ScrollCompositor& other) {
   std::swap(scene_,other.scene_); pictures_.swap(other.pictures_); appearances_.swap(other.appearances_);
-  images_.swap(other.images_); fonts_.swap(other.fonts_); offsets_.swap(other.offsets_); tiles_.swap(other.tiles_);
+  filters_.swap(other.filters_);
+  images_.swap(other.images_); fonts_.swap(other.fonts_); matrices_.swap(other.matrices_); inverses_.swap(other.inverses_); invertible_.swap(other.invertible_); tiles_.swap(other.tiles_);
 }
-bool ScrollCompositor::Install(const ScrollScene& source) {
+bool ScrollCompositor::Install(const ScrollScene& source,int width,int height) {
+  width_=width; height_=height;
+  if (width<=0 || height<=0 || width>8192 || height>8192) { Clear(); return false; }
   reflows_.clear(); reflow_states_.clear(); retained_positions_.clear(); selected_reflow_=painted_reflow_=0;
   if (!InstallScene(source)) return false;
   for (const auto& variant:source.reflows) {
     auto compositor=std::make_unique<ScrollCompositor>();
+    compositor->width_=width_; compositor->height_=height_;
     compositor->scene_.image_keys=scene_.image_keys; compositor->scene_.font_keys=scene_.font_keys;
     compositor->images_=images_; compositor->fonts_=fonts_;
     // BSP-owned immutable resources are shared across layouts with the same resource keys.
@@ -1147,9 +1427,11 @@ bool ScrollCompositor::SelectReflow() {
       })) { drag_element_=0; pressed_part_=0; repeat_at_=0; }
   UpdateTransforms(); UpdateLayouts();
   if (drag_element_ && !drag_part_) for (const auto& bar:scene_.scrollbars) if (bar.element==drag_element_ && bar.horizontal==drag_horizontal_) {
-    auto thumb=Global(bar.thumb,bar.thumb_transform);
-    drag_offset_=bar.horizontal ? pointer_x_-thumb.left() : pointer_y_-thumb.top();
-    drag_coordinate_=bar.horizontal ? pointer_x_ : pointer_y_;
+    SkPoint point;
+    if (!LocalPoint(bar.transform,pointer_x_,pointer_y_,&point)) break;
+    auto thumb=Thumb(bar);
+    drag_offset_=bar.horizontal ? point.x()-thumb.left() : point.y()-thumb.top();
+    drag_coordinate_=bar.horizontal ? point.x() : point.y();
   }
   std::printf("COMPOSITOR: async gutter scene=%u\n",selected_reflow_);
   return true;
@@ -1161,7 +1443,7 @@ void ScrollCompositor::ReleaseRasterTiles() {
 void ScrollCompositor::Clear() {
   reflows_.clear(); reflow_states_.clear(); retained_positions_.clear(); selected_reflow_=painted_reflow_=0;
   drag_element_=0; pressed_part_=0;
-  pictures_.clear(); appearances_.clear(); images_.clear(); fonts_.clear(); offsets_.clear(); tiles_.clear(); scene_={};
+  pictures_.clear(); appearances_.clear(); images_.clear(); fonts_.clear(); filters_.clear(); matrices_.clear(); inverses_.clear(); invertible_.clear(); tiles_.clear(); scene_={};
 }
 bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   uint64_t captured_element=drag_element_;
@@ -1213,7 +1495,7 @@ bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   unsigned reused=0;
   for (unsigned index=0;index<source.pictures.size();++index) {
     const auto& incoming=source.pictures[index];
-    if (!incoming.raster_appearances.empty()) {
+    if (incoming.gpu_frame || !incoming.raster_appearances.empty()) {
       // Compressed pixels remain local and are expanded only for visible tiles.
       ScrollPicture value=incoming;
       value.data=SkData::MakeEmpty();
@@ -1268,6 +1550,7 @@ bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   scene_.pictures=std::move(metadata); pictures_=std::move(pictures); appearances_=std::move(appearances);
   if (reused) std::printf("COMPOSITOR: reused pictures=%u resident=%zu\n",reused,tiles_.size());
   UpdateTransforms();
+  if (!PrepareFilters()) { Clear(); return false; }
   drag_element_=captured_element; pressed_part_=captured_part;
   if (std::none_of(scene_.scrollbars.begin(),scene_.scrollbars.end(),[&](const auto& bar){return bar.element==drag_element_ && bar.horizontal==drag_horizontal_;})) CancelDrag();
   UpdateLayouts();
@@ -1275,6 +1558,57 @@ bool ScrollCompositor::InstallScene(const ScrollScene& source) {
   UpdateLayouts();
   std::printf("COMPOSITOR: input wheel_listeners=%u blocking_regions=%zu global_block=%u bars=%zu\n",
       scene_.wheel_listeners,scene_.wheel_regions.size(),scene_.wheel_blocked,scene_.scrollbars.size());
+  return true;
+}
+bool ScrollCompositor::PrepareFilters() {
+  filters_.clear(); filters_.resize(scene_.effects.size());
+  std::vector<double> outsets(scene_.effects.size());
+  std::vector<size_t> layer_bytes(scene_.effects.size());
+  for (size_t index=0;index<scene_.effects.size();++index) {
+    const auto& effect=scene_.effects[index];
+    cc::FilterOperations operations;
+    double outset=0;
+    for (const auto& filter:effect.filters) {
+      if (!ValidScrollFilter(filter)) return false;
+      switch (filter.kind) {
+        case ScrollFilterKind::Grayscale: operations.Append(cc::FilterOperation::CreateGrayscaleFilter(filter.amount)); break;
+        case ScrollFilterKind::Sepia: operations.Append(cc::FilterOperation::CreateSepiaFilter(filter.amount)); break;
+        case ScrollFilterKind::Saturate: operations.Append(cc::FilterOperation::CreateSaturateFilter(filter.amount)); break;
+        case ScrollFilterKind::HueRotate: operations.Append(cc::FilterOperation::CreateHueRotateFilter(filter.amount)); break;
+        case ScrollFilterKind::Invert: operations.Append(cc::FilterOperation::CreateInvertFilter(filter.amount)); break;
+        case ScrollFilterKind::Brightness: operations.Append(cc::FilterOperation::CreateBrightnessFilter(filter.amount)); break;
+        case ScrollFilterKind::Contrast: operations.Append(cc::FilterOperation::CreateContrastFilter(filter.amount)); break;
+        case ScrollFilterKind::Opacity: operations.Append(cc::FilterOperation::CreateOpacityFilter(filter.amount)); break;
+        case ScrollFilterKind::ColorMatrix: operations.Append(cc::FilterOperation::CreateColorMatrixFilter(filter.matrix)); break;
+        case ScrollFilterKind::Blur:
+          operations.Append(cc::FilterOperation::CreateBlurFilter(filter.amount,static_cast<SkTileMode>(filter.tile_mode)));
+          outset+=3*filter.amount; break;
+        case ScrollFilterKind::DropShadow:
+          operations.Append(cc::FilterOperation::CreateDropShadowFilter(gfx::Point(filter.offset_x,filter.offset_y),filter.amount,
+              SkColor4f{filter.color[0],filter.color[1],filter.color[2],filter.color[3]}));
+          outset+=3*filter.amount+std::max(std::abs(filter.offset_x),std::abs(filter.offset_y)); break;
+      }
+    }
+    if (effect.transform>=0) {
+      const auto& matrix=matrices_[effect.transform];
+      outset*=std::max(std::abs(matrix.getScaleX())+std::abs(matrix.getSkewX()),
+                       std::abs(matrix.getSkewY())+std::abs(matrix.getScaleY()));
+    }
+    if (effect.parent>=0) { outset+=outsets[effect.parent]; layer_bytes[index]=layer_bytes[effect.parent]; }
+    if (!std::isfinite(outset) || outset>512) return false;
+    outsets[index]=outset;
+    if (!effect.filters.empty() || effect.opacity!=1 || effect.blend!=SkBlendMode::kSrcOver) {
+      // The viewport plus all ancestor outsets bounds live save-layer storage conservatively.
+      size_t bytes=static_cast<size_t>(std::ceil(width_+2*outset))*static_cast<size_t>(std::ceil(height_+2*outset))*4;
+      layer_bytes[index]+=bytes;
+      if (layer_bytes[index]>64*1024*1024 || !ScrollWireMemoryAvailable(layer_bytes[index]+4*1024*1024)) return false;
+    }
+    if (!effect.filters.empty()) {
+      auto filter=cc::RenderSurfaceFilters::BuildImageFilter(operations);
+      if (!filter) return false;
+      filters_[index]=cc::PaintFilter::GetSkFilter(filter.get());
+    }
+  }
   return true;
 }
 SkRect ScrollCompositor::Bounds(const ScrollPicture& picture) const {
@@ -1294,13 +1628,13 @@ void ScrollCompositor::UpdateLayouts() {
     auto found=std::find_if(bar.layouts.begin(),bar.layouts.end(),[&](const auto& layout){return layout.hover==bar.hover && layout.press==pressed;});
     unsigned index=found==bar.layouts.end() ? 0 : static_cast<unsigned>(found-bar.layouts.begin());
     const auto& layout=bar.layouts[index];
-    auto old_thumb=Global(bar.thumb,bar.thumb_transform);
+    auto old_thumb=Thumb(bar);
     bar.layout=index; bar.track=layout.track; bar.thumb=layout.thumb;
     bar.back_start=layout.back_start; bar.back_end=layout.back_end;
     bar.forward_start=layout.forward_start; bar.forward_end=layout.forward_end;
     UpdateTransforms();
     if (drag_element_==bar.element && drag_horizontal_==bar.horizontal && !drag_part_) {
-      auto new_thumb=Global(bar.thumb,bar.thumb_transform);
+      auto new_thumb=Thumb(bar);
       drag_offset_+=bar.horizontal ? old_thumb.left()-new_thumb.left() : old_thumb.top()-new_thumb.top();
     }
     changed=true;
@@ -1308,8 +1642,9 @@ void ScrollCompositor::UpdateLayouts() {
   if (changed) UpdateTransforms();
 }
 void ScrollCompositor::UpdateTransforms() {
-  offsets_.resize(scene_.transforms.size());
-  std::vector<gfx::Vector2dF> sticky_box_offsets(offsets_.size()),containing_block_offsets(offsets_.size());
+  matrices_.resize(scene_.transforms.size()); inverses_.resize(matrices_.size());
+  invertible_.resize(matrices_.size());
+  std::vector<gfx::Vector2dF> sticky_box_offsets(matrices_.size()),containing_block_offsets(matrices_.size());
   for (const auto& bar:scene_.scrollbars) {
     auto found=std::find_if(scene_.transforms.begin(),scene_.transforms.end(),[&](const auto& node){return node.element==bar.element;});
     if (found!=scene_.transforms.end()) {
@@ -1353,22 +1688,32 @@ void ScrollCompositor::UpdateTransforms() {
       offset.fX=std::round(delta.x()+node.constraint.pixel_snap_offset.x());
       offset.fY=std::round(delta.y()+node.constraint.pixel_snap_offset.y());
     }
-    if (node.parent>=0) offset+=offsets_[node.parent];
-    offsets_[index]=offset;
+    auto matrix=ScrollMatrix(node,offset.x(),offset.y());
+    if (node.parent>=0) matrix=SkMatrix::Concat(matrices_[node.parent],matrix);
+    matrices_[index]=matrix;
+    invertible_[index]=BoundedScrollMatrix(matrix) && matrix.invert(&inverses_[index]) &&
+        BoundedScrollMatrix(inverses_[index]);
   }
 }
-void ScrollCompositor::Clip(SkCanvas& canvas,int clip) {
-  for (;clip>=0;clip=scene_.clips[clip].parent) {
-    auto& node=scene_.clips[clip]; auto rectangle=node.rectangle;
-    if (node.transform>=0) rectangle.offset(offsets_[node.transform].x(),offsets_[node.transform].y());
-    canvas.clipRRect(rectangle,true);
+void ScrollCompositor::Clip(SkCanvas& canvas,int clip,int stop) {
+  auto original=canvas.getLocalToDevice();
+  for (;clip>=0 && clip!=stop;clip=scene_.clips[clip].parent) {
+    const auto& node=scene_.clips[clip];
+    if (node.transform>=0) {
+      if (!invertible_[node.transform]) { canvas.clipRect(SkRect::MakeEmpty()); break; }
+      canvas.concat(matrices_[node.transform]);
+    }
+    canvas.clipRRect(node.rectangle,true);
+    // Restoring only the matrix preserves the device-space clip across ancestors.
+    canvas.setMatrix(original);
   }
 }
 bool ScrollCompositor::Contains(int clip,float x,float y) const {
   for (;clip>=0;clip=scene_.clips[clip].parent) {
-    const auto& node=scene_.clips[clip]; auto rectangle=node.rectangle;
-    if (node.transform>=0) rectangle.offset(offsets_[node.transform].x(),offsets_[node.transform].y());
-    if (!rectangle.contains(SkRect::MakeXYWH(x,y,0.01f,0.01f))) return false;
+    const auto& node=scene_.clips[clip];
+    SkPoint point;
+    if (!LocalPoint(node.transform,x,y,&point) ||
+        !node.rectangle.contains(SkRect::MakeXYWH(point.x(),point.y(),0.01f,0.01f))) return false;
   }
   return true;
 }
@@ -1376,9 +1721,7 @@ uint64_t ScrollCompositor::Scroll(int x,int y,int delta,ScrollPosition* position
   for (int index=static_cast<int>(scene_.pictures.size())-1;index>=0;--index) {
     const auto& picture=scene_.pictures[index];
     if (!Contains(picture.clip,x,y)) continue;
-    auto bounds=Bounds(picture);
-    if (picture.transform>=0) bounds.offset(offsets_[picture.transform].x(),offsets_[picture.transform].y());
-    if (!bounds.contains(x,y)) continue;
+    if (!Hit(Bounds(picture),picture.transform,x,y)) continue;
     int transform=picture.transform;
     while (transform>=0 && !scene_.transforms[transform].element) transform=scene_.transforms[transform].parent;
     if (transform>=0) return Move(scene_.transforms[transform].element,delta,false,true,position);
@@ -1389,6 +1732,38 @@ uint64_t ScrollCompositor::Scroll(int x,int y,int delta,ScrollPosition* position
 }
 void ScrollCompositor::Draw(SkCanvas& canvas,int width,int height) {
   canvas.clear(SK_ColorWHITE);
+  // Input bounds keep small effects from allocating and filtering a full viewport.
+  // Recompute them after scrolling because descendants can move within a fixed effect.
+  std::vector<SkRect> effect_bounds(scene_.effects.size(),SkRect::MakeEmpty());
+  std::vector<bool> bounded_effects(scene_.effects.size(),true);
+  auto map_bounds=[&](SkRect bounds,int source,int target,SkRect* mapped) {
+    if ((source>=0 && !invertible_[source]) || (target>=0 && !invertible_[target])) return false;
+    SkMatrix matrix=source>=0 ? matrices_[source] : SkMatrix::I();
+    if (target>=0) matrix=SkMatrix::Concat(inverses_[target],matrix);
+    matrix.mapRect(mapped,bounds);
+    return mapped->isFinite();
+  };
+  for (const auto& picture:scene_.pictures) if (picture.effect>=0) {
+    SkRect bounds;
+    if (map_bounds(Bounds(picture),picture.transform,scene_.effects[picture.effect].transform,&bounds))
+      effect_bounds[picture.effect].join(bounds);
+    else bounded_effects[picture.effect]=false;
+  }
+  // A parent's input includes each child's filtered output, including shadows and blur halos.
+  for (int index=static_cast<int>(scene_.effects.size())-1;index>=0;--index) {
+    const auto& effect=scene_.effects[index];
+    if (effect.parent<0) continue;
+    auto bounds=effect_bounds[index];
+    if (bounded_effects[index] && filters_[index] && !bounds.isEmpty()) {
+      if (filters_[index]->canComputeFastBounds()) bounds=filters_[index]->computeFastBounds(bounds);
+      else bounded_effects[index]=false;
+    }
+    SkRect mapped;
+    if (bounded_effects[index] && bounds.isFinite() &&
+        map_bounds(bounds,effect.transform,scene_.effects[effect.parent].transform,&mapped))
+      effect_bounds[effect.parent].join(mapped);
+    else bounded_effects[effect.parent]=false;
+  }
   std::vector<int> effects;
   unsigned misses=0;
   for (unsigned index=0;index<pictures_.size();++index) {
@@ -1401,26 +1776,39 @@ void ScrollCompositor::Draw(SkCanvas& canvas,int width,int height) {
     while (effects.size()>common) { canvas.restore(); canvas.restore(); effects.pop_back(); }
     for (unsigned depth=common;depth<path.size();++depth) {
       const auto& effect=scene_.effects[path[depth]];
-      canvas.save(); Clip(canvas,effect.clip);
+      int parent_clip=depth ? scene_.effects[path[depth-1]].clip : -1;
+      auto original=canvas.getLocalToDevice();
+      canvas.save(); Clip(canvas,effect.clip,parent_clip);
+      if (effect.transform>=0) {
+        if (invertible_[effect.transform]) canvas.concat(matrices_[effect.transform]);
+        else canvas.clipRect(SkRect::MakeEmpty());
+      }
       SkPaint paint; paint.setAlphaf(effect.opacity); paint.setBlendMode(effect.blend);
-      if (effect.opacity==1 && effect.blend==SkBlendMode::kSrcOver) canvas.save();
-      else canvas.saveLayer(nullptr,&paint);
+      paint.setImageFilter(filters_[path[depth]]);
+      if (effect.opacity==1 && effect.blend==SkBlendMode::kSrcOver && !filters_[path[depth]]) canvas.save();
+      else canvas.saveLayer(bounded_effects[path[depth]] ? &effect_bounds[path[depth]] : nullptr,&paint);
+      canvas.setMatrix(original);
       effects.push_back(path[depth]);
     }
-    canvas.save(); Clip(canvas,picture.clip);
-    SkPoint offset=picture.transform>=0 ? offsets_[picture.transform] : SkPoint::Make(0,0);
-    canvas.translate(offset.x(),offset.y());
+    if (picture.transform>=0 && !invertible_[picture.transform]) continue;
+    canvas.save(); Clip(canvas,picture.clip,picture.effect>=0 ? scene_.effects[picture.effect].clip : -1);
+    if (picture.transform>=0) canvas.concat(matrices_[picture.transform]);
     if (picture.track_piece && picture.scrollbar>=0) {
       const auto& bar=scene_.scrollbars[picture.scrollbar];
-      auto thumb=Global(bar.thumb,bar.thumb_transform);
+      auto thumb=Thumb(bar);
       auto target=bar.track;
-      float middle=bar.horizontal ? thumb.centerX()-offset.x() : thumb.centerY()-offset.y();
+      float middle=bar.horizontal ? thumb.centerX() : thumb.centerY();
       if (bar.horizontal) { if (picture.track_piece<0) target.fRight=middle; else target.fLeft=middle; }
       else { if (picture.track_piece<0) target.fBottom=middle; else target.fTop=middle; }
       canvas.clipRect(target);
     }
     SkRect visible=canvas.getLocalClipBounds();
-    if (visible.intersect(Bounds(picture))) {
+    if (picture.gpu_frame && visible.intersect(Bounds(picture))) {
+#if defined(UEFI_RUNTIME)
+      if (!picture.gpu_frame->image) picture.gpu_frame->image=GpuCompositor::CanvasImage(picture.gpu_token);
+#endif
+      if (picture.gpu_frame->image) canvas.drawImageRect(picture.gpu_frame->image,Bounds(picture),SkSamplingOptions(),nullptr);
+    } else if (!picture.gpu_frame && visible.intersect(Bounds(picture))) {
       constexpr int tile_width=512,tile_height=256;
       int left=std::floor(visible.left()/tile_width),right=std::ceil(visible.right()/tile_width);
       int top=std::floor(visible.top()/tile_height),bottom=std::ceil(visible.bottom()/tile_height);

@@ -1,0 +1,31 @@
+diff --git a/src/common/code-memory-access.h b/src/common/code-memory-access.h
+--- a/src/common/code-memory-access.h
++++ b/src/common/code-memory-access.h
+@@ -636,7 +636,11 @@
+       const RwxMemoryWriteScopeForTesting&) = delete;
+ };
+ 
+-#if V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT
++#if defined(UEFI_RUNTIME)
++// UEFI metadata uses ordinary data pages. Its code write scope changes every
++// executable alias, so metadata-only access must not enter that scope.
++using CFIMetadataWriteScope = NopRwxMemoryWriteScope;
++#elif V8_HEAP_USE_PTHREAD_JIT_WRITE_PROTECT
+ // Metadata are not protected yet with PTHREAD_JIT_WRITE_PROTECT
+ using CFIMetadataWriteScope = NopRwxMemoryWriteScope;
+ #else
+
+diff --git a/src/common/code-memory-access.cc b/src/common/code-memory-access.cc
+--- a/src/common/code-memory-access.cc
++++ b/src/common/code-memory-access.cc
+@@ -73,6 +73,10 @@
+ // static
+ void ThreadIsolation::Initialize(
+     ThreadIsolatedAllocator* thread_isolated_allocator) {
++#if defined(UEFI_RUNTIME)
++  // A protected metadata allocator requires its own permission transition.
++  CHECK_NULL(thread_isolated_allocator);
++#endif
+   trusted_data_.initialized_ = true;
+ 
+   bool enable = thread_isolated_allocator != nullptr;

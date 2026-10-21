@@ -4,6 +4,10 @@
 #include "blink/navigation.h"
 #include "blink/cookies.h"
 #include "blink/browser_settings.h"
+#include "blink/devtools_resources.h"
+#include "blink/response_headers.h"
+#include "services/network/public/cpp/cross_origin_embedder_policy.h"
+#include "services/network/public/cpp/cross_origin_embedder_policy_parser.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -106,7 +110,8 @@ struct ResponseOwner {
 };
 
 blink::WebURLResponse ConvertResponse(const GURL &url,
-                                      const ResourceResponse &resource) {
+                                      const ResourceResponse &resource,
+                                      const net::HttpResponseHeaders& headers) {
   blink::WebURLResponse response{blink::WebURL(blink::KURL(url))};
   response.SetHttpStatusCode(resource.status_code);
   // The firmware response does not expose a reason phrase; Mojo requires a non-null string.
@@ -114,15 +119,12 @@ blink::WebURLResponse ConvertResponse(const GURL &url,
   response.SetExpectedContentLength(resource.length);
   std::string mime_type;
   std::string charset;
-  bool had_charset = false;
   for (size_t index = 0; index < resource.header_count; ++index) {
     const Header &header = resource.headers[index];
     response.AddHttpHeaderField(blink::WebString::FromLatin1(header.name),
                                 blink::WebString::FromLatin1(header.value));
   }
-  if (const char *type = resource_header(&resource, "content-type"))
-    net::HttpUtil::ParseContentType(type, &mime_type, &charset, &had_charset,
-                                    nullptr);
+  headers.GetMimeTypeAndCharset(&mime_type, &charset);
   response.SetMimeType(blink::WebString::FromUtf8(mime_type));
   response.SetTextEncodingName(blink::WebString::FromUtf8(charset));
   return response;
@@ -190,6 +192,12 @@ class AsyncNavigation final : public NavigationRequest {
     replacements.ClearRef();
     GURL request_url = url.ReplaceComponents(replacements);
     ResponseOwner owner;
+    if (IsDevToolsHost(request_url)) {
+      if (method != "GET") { Finish(ERROR(3)); return; }
+      timings.fetch_start = base::TimeTicks::Now();
+      Status result = LoadDevToolsResource(request_url, &owner.response);
+      if (result) { Finish(result); return; }
+    } else {
     if (!job) {
       timings.fetch_start = base::TimeTicks::Now();
       // Main document navigation bypasses Blink's subresource hint generation.
@@ -221,11 +229,14 @@ class AsyncNavigation final : public NavigationRequest {
     if (!resource_async_result(job, &result, &owner.response)) { Schedule(); return; }
     resource_async_release(job); job = nullptr;
     if (result) { Finish(result); return; }
+    }
     const ResourceResponse &resource = owner.response;
-    if (cookies_allowed) StoreResponseCookies(request_url,resource);
+    if (cookies_allowed && !IsDevToolsHost(request_url)) StoreResponseCookies(request_url,resource);
     std::printf("BLINK: navigation HTTP status=%u bytes=%zu\n",
                 resource.status_code, resource.length);
-    auto response = ConvertResponse(url, resource);
+    auto response_headers = ResponseHeaders(resource);
+    if (!response_headers) { Finish(ERROR(3)); return; }
+    auto response = ConvertResponse(url, resource, *response_headers);
     if (resource_is_redirect(resource.status_code)) {
       const char *location = resource_header(&resource, "location");
       if (!location || redirects == 10)
@@ -255,6 +266,8 @@ class AsyncNavigation final : public NavigationRequest {
     if (resource.status_code == 204 || resource.status_code == 205 ||
         resource.status_code == 304)
       { Finish(ERROR(3)); return; }
+    policy->policies.cross_origin_embedder_policy =
+        network::ParseCrossOriginEmbedderPolicy(*response_headers).value;
     for (size_t index = 0; index < resource.header_count; ++index) {
       const auto& header = resource.headers[index];
       std::string name(header.name);

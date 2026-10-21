@@ -36,6 +36,26 @@ case "${QEMU_ACCEL:-auto}" in
  *) printf '%s\n' 'QEMU_ACCEL must be auto, kvm or tcg.' >&2; exit 1 ;;
 esac
 disk_arguments=(-drive "format=raw,file=fat:rw:$build/esp")
+machine_arguments=(-machine q35)
+gpu_arguments=()
+binary_arguments=()
+qemu_binary=${QEMU_BINARY:-qemu-system-x86_64}
+if [[ ${QEMU_GPU_COMPOSITION:-0} == 1 ]]; then
+ if [[ ${QEMU_ACCEL:-kvm} != kvm ]]; then
+  printf '%s\n' 'GPU composition requires QEMU_ACCEL=kvm.' >&2
+  exit 1
+ fi
+ qemu_binary=${QEMU_BINARY:-"$project/build/qemu-scanout/qemu-system-x86_64"}
+ default_memory=4096
+ binary_arguments=(-L /usr/share/qemu)
+ machine_arguments=(-machine q35,memory-backend=memory)
+ acceleration_arguments=(-accel kvm,honor-guest-pat=on)
+ gpu_arguments=(-vga none -object "memory-backend-memfd,id=memory,size=${QEMU_MEMORY:-4096}M,share=on"
+  -device virtio-vga-gl,blob=on,venus=on,hostmem=512M,uefi-scanout-modifier=on,romfile=/usr/share/seabios/vgabios-virtio.bin)
+ display_arguments=(-display "${QEMU_DISPLAY:-sdl,gl=on}")
+ export SDL_VIDEODRIVER=${SDL_VIDEODRIVER:-x11}
+ export SDL_VIDEO_X11_FORCE_EGL=1
+fi
 if [[ -n ${QEMU_DISK_IMAGE:-} ]]; then
  if [[ ! -f "$QEMU_DISK_IMAGE" ]]; then
   printf '%s\n' "Missing disk image: $QEMU_DISK_IMAGE" >&2
@@ -43,7 +63,7 @@ if [[ -n ${QEMU_DISK_IMAGE:-} ]]; then
  fi
  disk_arguments=(-drive "format=raw,file=$QEMU_DISK_IMAGE")
 fi
-qemu-system-x86_64 -name "UEFI BROWSER" -machine q35 "${acceleration_arguments[@]}" -m "${QEMU_MEMORY:-$default_memory}" -smp "${QEMU_CPUS:-4}" \
+"$qemu_binary" "${binary_arguments[@]}" -name "UEFI BROWSER" "${machine_arguments[@]}" "${acceleration_arguments[@]}" "${gpu_arguments[@]}" -m "${QEMU_MEMORY:-$default_memory}" -smp "${QEMU_CPUS:-4}" \
  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
  -drive "if=pflash,format=raw,file=$variables" \
  "${disk_arguments[@]}" \

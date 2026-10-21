@@ -13,6 +13,7 @@
 #include "ui/gl/gl_implementation.h"
 #include "ui/ozone/public/ozone_platform.h"
 
+extern "C" int firmware_gpu_canvas_enabled(void) __attribute__((weak));
 namespace uefi_browser {
 namespace {
 class FirmwareGLProvider final : public blink::WebGraphicsContext3DProvider {
@@ -38,6 +39,7 @@ class FirmwareGLProvider final : public blink::WebGraphicsContext3DProvider {
     return context_.Initialize(service_->GetTaskExecutor(),
         type == blink::Platform::kWebGL2ContextType ? gpu::CONTEXT_TYPE_WEBGL2 : gpu::CONTEXT_TYPE_WEBGL1) == gpu::ContextResult::kSuccess;
   }
+  uint64_t FirmwareExportTexture(void*,uint32_t alpha) override { if (!firmware_gpu_canvas_enabled || !firmware_gpu_canvas_enabled()) return 0; return context_.FirmwareExportCanvas(alpha); }
   gpu::InterfaceBase* InterfaceBase() override { return context_.GetImplementation(); }
   gpu::gles2::GLES2Interface* ContextGL() override { return context_.GetImplementation(); }
   gpu::raster::RasterInterface* RasterInterface() override { return nullptr; }
@@ -71,7 +73,7 @@ std::unique_ptr<blink::WebGraphicsContext3DProvider> CreateWebGLProvider(
   information->using_gpu_compositing = false;
   information->angle_implementation = gl::ANGLEImplementation::kVulkan;
   information->vendor_info = blink::WebString::FromAscii("UEFI");
-  information->renderer_info = blink::WebString::FromAscii("ANGLE / SwiftShader");
+  information->renderer_info = blink::WebString::FromAscii("ANGLE / Vulkan");
   std::printf("GPU: ANGLE WebGL provider initialized type=%d\n", static_cast<int>(type));
   return provider;
 }

@@ -1,8 +1,10 @@
 #include "blink/scroll_wire.h"
+#include "blink/gpu_canvas.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <optional>
 #include "third_party/zlib/zlib.h"
 #include "third_party/skia/include/core/SkCanvas.h"
 #include "third_party/skia/include/core/SkImage.h"
@@ -12,13 +14,15 @@
 #include "third_party/skia/include/core/SkStream.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/core/SkTypeface.h"
+#include "base/time/time.h"
 #if defined(UEFI_RUNTIME)
 extern "C" size_t runtime_memory_used(void);
+extern "C" size_t runtime_memory_limit(void);
 #endif
 namespace uefi_browser {
 bool ScrollWireMemoryAvailable(size_t reserve) {
 #if defined(UEFI_RUNTIME)
-  constexpr size_t limit=128*1024*1024;
+  size_t limit=runtime_memory_limit();
   size_t used=runtime_memory_used();
   return reserve<=limit && used<=limit-reserve;
 #else
@@ -27,7 +31,7 @@ bool ScrollWireMemoryAvailable(size_t reserve) {
 }
 namespace {
 static_assert(sizeof(unsigned)==4 && sizeof(int)==4 && sizeof(float)==4);
-constexpr uint32_t kMagic=0x5343524c, kVersion=2;
+constexpr uint32_t kMagic=0x5343524c, kVersion=5;
 // This limits total decoding work; only one tile is expanded at a time.
 constexpr size_t kPixelBudget=256*1024*1024;
 constexpr float kCoordinateLimit=1000000;
@@ -100,7 +104,7 @@ template<class Archive,class ItemType> void Items(Archive& archive,std::vector<I
   for (auto& value:values) { if (!archive.valid) break; Item(archive,value); }
 }
 template<class Archive> void Item(Archive& archive,ScrollTransform& value) {
-  Fields(archive,value.parent,value.x,value.y,value.element,value.scroll_parent,value.sticky_element,
+  Fields(archive,value.parent,value.x,value.y,value.scale_x,value.skew_x,value.skew_y,value.scale_y,value.element,value.scroll_parent,value.sticky_element,
       value.position,value.minimum,value.maximum,value.viewport,value.position_x,value.minimum_x,
       value.maximum_x,value.viewport_x,value.horizontal,value.vertical,value.chain_x,value.chain,value.sticky);
   auto& constraint=value.constraint;
@@ -126,8 +130,16 @@ template<class Archive> void Item(Archive& archive,ScrollClip& value) {
   value.rectangle.setRectRadii(rectangle,radii);
   if (!value.rectangle.isValid()) archive.valid=false;
 }
+template<class Archive> void Item(Archive& archive,ScrollFilter& value) {
+  unsigned kind=static_cast<unsigned>(value.kind); Number(archive,kind); value.kind=static_cast<ScrollFilterKind>(kind);
+  Fields(archive,value.amount,value.offset_x,value.offset_y,value.tile_mode);
+  for (auto& channel:value.color) Number(archive,channel);
+  for (auto& coefficient:value.matrix) Number(archive,coefficient);
+  if (!ValidScrollFilter(value)) archive.valid=false;
+}
 template<class Archive> void Item(Archive& archive,ScrollEffect& value) {
-  Fields(archive,value.parent,value.clip,value.opacity);
+  Fields(archive,value.parent,value.clip,value.transform,value.opacity);
+  Items(archive,value.filters,16);
   unsigned blend=static_cast<unsigned>(value.blend); Number(archive,blend);
   if (blend>static_cast<unsigned>(SkBlendMode::kLastMode) || value.opacity<0 || value.opacity>1) archive.valid=false;
   value.blend=static_cast<SkBlendMode>(blend);
@@ -155,7 +167,7 @@ template<class Archive> void Item(Archive& archive,ScrollbarScene& value) {
   Items(archive,value.layouts,128);
 }
 template<class Archive> void Item(Archive& archive,ScrollPicture& value) {
-  Fields(archive,value.transform,value.clip,value.effect,value.scrollbar,value.track_piece,value.part);
+  Fields(archive,value.transform,value.clip,value.effect,value.scrollbar,value.track_piece,value.part,value.gpu_token);
   Rectangle(archive,value.bounds); Items(archive,value.appearance_bounds,128);
 }
 template<class Archive> void Metadata(Archive& archive,ScrollScene& scene) {
@@ -176,12 +188,24 @@ template<class Node> bool Tree(const std::vector<Node>& nodes) {
 bool Validate(const ScrollScene& scene,bool diagnostic=false) {
   auto reject=[&](int line) { if (diagnostic) std::printf("COMPOSITOR: wire invalid graph line=%d\n",line); return false; };
   if (!Tree(scene.transforms) || !Tree(scene.clips) || !Tree(scene.effects)) return reject(__LINE__);
+  std::vector<SkMatrix> matrices;
   for (const auto& node:scene.transforms) {
+    auto matrix=ScrollMatrix(node,node.x,node.y);
+    if (node.parent>=0) matrix=SkMatrix::Concat(matrices[node.parent],matrix);
+    if (!BoundedScrollMatrix(matrix)) return reject(__LINE__);
+    matrices.push_back(matrix);
     if (node.minimum>node.position || node.position>node.maximum || node.minimum_x>node.position_x ||
         node.position_x>node.maximum_x || node.viewport<0 || node.viewport_x<0) return reject(__LINE__);
   }
   for (const auto& node:scene.clips) if (!Index(node.transform,scene.transforms.size())) return reject(__LINE__);
-  for (const auto& node:scene.effects) if (!Index(node.clip,scene.clips.size())) return reject(__LINE__);
+  size_t filter_count=0;
+  for (const auto& node:scene.effects) {
+    if (!Index(node.clip,scene.clips.size()) || !Index(node.transform,scene.transforms.size())) return reject(__LINE__);
+    filter_count+=node.filters.size(); if (filter_count>1024) return reject(__LINE__);
+    size_t chain=node.filters.size();
+    for (int parent=node.parent;parent>=0;parent=scene.effects[parent].parent) chain+=scene.effects[parent].filters.size();
+    if (chain>32) return reject(__LINE__);
+  }
   for (const auto& node:scene.wheel_regions)
     if (!Index(node.transform,scene.transforms.size()) || !Index(node.clip,scene.clips.size())) return reject(__LINE__);
   for (const auto& bar:scene.scrollbars) {
@@ -193,10 +217,17 @@ bool Validate(const ScrollScene& scene,bool diagnostic=false) {
         bar.initial_delay<1 || bar.repeat_delay<1 || bar.initial_delay>60000 || bar.repeat_delay>60000 ||
         (bar.layouts.empty() ? bar.layout!=0 : bar.layout>=bar.layouts.size())) return reject(__LINE__);
   }
+  for (const auto& bar:scene.scrollbars) {
+    const auto& thumb=scene.transforms[bar.thumb_transform];
+    if (thumb.parent!=bar.transform || thumb.scale_x!=1 || thumb.scale_y!=1 ||
+        thumb.skew_x!=0 || thumb.skew_y!=0 || thumb.element || thumb.sticky)
+      return reject(__LINE__);
+  }
   for (const auto& picture:scene.pictures) {
     if (!Index(picture.transform,scene.transforms.size()) || !Index(picture.clip,scene.clips.size()) ||
         !Index(picture.effect,scene.effects.size()) || !Index(picture.scrollbar,scene.scrollbars.size()) ||
         picture.track_piece < -1 || picture.track_piece > 1) return reject(__LINE__);
+    if (picture.gpu_token && (picture.scrollbar>=0 || picture.track_piece || picture.part || !picture.appearance_bounds.empty())) return reject(__LINE__);
     size_t expected=1;
     if (picture.scrollbar>=0) {
       const auto& bar=scene.scrollbars[picture.scrollbar]; expected=bar.layouts.empty() ? 8 : bar.layouts.size();
@@ -257,53 +288,95 @@ struct Encoder {
   Writer writer;
   size_t pixels=0,tiles=0;
   std::vector<RasterKey> keys;
-  void Raster(Resources& resources,const sk_sp<SkData>& data,SkRect bounds) {
-    auto found=std::find_if(keys.begin(),keys.end(),[&](const auto& key){return key.data==data.get() && key.bounds==bounds;});
-    unsigned reference=found==keys.end() ? 0 : unsigned(found-keys.begin())+1; Number(writer,reference);
-    if (reference || !writer.valid) return;
-    auto picture=resources.Picture(data);
-    if (!picture || keys.size()>=4096) { std::puts("COMPOSITOR: wire raster source unavailable"); writer.valid=false; return; }
-    SkIRect extent; bounds.roundOut(&extent);
-    int width=extent.width(),height=extent.height(),x=extent.left(),y=extent.top();
-    size_t bytes=size_t(std::max(width,0))*std::max(height,0)*4;
-    RasterGrid grid(extent);
-    if (width<0 || height<0 || width>8192 || height>32768 || bytes>kPixelBudget-pixels || grid.Count()>4096-tiles) {
-      std::printf("COMPOSITOR: wire raster limit width=%d height=%d pixels=%zu tiles=%zu\n",width,height,pixels+bytes,tiles+grid.Count());
-      writer.valid=false; return;
-    }
-    pixels+=bytes; tiles+=grid.Count(); Fields(writer,x,y,width,height);
-    keys.push_back({data.get(),bounds});
-    // Rasterization never allocates a bitmap proportional to document height.
-    for (int row=grid.top;row<grid.bottom && writer.valid;++row) for (int column=grid.left;column<grid.right && writer.valid;++column) {
-      auto tile=grid.Extent(extent,column,row);
-      auto surface=SkSurfaces::Raster(SkImageInfo::MakeN32Premul(tile.width(),tile.height()));
-      if (!surface) { writer.valid=false; return; }
-      auto* canvas=surface->getCanvas(); canvas->clear(SK_ColorTRANSPARENT);
-      canvas->translate(-tile.left(),-tile.top()); canvas->drawPicture(picture);
-      SkPixmap bitmap; if (!surface->peekPixels(&bitmap)) { writer.valid=false; return; }
-      size_t raw_size=size_t(tile.width())*tile.height()*4;
-      if (bitmap.rowBytes()!=size_t(tile.width())*4) { writer.valid=false; return; }
-      uLongf compressed_size=compressBound(raw_size);
-      std::vector<uint8_t> compressed(compressed_size);
-      if (compress2(compressed.data(),&compressed_size,static_cast<const Bytef*>(bitmap.addr()),raw_size,Z_BEST_SPEED)!=Z_OK) {
-        writer.valid=false; return;
-      }
-      unsigned length=static_cast<unsigned>(compressed_size); Number(writer,length);
-      if (!writer.Reserve(length)) return;
-      writer.bytes.insert(writer.bytes.end(),compressed.begin(),compressed.begin()+length);
+  std::shared_ptr<const ScrollScene> source;
+  const ScrollScene* current=nullptr;
+  Resources resources;
+  size_t scene_index=0,picture_index=0,appearance_index=0;
+  bool finished=false;
+  sk_sp<SkPicture> raster_picture;
+  SkIRect extent;
+  std::optional<RasterGrid> grid;
+  int row=0,column=0;
+  base::TimeTicks raster_started;
+  int64_t load_us=0,raster_us=0,compress_us=0;
+
+  explicit Encoder(std::shared_ptr<const ScrollScene> scene):source(std::move(scene)) {
+    if (!source || source->reflows.size()>32 || source->pictures.empty() ||
+        !ScrollWireMemoryAvailable(8*1024*1024)) { writer.valid=false; return; }
+    unsigned magic=kMagic,version=kVersion,count=static_cast<unsigned>(source->reflows.size());
+    Fields(writer,magic,version,count);
+  }
+  void FinishAppearance() {
+    raster_picture.reset(); grid.reset();
+    const auto& picture=current->pictures[picture_index];
+    if (++appearance_index>=std::max(size_t(1),picture.appearances.size())) {
+      ++picture_index; appearance_index=0;
     }
   }
-  void Scene(const ScrollScene& source) {
-    ScrollScene metadata=source; Metadata(writer,metadata);
-    if (!writer.valid || !Validate(metadata,true)) { std::puts("COMPOSITOR: wire metadata unsupported"); writer.valid=false; return; }
-    Resources resources; if (!resources.Load(source)) { std::puts("COMPOSITOR: wire resources unavailable"); writer.valid=false; return; }
-    for (const auto& picture:source.pictures) {
-      unsigned count=static_cast<unsigned>(std::max(size_t(1),picture.appearances.size())); Number(writer,count);
-      for (unsigned index=0;index<count && writer.valid;++index) {
-        auto data=picture.appearances.empty() || !picture.appearances[index] ? picture.data : picture.appearances[index];
-        auto bounds=picture.appearance_bounds.empty() ? picture.bounds : picture.appearance_bounds[index];
-        Raster(resources,data,bounds);
+  void Step() {
+    if (!current) {
+      if (scene_index>source->reflows.size()) { finished=true; return; }
+      current=scene_index ? source->reflows[scene_index-1].get() : source.get();
+      if (!current || (scene_index && !current->reflows.empty())) { writer.valid=false; return; }
+      ScrollScene metadata=*current; Metadata(writer,metadata);
+      if (!writer.valid || !Validate(metadata,true) || !resources.Load(*current)) { writer.valid=false; return; }
+      picture_index=appearance_index=0;
+    }
+    if (picture_index>=current->pictures.size()) {
+      current=nullptr; resources={}; ++scene_index; return;
+    }
+    if (!raster_picture) {
+      const auto& item=current->pictures[picture_index];
+      if (item.gpu_token) { ++picture_index; return; }
+      if (!appearance_index) {
+        unsigned count=static_cast<unsigned>(std::max(size_t(1),item.appearances.size())); Number(writer,count);
       }
+      auto data=item.appearances.empty() || !item.appearances[appearance_index] ? item.data : item.appearances[appearance_index];
+      auto bounds=item.appearance_bounds.empty() ? item.bounds : item.appearance_bounds[appearance_index];
+      auto found=std::find_if(keys.begin(),keys.end(),[&](const auto& key){return key.data==data.get() && key.bounds==bounds;});
+      unsigned reference=found==keys.end() ? 0 : unsigned(found-keys.begin())+1; Number(writer,reference);
+      if (reference) { FinishAppearance(); return; }
+      if (!writer.valid || keys.size()>=4096) { writer.valid=false; return; }
+      raster_started=base::TimeTicks::Now();
+      raster_picture=resources.Picture(data);
+      load_us=(base::TimeTicks::Now()-raster_started).InMicroseconds(); raster_us=compress_us=0;
+      if (!raster_picture) { writer.valid=false; return; }
+      bounds.roundOut(&extent); grid.emplace(extent);
+      int width=extent.width(),height=extent.height(),x=extent.left(),y=extent.top();
+      size_t bytes=size_t(std::max(width,0))*std::max(height,0)*4;
+      if (width<0 || height<0 || width>8192 || height>32768 || bytes>kPixelBudget-pixels || grid->Count()>4096-tiles) {
+        writer.valid=false; return;
+      }
+      pixels+=bytes; tiles+=grid->Count(); Fields(writer,x,y,width,height); keys.push_back({data.get(),bounds});
+      row=grid->top; column=grid->left;
+      if (!grid->Count()) { FinishAppearance(); return; }
+    }
+    // Each task releases its tile bitmap and compression workspace before yielding.
+    auto started=base::TimeTicks::Now();
+    auto tile=grid->Extent(extent,column,row);
+    auto surface=SkSurfaces::Raster(SkImageInfo::MakeN32Premul(tile.width(),tile.height()));
+    if (!surface) { writer.valid=false; return; }
+    auto* canvas=surface->getCanvas(); canvas->clear(SK_ColorTRANSPARENT);
+    canvas->translate(-tile.left(),-tile.top()); canvas->drawPicture(raster_picture);
+    SkPixmap bitmap; if (!surface->peekPixels(&bitmap) || bitmap.rowBytes()!=size_t(tile.width())*4) { writer.valid=false; return; }
+    size_t raw_size=size_t(tile.width())*tile.height()*4;
+    uLongf compressed_size=compressBound(raw_size);
+    std::vector<uint8_t> compressed(compressed_size);
+    auto raster_ended=base::TimeTicks::Now(); raster_us+=(raster_ended-started).InMicroseconds();
+    if (compress2(compressed.data(),&compressed_size,static_cast<const Bytef*>(bitmap.addr()),raw_size,Z_BEST_SPEED)!=Z_OK) {
+      writer.valid=false; return;
+    }
+    compress_us+=(base::TimeTicks::Now()-raster_ended).InMicroseconds();
+    unsigned length=static_cast<unsigned>(compressed_size); Number(writer,length);
+    if (!writer.Reserve(length)) return;
+    writer.bytes.insert(writer.bytes.end(),compressed.begin(),compressed.begin()+length);
+    if (++column==grid->right) { column=grid->left; ++row; }
+    if (row==grid->bottom) {
+      if (load_us+raster_us+compress_us>10000)
+        std::printf("PERF: scroll_wire_picture width=%d height=%d load_us=%lld raster_us=%lld compress_us=%lld tiles=%u\n",
+            extent.width(),extent.height(),static_cast<long long>(load_us),static_cast<long long>(raster_us),
+            static_cast<long long>(compress_us),grid->Count());
+      FinishAppearance();
     }
   }
 };
@@ -343,6 +416,11 @@ struct Decoder {
     // All graph references are checked before any compositor operation can follow them.
     if (!reader.valid || !Validate(*scene)) { reader.valid=false; return {}; }
     for (auto& picture:scene->pictures) {
+      if (picture.gpu_token) {
+        picture.gpu_frame=AcquireGpuCanvasFrame(picture.gpu_token);
+        if (!picture.gpu_frame) { reader.valid=false; return {}; }
+        continue;
+      }
       unsigned count=0; Number(reader,count);
       size_t expected=picture.scrollbar<0 ? 1 : scene->scrollbars[picture.scrollbar].layouts.empty() ? 8 : scene->scrollbars[picture.scrollbar].layouts.size();
       if (!reader.valid || count!=expected || count>reader.records) { reader.valid=false; return {}; }
@@ -354,18 +432,27 @@ struct Decoder {
   }
 };
 }
-std::vector<uint8_t> EncodeScrollScene(const ScrollScene& source) {
-  if (!ScrollWireMemoryAvailable(8*1024*1024)) { std::puts("COMPOSITOR: wire heap headroom exhausted"); return {}; }
-  Encoder encoder;
-  unsigned magic=kMagic,version=kVersion,count=static_cast<unsigned>(source.reflows.size());
-  Fields(encoder.writer,magic,version,count);
-  if (count>32 || source.pictures.empty()) return {};
-  encoder.Scene(source);
-  for (const auto& scene:source.reflows) {
-    if (!scene || !scene->reflows.empty() || !encoder.writer.valid) return {};
-    encoder.Scene(*scene);
+struct ScrollWireEncoder::State { explicit State(std::shared_ptr<const ScrollScene> source):encoder(std::move(source)) {} Encoder encoder; };
+ScrollWireEncoder::ScrollWireEncoder(std::shared_ptr<const ScrollScene> source):state_(std::make_unique<State>(std::move(source))) {}
+ScrollWireEncoder::~ScrollWireEncoder()=default;
+bool ScrollWireEncoder::EncodeSlice(size_t maximum_steps) {
+  auto& encoder=state_->encoder;
+  const auto deadline=base::TimeTicks::Now()+base::Milliseconds(4);
+  for (size_t steps=0;steps<std::max(size_t(1),maximum_steps) && encoder.writer.valid && !encoder.finished;++steps) {
+    encoder.Step();
+    // A single Skia call or compression call remains indivisible.
+    if (base::TimeTicks::Now()>=deadline) break;
   }
-  return encoder.writer.valid ? std::move(encoder.writer.bytes) : std::vector<uint8_t>{};
+  return !encoder.writer.valid || encoder.finished;
+}
+std::vector<uint8_t> ScrollWireEncoder::TakeBytes() {
+  auto& encoder=state_->encoder;
+  return encoder.finished && encoder.writer.valid ? std::move(encoder.writer.bytes) : std::vector<uint8_t>{};
+}
+std::vector<uint8_t> EncodeScrollScene(const ScrollScene& source) {
+  ScrollWireEncoder encoder(std::make_shared<ScrollScene>(source));
+  while (!encoder.EncodeSlice()) {}
+  return encoder.TakeBytes();
 }
 std::shared_ptr<ScrollScene> DecodeScrollScene(const uint8_t* bytes,size_t size) {
   if (!bytes || size<12 || size>kScrollWireCapacity || !ScrollWireMemoryAvailable(size+16*1024*1024)) return {};
@@ -398,6 +485,32 @@ bool TestScrollWire() {
   picture.data=recorder.finishRecordingAsPicture()->serialize(); scene.pictures.push_back(picture);
   auto encoded=EncodeScrollScene(scene); auto decoded=DecodeScrollScene(encoded.data(),encoded.size());
   if (!decoded || decoded->pictures.size()!=1 || decoded->pictures[0].raster_appearances.size()!=1) return false;
+  {
+    // Small work budgets must produce the same complete message and never expose a prefix.
+    auto immutable=std::make_shared<ScrollScene>(scene);
+    {
+      ScrollWireEncoder incremental(immutable);
+      if (!incremental.TakeBytes().empty()) return false;
+      unsigned slices=0;
+      while (!incremental.EncodeSlice(1)) if (++slices>100) return false;
+      if (!slices || incremental.TakeBytes()!=encoded) return false;
+    }
+    // Cancelling a partially encoded multi-tile scene must release its retained ownership.
+    immutable->pictures[0].bounds=SkRect::MakeWH(1024,1024);
+    std::weak_ptr<const ScrollScene> released=immutable;
+    {
+      ScrollWireEncoder cancelled(immutable); immutable.reset();
+      if (cancelled.EncodeSlice(1) || !cancelled.TakeBytes().empty()) return false;
+    }
+    if (!released.expired()) return false;
+  }
+  {
+    // A renderer cannot turn an arbitrary transport identifier into an imported image.
+    auto forged=scene;
+    forged.pictures[0].gpu_token=UINT64_MAX;
+    auto message=EncodeScrollScene(forged);
+    if (message.empty() || DecodeScrollScene(message.data(),message.size())) return false;
+  }
   // Truncation and structural mutations exercise the same decoder used by publications.
   for (size_t size=0;size<encoded.size();++size) if (DecodeScrollScene(encoded.data(),size)) return false;
   for (size_t offset:{size_t(0),size_t(4),size_t(8),size_t(12),size_t(20),size_t(28)}) {
@@ -419,6 +532,65 @@ bool TestScrollWire() {
   auto image=DecodeScrollTile(*decoded->pictures[0].raster_appearances[0],0,0);
   if (!image || image->width()!=64 || image->height()!=164) return false;
   auto trailing=encoded; trailing.push_back(0); if (DecodeScrollScene(trailing.data(),trailing.size())) return false;
+  // Every affine coefficient crosses the privilege boundary as untrusted float bits.
+  for (size_t offset=28;offset<=48;offset+=4) for (uint32_t bits:{0x7fc00000u,0x7f800000u,0xff800000u,0x7f7fffffu}) {
+    auto damaged=encoded;
+    for (unsigned shift=0;shift<32;shift+=8) damaged[offset+shift/8]=bits>>shift;
+    if (DecodeScrollScene(damaged.data(),damaged.size())) return false;
+  }
+  auto& affine=scene.transforms[0];
+  affine.scale_x=-1.25f; affine.skew_x=.25f; affine.skew_y=.5f; affine.scale_y=.75f;
+  encoded=EncodeScrollScene(scene); decoded=DecodeScrollScene(encoded.data(),encoded.size());
+  if (!decoded || decoded->transforms[0].scale_x!=-1.25f || decoded->transforms[0].skew_x!=.25f ||
+      decoded->transforms[0].skew_y!=.5f || decoded->transforms[0].scale_y!=.75f) return false;
+  affine.scale_x=affine.scale_y=affine.skew_x=affine.skew_y=0;
+  encoded=EncodeScrollScene(scene);
+  if (!DecodeScrollScene(encoded.data(),encoded.size())) return false;
+  affine.scale_x=10; affine.scale_y=1;
+  ScrollTransform child; child.parent=0; child.scale_x=10; scene.transforms.push_back(child);
+  scene.pictures[0].transform=1;
+  encoded=EncodeScrollScene(scene);
+  if (!DecodeScrollScene(encoded.data(),encoded.size())) return false;
+  uint32_t scale_bits; float large_scale=1000000; std::memcpy(&scale_bits,&large_scale,4);
+  for (unsigned shift=0;shift<32;shift+=8) encoded[36+shift/8]=scale_bits>>shift;
+  if (DecodeScrollScene(encoded.data(),encoded.size())) return false;
+  scene.transforms[0].scale_x=1; scene.transforms[1].scale_x=1;
+  ScrollEffect effect; effect.transform=0;
+  ScrollFilter blur; blur.kind=ScrollFilterKind::Blur; blur.amount=6;
+  effect.filters.push_back(blur); scene.effects.push_back(effect); scene.pictures[0].effect=0;
+  encoded=EncodeScrollScene(scene); decoded=DecodeScrollScene(encoded.data(),encoded.size());
+  if (!decoded || decoded->effects.size()!=1 || decoded->effects[0].filters.size()!=1 ||
+      decoded->effects[0].filters[0].kind!=ScrollFilterKind::Blur || decoded->effects[0].filters[0].amount!=6) return false;
+  Reader filter_locator{true,encoded.data(),encoded.size()}; filter_locator.position=12;
+  ScrollScene prefix;
+  Fields(filter_locator,prefix.wheel_listeners,prefix.wheel_blocked);
+  Items(filter_locator,prefix.transforms); Items(filter_locator,prefix.clips);
+  // The first filter follows the effect count, four scalar fields and its filter count.
+  size_t filter_start=filter_locator.position+24;
+  for (auto [offset,bits]:std::initializer_list<std::pair<size_t,uint32_t>>{
+      {filter_start-4,17}, {filter_start,11}, {filter_start+4,0xbf800000u},
+      {filter_start+4,0x7fc00000u}, {filter_start+4,0x7f800000u},
+      {filter_start+4,0x43010000u}, {filter_start+8,0x80000000u},
+      {filter_start+12,4097}, {filter_start+16,4}, {filter_start+20,0x7f800000u},
+      {filter_start+32,0x40000000u}, {filter_start+36,0x7fc00000u}}) {
+    auto damaged=encoded;
+    for (unsigned shift=0;shift<32;shift+=8) damaged[offset+shift/8]=bits>>shift;
+    if (DecodeScrollScene(damaged.data(),damaged.size())) return false;
+  }
+  // Valid per-node filter counts must still respect the ancestor-chain work limit.
+  scene.effects[0].filters.assign(16,blur);
+  auto child_effect=scene.effects[0]; child_effect.parent=0; scene.effects.push_back(child_effect);
+  child_effect.parent=0; child_effect.filters.assign(1,blur); scene.effects.push_back(child_effect);
+  scene.pictures[0].effect=2;
+  encoded=EncodeScrollScene(scene);
+  if (!DecodeScrollScene(encoded.data(),encoded.size())) return false;
+  Reader chain_locator{true,encoded.data(),encoded.size()}; chain_locator.position=filter_locator.position;
+  unsigned effect_count=0; Number(chain_locator,effect_count);
+  ScrollEffect skipped; Item(chain_locator,skipped); Item(chain_locator,skipped);
+  size_t parent_offset=chain_locator.position;
+  if (!chain_locator.valid || effect_count!=3 || parent_offset+4>encoded.size()) return false;
+  encoded[parent_offset]=1;
+  if (DecodeScrollScene(encoded.data(),encoded.size())) return false;
   return true;
 }
 }

@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>HTTP configured timeout</title>
+<h1>HTTP configured timeout</h1><pre id="result">Running</pre>
+<script>
+(async()=>{
+  let checks=0;
+  for(const stage of ['headers','body']){
+    const start=performance.now();
+    console.log('TRANSPORT IDLE START '+stage);
+    const response=await fetch('/response-policy/delayed?stage='+stage);
+    if(await response.text()!=='complete delayed response')throw Error('body mismatch '+stage);
+    if(performance.now()-start<5800)throw Error('fixture did not delay '+stage);
+    checks++;console.log('TRANSPORT IDLE CHECK '+stage+' ms='+Math.round(performance.now()-start));
+  }
+  let rejected=false;const start=performance.now();
+  try{await fetch('/response-policy/delayed?stage=headers&expire=1')}catch{rejected=true}
+  const elapsed=performance.now()-start;
+  if(!rejected || elapsed<9000 || elapsed>15000)throw Error('configured timeout not enforced '+elapsed);
+  checks++;console.log('TRANSPORT IDLE CHECK timeout ms='+Math.round(elapsed));
+  if((await fetch('/response-policy/resource')).status!==200)throw Error('recovery request');
+  checks++;result.textContent='PASS '+checks;console.log('TRANSPORT IDLE PASS checks='+checks);
+})().catch(error=>{result.textContent=error.stack;console.log('TRANSPORT IDLE FAILURE '+error.message)});
+</script>

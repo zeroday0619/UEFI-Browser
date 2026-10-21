@@ -1,0 +1,34 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Shared paint snapshot</title>
+<style>
+body { margin: 0; min-height: 2400px; font: 18px sans-serif; background: linear-gradient(#e8efff, #ffefd8); }
+#change { position: fixed; left: 16px; top: 12px; z-index: 10; width: 160px; height: 40px; }
+.label { position: absolute; left: 210px; top: 20px; }
+.group { position: absolute; top: 95px; left: 40px; width: 330px; height: 180px; opacity: .6; }
+.group div { position: absolute; width: 210px; height: 130px; background: #f02040; }
+.group div + div { left: 110px; top: 50px; background: #1040f0; }
+.rotated { position: absolute; left: 460px; top: 120px; width: 180px; height: 100px; background: #f0b030; transform: rotate(17deg) scale(.9); }
+.clipped { position: absolute; left: 770px; top: 95px; width: 220px; height: 180px; background: repeating-linear-gradient(30deg, #315 0 20px, #3d9 20px 40px); clip-path: polygon(0 0, 100% 25%, 75% 100%, 10% 80%); }
+.blur { position: absolute; left: 1050px; top: 110px; width: 130px; height: 140px; background: #2266cc; filter: blur(13px); }
+.edge { position: fixed; right: -30px; top: 410px; width: 24px; height: 80px; background: #ff2040; box-shadow: -24px 0 18px #ff2040; }
+.masked { position: absolute; left: 40px; top: 330px; width: 250px; height: 180px; background: #08a090; mask-image: linear-gradient(90deg, #000, transparent); }
+svg { position: absolute; left: 340px; top: 335px; }
+iframe { position: absolute; left: 700px; top: 335px; width: 480px; height: 240px; border: 4px solid #123; }
+.sticky { position: sticky; top: 55px; margin-top: 620px; height: 55px; background: #6533a0; color: white; }
+.distant { position: absolute; left: 50px; top: 950px; width: 1100px; height: 240px; background: #48b080; border-radius: 70px; box-shadow: 30px 30px 25px #235; }
+.changed .rotated { transform: rotate(-11deg) scale(1.2); background: #22cc88; }
+.changed .group { opacity: .35; }
+.changed .blur { background: #bb1199; }
+</style>
+<button id="change">Change snapshot</button><span class="label">Opacity, transforms, clips, filters, masks, SVG and iframe</span>
+<div class="group"><div></div><div></div></div><div class="rotated">Transformed text</div>
+<div class="clipped"></div><div class="blur"></div><div class="edge"></div><div class="masked"></div>
+<svg width="280" height="180" viewBox="0 0 280 180"><defs><linearGradient id="gradient"><stop stop-color="#f80"/><stop offset="1" stop-color="#13b"/></linearGradient></defs><path d="M10 150 Q80 -50 150 130 T270 20 L270 170 L10 170Z" fill="url(#gradient)" stroke="#142" stroke-width="8"/></svg>
+<iframe srcdoc="<style>body{margin:0;font:22px sans-serif;height:700px;background:linear-gradient(#cde,#eac)}.fixed{position:fixed;top:14px;left:14px;background:#fff;padding:10px}.box{margin:100px 40px;width:260px;height:120px;background:#5a7;transform:rotate(8deg)}</style><div class=fixed>Local iframe</div><div class=box>Nested transformed content</div>"></iframe>
+<div class="sticky">Sticky content after root scrolling</div><div class="distant">Offscreen rounded content and shadow</div>
+<script>
+document.querySelector('#change').onclick = () => { document.body.classList.toggle('changed'); console.log('PAINT SNAPSHOT CHANGED'); };
+addEventListener('scroll', () => console.log('PAINT SNAPSHOT SCROLL ' + scrollY));
+addEventListener('load', () => console.log('PAINT SNAPSHOT READY'));
+</script>

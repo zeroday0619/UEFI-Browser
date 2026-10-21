@@ -19,7 +19,7 @@ The default browser build enters the real Blink/V8 payload at CPL3. DOM, JavaScr
 | Faults and termination | Exceptions and NMI use separate supervisor IST stacks. Fault records include vector, error, RIP, CS and CR2. Recovery restores firmware state, waits for AP completion, releases grants and starts a new renderer. Invalid user RSP does not supply the exception stack. |
 | Startup | A missing AP or unsupported CPU/firmware configuration fails closed. The default build does not substitute a privileged local renderer. |
 
-The numeric ABI is defined in `runtime/renderer_sandbox.h`. Its operations are ABI query, validated TLS change, user-page permission query, exit, owned-page mapping, owned-range protection and firmware broker dispatch. Unknown operations return `-ENOSYS`; invalid broker argument arrays return `-EFAULT`.
+The numeric ABI is defined in `runtime/renderer_sandbox.h`. Its operations are ABI query, validated TLS change, user-page permission query, exit, owned-page mapping, owned-range protection, firmware broker dispatch and nested JIT write scopes. Unknown operations return `-ENOSYS`; invalid broker argument arrays return `-EFAULT`.
 
 The implementation follows the paging, privilege, TSS, interrupt-gate and interrupt-return mechanisms described in the [Intel software developer manuals](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html), volume 3A. It uses an interrupt gate rather than the `syscall` instruction; the EFI payload still has no dependency on a host OS syscall ABI.
 
@@ -59,7 +59,7 @@ python3 tests/state-suite.py --workers 1 --build-directory build/cpl3-probe \
 ## Scope and remaining work
 
 - Tabs and workers share one renderer. A compromised renderer can access its other documents and the profile services granted to that renderer. There is no per-origin native process or file-service isolation.
-- The current V8 non-PKU JIT requests RWX arena pages. Those pages are restricted to renderer-owned backing, but W^X, JIT write scopes and alias-wide executable/write exclusion are not implemented. Static ELF code remains read-only and initial stacks remain NX.
+- V8 JIT mappings now use supervisor-owned write scopes and alias-wide write/execute exclusion. Executable pages are RX outside a scope and writable NX inside it. Physical backing stays NX and is read-only while its code can execute. See [JIT implementation and newer QEMU evidence](JIT-WX.md). Native renderer code can request legitimate scope transitions; this is not compiler authentication or control-flow integrity. Static ELF code remains read-only and initial stacks remain NX.
 - Cached asynchronous scrolling now uses a bounded pixel-tile wire protocol. See [scroll transport verification](SCROLL-WIRE.md) for the newer implementation and its separate image hashes. DOM event handlers and uncached content still wait for renderer work.
 - Page-table storage is bounded to 2,048 pages per renderer. Empty tables are reclaimed when the renderer exits, not during its lifetime. Broker allocations retain the existing 2 GiB/16,384-entry limit.
 - Firmware, BSP parsers, broker implementations, DMA devices and the CPU remain trusted. No IOMMU policy, speculative side-channel defense, SMEP/SMAP policy, per-site isolation, independent security audit or physical-hardware validation is claimed.

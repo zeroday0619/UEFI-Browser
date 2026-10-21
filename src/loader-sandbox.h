@@ -1,5 +1,6 @@
 /* Supervisor state is linked into the loader rather than either payload mapping. */
 #include "renderer_sandbox.h"
+#include "x86_page_cache.h"
 #define RENDERER_ADDRESS_MASK 0x000ffffffffff000ULL
 #define RENDERER_NX (1ULL<<63)
 struct RendererTask {
@@ -60,7 +61,7 @@ static int renderer_user_map(uint64_t address,uint64_t physical,size_t pages,uin
   }
   return 1;
 }
-struct RendererGrant { uint64_t address,size; unsigned permissions; };
+struct RendererGrant { uint64_t address,size; unsigned permissions,may_have_aliases; };
 static struct RendererGrant renderer_grants[16384];
 static size_t renderer_grant_count;
 static struct RendererGrant *renderer_find_grant(uint64_t address,uint64_t size) {
@@ -73,7 +74,8 @@ static struct RendererGrant *renderer_find_grant(uint64_t address,uint64_t size)
 }
 static int renderer_granted_buffer(uint64_t address,size_t size,unsigned writable) {
   struct RendererGrant *grant=renderer_find_grant(address,size);
-  return grant && (!writable || (grant->permissions&2));
+  return grant && (!writable || (grant->permissions&2)) &&
+      renderer_user_buffer(address, size, writable);
 }
 static uint64_t *renderer_existing_leaf(uint64_t address) {
   uint64_t *table=renderer.root;
@@ -84,6 +86,7 @@ static uint64_t *renderer_existing_leaf(uint64_t address) {
   }
   return table+((address>>12)&511);
 }
+#include "loader-jit.h"
 static void renderer_revoke_aliases(uint64_t *table,unsigned level,uint64_t address,uint64_t size) {
   for (size_t index=0;index<512;++index) {
     uint64_t entry=table[index];
@@ -94,46 +97,91 @@ static void renderer_revoke_aliases(uint64_t *table,unsigned level,uint64_t addr
 }
 static int UEFI_API renderer_grant(uint64_t address,size_t size,unsigned permissions) {
   if (!permissions && !renderer.event) return 1;
-  if (!renderer.root || !size || ((address|size)&4095) || size>UINT64_MAX-address || permissions>3) return 0;
+  if (!renderer.root || !size || ((address|size)&4095) || size>UINT64_MAX-address || (permissions&~59u) || ((permissions&8) && (!(permissions&1) || !(permissions>>4))) || (!(permissions&8) && (permissions>>4))) return 0;
   if (!permissions) {
     struct RendererGrant *grant=renderer_find_grant(address,size);
     if (!grant || grant->address!=address || grant->size!=size) return 0;
     for (size_t offset=0;offset<size;offset+=4096) {
       uint64_t *entry=renderer_existing_leaf(address+offset);
       if (!entry) return 0;
-      *entry=(address+offset)|3|RENDERER_NX;
+      *entry=(address+offset)|(*entry&0x98ULL)|3|RENDERER_NX;
     }
-    if (renderer.root[128]&1) renderer_revoke_aliases((void*)(renderer.root[128]&RENDERER_ADDRESS_MASK),3,address,size);
+    if (__atomic_load_n(&grant->may_have_aliases,__ATOMIC_ACQUIRE) && (renderer.root[128]&1))
+      renderer_revoke_aliases((void*)(renderer.root[128]&RENDERER_ADDRESS_MASK),3,address,size);
     *grant=renderer_grants[--renderer_grant_count];
     return 1;
   }
   if (renderer_grant_count==16384 || renderer_find_grant(address,size)) return 0;
-  if (!renderer_user_map(address,address,size/4096,RENDERER_NX|(permissions&2))) {
+  /* An identity grant can cross each page-table level's boundary. */
+  if (!renderer_reserve_tables(6+(size>>21)+(size>>30)+(size>>39))) return 0;
+  uint64_t cache_flags=0;
+  if (permissions&8) {
+    uint32_t low,high;
+    __asm__ volatile("rdmsr" : "=a"(low),"=d"(high) : "c"(0x277));
+    if (!x86_device_page_cache(((uint64_t)high<<32)|low,permissions>>4,&cache_flags)) return 0;
+  }
+  if (!renderer_user_map(address,address,size/4096,RENDERER_NX|(permissions&2)|cache_flags)) {
     /* A failed grant cannot leave user aliases to pages returned to firmware. */
     for (size_t offset=0;offset<size;offset+=4096) {
       uint64_t *entry=renderer_existing_leaf(address+offset);
-      if (entry && (*entry&RENDERER_ADDRESS_MASK)==address+offset) *entry=(address+offset)|3|RENDERER_NX;
+      if (entry && (*entry&RENDERER_ADDRESS_MASK)==address+offset) *entry=(address+offset)|(*entry&0x98ULL)|3|RENDERER_NX;
     }
     return 0;
   }
-  renderer_grants[renderer_grant_count++]=(struct RendererGrant){address,size,permissions};
+  renderer_grants[renderer_grant_count++]=(struct RendererGrant){address,size,permissions,0};
   return 1;
 }
-/* V8's non-PKU JIT requests RWX pages; these grants remain confined to renderer-owned backing. */
+/* Executable arena pages use supervisor-managed, alias-wide JIT permissions. */
 static int renderer_map_owned(uint64_t address,uint64_t physical,uint64_t flags) {
   if (address<(128ULL<<39) || address>=(129ULL<<39) || (address&4095)) return -1;
   uint64_t *entry=renderer_existing_leaf(address);
-  if (!physical) { if (entry) *entry=0; return 0; }
+  uint64_t previous=entry ? *entry&RENDERER_ADDRESS_MASK : 0;
+  if (!physical) {
+    if (entry) *entry=0;
+    if (previous) renderer_jit_release(previous);
+    return 0;
+  }
   struct RendererGrant *grant=renderer_find_grant(physical,4096);
-  if (!grant || (physical&4095) || (flags&~(RENDERER_NX|3ULL)) ||
+  if (!grant || (grant->permissions&8) || (physical&4095) || (flags&~(RENDERER_NX|3ULL)) ||
       ((flags&2) && !(grant->permissions&2))) return -1;
-  if (!renderer_user_map(address,physical,1,flags)) return -1;
+  uint64_t *identity=renderer_existing_leaf(physical);
+  if (!identity) return -1;
+  int executable=(flags&1) && !(flags&RENDERER_NX);
+  if (executable && !(grant->permissions&2)) return -1;
+  /* A monotonic supervisor marker avoids scanning the arena for identity-only heaps.
+     Set it before publication or a BSP reserve wait and retain it after unmap or failure. */
+  __atomic_store_n(&grant->may_have_aliases,1,__ATOMIC_RELEASE);
+  if (renderer.page_table_capacity-renderer.page_table_count<3) {
+    /* The AP waits while the BSP replenishes supervisor-only table backing. */
+    RendererRuntimeChannel *channel=renderer.bootstrap.channel;
+    channel->operation=RENDERER_TABLE_RESERVE;
+    for (size_t index=0; index<5; ++index) channel->arguments[index]=0;
+    __atomic_store_n(&channel->pending,1,__ATOMIC_RELEASE);
+    while (__atomic_load_n(&channel->pending,__ATOMIC_ACQUIRE)) __asm__ volatile("pause");
+    if (!channel->result || renderer.page_table_capacity-renderer.page_table_count<3) return -12;
+  }
+  if (executable || (*identity&RENDERER_JIT_PAGE)) {
+    if (!(*identity&RENDERER_JIT_PAGE) && (renderer.root[128]&1))
+      renderer_jit_visit((void*)(renderer.root[128]&RENDERER_ADDRESS_MASK),3,physical,1);
+    flags=renderer_jit_tag(flags);
+    *identity=(*identity&~2ULL)|RENDERER_NX|RENDERER_JIT_PAGE;
+    if (renderer_jit_writable) *identity|=2;
+  }
+  if (!renderer_user_map(address,physical,1,flags)) return -12;
+  if (flags&RENDERER_JIT_PAGE) renderer_jit_mark_path(address);
   entry=renderer_existing_leaf(address);
   if (!(flags&1)) *entry&=~1ULL;
+  if (previous && previous!=physical) renderer_jit_release(previous);
   return 0;
 }
 static int renderer_sandbox_prepare(void) {
   renderer_grant_count=0;
+  renderer_jit_index_reset();
+  renderer_jit_writable=0;
+  for (size_t index=0;index<64;++index) {
+    renderer_jit_threads[index].thread=0;
+    renderer_jit_threads[index].depth=0;
+  }
   /* The child owns its sparse arena independently of the BSP reservation tree. */
   renderer.root[128]=0;
   /* All inherited mappings lose user access before any explicit grants are installed. */
@@ -158,6 +206,8 @@ static int renderer_sandbox_prepare(void) {
   *user=renderer.bootstrap;
   user->sandbox=1;
   user->channel=0;
+  user->reserve_tables=0;
+  user->media=0;
   const RendererRuntimeChannel *channel=renderer.bootstrap.channel;
   user->application=channel->application;
   if (channel->application && (!channel->application_size ||
@@ -204,6 +254,12 @@ void UEFI_API renderer_system_dispatch(uint64_t *frame) {
   uint64_t operation=frame[14],first=frame[9];
   uint64_t result=(uint64_t)-38;
   if ((frame[16]&3)!=3) { frame[14]=(uint64_t)-1; return; }
+  /* The fixed-memory decoder service has no firmware, allocation or JIT authority. */
+  if (renderer.bootstrap.renderer == 2 && operation != RENDERER_SYSTEM_ABI &&
+      operation != RENDERER_SYSTEM_EXIT && operation != RENDERER_SYSTEM_PERMISSIONS) {
+    frame[14]=(uint64_t)-1;
+    return;
+  }
   switch (operation) {
     case RENDERER_SYSTEM_ABI: result=1; break;
     case RENDERER_SYSTEM_THREAD: {
@@ -212,6 +268,8 @@ void UEFI_API renderer_system_dispatch(uint64_t *frame) {
       result=((uint64_t)high<<32)|low;
       if (first) {
         if (!renderer_user_buffer(first,4096,1)) { result=(uint64_t)-14; break; }
+        if (renderer_jit_select(renderer_jit_depth(first)!=0))
+          __asm__ volatile("mov %0,%%cr3" :: "r"((uintptr_t)renderer.root) : "memory");
         __asm__ volatile("wrmsr" :: "a"((uint32_t)first),"d"((uint32_t)(first>>32)),"c"(0xc0000100u) : "memory");
       }
       break;
@@ -220,6 +278,14 @@ void UEFI_API renderer_system_dispatch(uint64_t *frame) {
       result=renderer_permissions(first);
       if (!(result&4)) result=0;
       break;
+    case RENDERER_SYSTEM_JIT_SCOPE: {
+      unsigned previous=renderer_jit_writable;
+      result=renderer_jit_scope(first);
+      /* Nested scopes change depth without modifying any page-table permission. */
+      if (previous!=renderer_jit_writable)
+        __asm__ volatile("mov %0,%%cr3" :: "r"((uintptr_t)renderer.root) : "memory");
+      break;
+    }
     case RENDERER_SYSTEM_MAP:
       result=renderer_map_owned(first,frame[10],frame[11]);
       __asm__ volatile("mov %0,%%cr3" :: "r"((uintptr_t)renderer.root) : "memory");
@@ -229,13 +295,19 @@ void UEFI_API renderer_system_dispatch(uint64_t *frame) {
       struct RendererGrant *grant=renderer_find_grant(first,size);
       int private_data=first>=renderer.bootstrap.data_start && first<renderer.bootstrap.data_end &&
           size<=((renderer.bootstrap.data_end+4095)&~4095ULL)-first;
-      if (!size || ((first|size)&4095) || protection>7 || (protection&6)==6 ||
+      if (!size || ((first|size)&4095) || protection>7 || (protection&4) ||
           (!private_data && !grant) || ((protection&2) && grant && !(grant->permissions&2))) { result=(uint64_t)-1; break; }
       result=0;
       for (uint64_t offset=0;offset<size;offset+=4096) {
         uint64_t *entry=renderer_existing_leaf(first+offset);
+        if (!entry || ((*entry&RENDERER_JIT_PAGE) && (protection&2) &&
+                       !renderer_jit_writable)) { result=(uint64_t)-1; break; }
+      }
+      if (result) break;
+      for (uint64_t offset=0;offset<size;offset+=4096) {
+        uint64_t *entry=renderer_existing_leaf(first+offset);
         if (!entry) { result=(uint64_t)-1; break; }
-        *entry=(*entry&RENDERER_ADDRESS_MASK)|4|(protection?1:0)|((protection&2)?2:0)|((protection&4)?0:RENDERER_NX);
+        *entry=(*entry&(RENDERER_ADDRESS_MASK|RENDERER_JIT_PAGE|0x98ULL))|4|(protection?1:0)|((protection&2)?2:0)|RENDERER_NX;
       }
       __asm__ volatile("mov %0,%%cr3" :: "r"((uintptr_t)renderer.root) : "memory");
       break;
